@@ -1,0 +1,10 @@
+# Build output
+bin/
+obj/
+*.user
+
+# Test scratch / captures
+tmp-test/
+nvimhome-*/
+*.hex
+__pycache__/
