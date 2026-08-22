@@ -11,9 +11,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Remove="NvimClient\**" />
-    <None Remove="NvimClient\**" />
-    <Compile Include="NvimClient\**" />
+    <ProjectReference Include="..\NvimCore\NvimCore.csproj" />
   </ItemGroup>
 
 </Project>
