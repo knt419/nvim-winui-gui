@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="nvim-winui-gui (PoC)" Width="1000" Height="700"
+        KeyDown="OnKeyDown">
+    <Window.Resources>
+        <SolidColorBrush x:Key="GridBgBrush" Color="#1E1E1E"/>
+        <SolidColorBrush x:Key="GridFgBrush" Color="#DCDCDC"/>
+        <Style TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, monospace"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Foreground" Value="{StaticResource GridFgBrush}"/>
+        </Style>
+    </Window.Resources>
+    <Grid Background="{StaticResource GridBgBrush}" Loaded="OnLoadedAsync">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <ScrollViewer x:Name="GridHost" Grid.Row="1" Padding="8,6" Focusable="True">
+            <UniformGrid x:Name="GlyphGrid" Rows="0" Columns="0"/>
+        </ScrollViewer>
+
+        <TextBlock x:Name="StatusText" Grid.Row="2" Margin="6,3" FontSize="12"
+                   Foreground="{StaticResource GridFgBrush}" Background="#2D2D2D"/>
+    </Grid>
+</Window>

@@ -6,12 +6,37 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWindowsAppSDK>true</UseWindowsAppSDK>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.5.240627003" />
-    <ApplicationIcon></ApplicationIcon>
+    <!-- Zip-SDK workaround: MrtCore.PriGen.targets would otherwise auto-set 7 win10-* RIDs that this SDK's RID graph rejects (NETSDK1083). -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+
+    <!-- Pure-C# UI: no XAML items anywhere, so MarkupCompilePass1 is skipped entirely. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <WindowsPackageType>None</WindowsPackageType>
+    <!-- This box's net472 XamlCompiler.exe dies silently; force the in-proc MSBuild CompileXaml task instead. -->
+    <UseXamlCompilerExecutable>false</UseXamlCompilerExecutable>
+    <!-- Zip-SDK workaround (runtime): MddBootstrap cannot detect the installed WindowsAppRuntime 1.5 on this box and aborts startup with an install dialog. Self-contained deployment mode bundles the runtime next to the exe so no installed package is required. -->
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!-- Self-contained mode rejects AnyCPU; pin the x64 platform/runtime. -->
+    <Platform>x64</Platform>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseAppHost>true</UseAppHost>
+
+    <!-- Zip-SDK workaround: MrtCore's PRI tooling chain (MrtCore.PriGen.targets) calls MSBuild tasks whose DLLs are absent from this zip SDK (MSB4062). No XAML/PRI resources exist, so opt out of the whole chain. -->
+    <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.5.240627003" />
     <ProjectReference Include="..\NvimCore\NvimCore.csproj" />
   </ItemGroup>
 
+
+  <ItemGroup>
+    <!-- Only the pure-C# partials are compiled; legacy XAML-era sources stay on disk, excluded. -->
+    <Compile Include="Program.cs" />
+    <Compile Include="App.cs" />
+    <Compile Include="MainWindow.cs" />
+    <Compile Include="MainWindow.notify.cs" />
+    <Compile Include="MainWindow.render.cs" />
+  </ItemGroup>
 </Project>

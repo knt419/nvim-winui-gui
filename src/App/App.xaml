@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Application xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             RequestedTheme="Light">
+    <Application.Resources>
+        <ResourceDictionary>
+            <SolidColorBrush x:Key="GridBgBrush" Color="#1E1E1E"/>
+            <SolidColorBrush x:Key="GridFgBrush" Color="#DCDCDC"/>
+            <FontFamily x:Key="MonoFont">Consolas, Cascadia Mono, Courier New</FontFamily>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

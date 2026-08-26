@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 
@@ -75,6 +75,21 @@ public static class MsgPackEncoder
                 {
                     WriteArrayHeader(ms, (uint)list.Count);
                     foreach (var x in list) WriteValue(ms, x);
+                    break;
+                }
+            case MsgpackStreamDecoder.MsgpackExt ext:
+                {
+                    // Round-trip typed API handles (Buffer/Window/Tabpage).
+                    int len = ext.Data.Length;
+                    if (len == 1) ms.WriteByte(0xD4);
+                    else if (len == 2) ms.WriteByte(0xD5);
+                    else if (len == 4) ms.WriteByte(0xD6);
+                    else if (len == 8) ms.WriteByte(0xD7);
+                    else if (len == 16) ms.WriteByte(0xD8);
+                    else if (len <= 0xFF) { ms.WriteByte(0xC7); ms.WriteByte((byte)len); }
+                    else throw new NotSupportedException("ext too large for this encoder");
+                    ms.WriteByte(unchecked((byte)ext.TypeId));
+                    ms.Write(ext.Data, 0, len);
                     break;
                 }
             default:

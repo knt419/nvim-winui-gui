@@ -164,6 +164,14 @@ public sealed class MsgpackStreamDecoder
             case 0xDE: { ushort n16m = ReadBE16U(); return ReadMapEntries(n16m); }                 // map16
             case 0xDF: { uint n32m = ReadBE32U(); if (n32m > int.MaxValue) throw new NotSupportedException("map32 too large"); return ReadMapEntries((int)n32m); }   // map32
 
+            // Fixext forms — single-byte header, used by nvim for typed API handles
+            // (Buffer/Window/Tabpage returned from e.g. nvim_get_current_buf).
+            case 0xD4: return new MsgpackExt(ReadByte(), ReadRaw(1));   // fixext1
+            case 0xD5: return new MsgpackExt(ReadByte(), ReadRaw(2));   // fixext2
+            case 0xD6: return new MsgpackExt(ReadByte(), ReadRaw(4));   // fixext4
+            case 0xD7: return new MsgpackExt(ReadByte(), ReadRaw(8));   // fixext8
+            case 0xD8: return new MsgpackExt(ReadByte(), ReadRaw(16));  // fixext16
+
             default:
                 {
                     // Include cursor position + surrounding bytes so a desync is locatable in one run.
