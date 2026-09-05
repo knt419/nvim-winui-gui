@@ -30,6 +30,23 @@ public sealed class NvimClient : IDisposable
     private readonly ConcurrentDictionary<long, TaskCompletionSource<object?>> _pending = new();
     private int _nextId = 1;
     private bool _disposed;
+    private int _frameLogCount;
+    private int _notifSeq; // diagnostic: running count of notifications Dispatch has seen
+    private int _rxBytesTotal; // diagnostic: total bytes pulled off the socket by ReadLoop
+
+    // Diagnostic trace (file-based): every frame Dispatch sees + every CallAsync send.
+    private static readonly object _tlogLock = new();
+    private static void TLog(string s)
+    {
+        try
+        {
+            var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvimWinUIGui");
+            Directory.CreateDirectory(dir);
+            lock (_tlogLock) // AppendAllText is open-write-close per call; concurrent writers from the IO thread and UI thread interleave/lose lines without this.
+                File.AppendAllText(System.IO.Path.Combine(dir, "client_trace.log"), $"[{DateTime.Now:HH:mm:ss.fff}] {s}\n");
+        }
+        catch { /* diagnostics best effort */ }
+    }
 
     // Connection-loss latch: set once when the read loop ends. CallAsync awaits this alongside its
     // own TCS so a call registered AFTER the connection dies fails fast instead of hanging forever
@@ -80,6 +97,7 @@ public sealed class NvimClient : IDisposable
         try
         {
             byte[] frame = MsgPackEncoder.EncodeRequest((int)id, method, args);
+            TLog($"SEND id={id} method={method} hex={BitConverter.ToString(frame).Replace("-","").ToLowerInvariant()}");
             await SendFrameAsync(frame).ConfigureAwait(false);
 
             // Race the response against connection loss so we fail fast instead of hanging.
@@ -132,6 +150,13 @@ public sealed class NvimClient : IDisposable
 
                 _decoder.Append(buf, 0, n);
 
+                // Liveness probe: prove the read loop is still pulling bytes off the socket and how much.
+                {
+                    int total = Interlocked.Add(ref _rxBytesTotal, n);
+                    if (total <= 8192 || (total & 0x3FFFF) < n + (total & 0x3FFFF)) // first batch, then ~every 256KB
+                        TLog($"READLOOP alive total_rx_bytes={total} last_batch={n}");
+                }
+
                 // DEBUG: Log raw bytes received for diagnostics (file-based to avoid stdout truncation).
                 try {
                     if (Environment.GetEnvironmentVariable("NVIM_LOG_BYTES") == "1" && s_fileLog == null) {
@@ -152,12 +177,22 @@ public sealed class NvimClient : IDisposable
                 }
             }
         }
-        catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException or NotSupportedException)
+        catch (Exception ex)
         {
-            if (!_disposed)
+            // DIAGNOSTIC: previously only IOException/SocketException/etc were caught here, so any
+            // other exception (e.g. from Dispatch or the decoder) silently killed the reader task —
+            // pending calls then hung forever with no trace. Log EVERYTHING that ends the loop.
+            try
             {
-                Console.Error.WriteLine($"[NvimClient] read loop ended: {ex.Message}");
+                var dir = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvimWinUIGui");
+                System.IO.Directory.CreateDirectory(dir);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(dir, "startup.log"),
+                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] READLOOP EXCEPTION: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}\n");
             }
+            catch { /* diagnostics best effort */ }
+            if (ex is not IOException and not ObjectDisposedException and not SocketException and not NotSupportedException)
+                throw; // unexpected exception type: rethrow to surface via default handler too
         }
 
         // Connection lost: fail all pending calls so callers don't hang forever.
@@ -178,6 +213,7 @@ public sealed class NvimClient : IDisposable
             case MsgPackEncoder.TypeResponse: // [1, response_id:int, error|null, result]
                 {
                     if (rpc.Length < 2 || rpc[1] is not long rid) break;
+                    TLog($"RX resp id={rid} err={(rpc.Length >= 3 && rpc[2] != null ? "Y" : "n")}");
 
                     object? err = rpc.Length >= 3 ? rpc[2] : null!;
                     object? result = rpc.Length >= 4 ? rpc[3] : null!;
@@ -206,6 +242,8 @@ public sealed class NvimClient : IDisposable
                 {
                     object?[]? a = null!;
                     if (rpc.Length >= 3 && rpc[2] is object?[] arr) a = arr;
+                    int nseq = Interlocked.Increment(ref _notifSeq);
+                    TLog($"NOTIF #{nseq} method={mthod} inner={(a != null ? a.Length.ToString() : "null")}");
                     OnNotification?.Invoke(mthod, a);
                 }
                 break;

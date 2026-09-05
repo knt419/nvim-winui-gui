@@ -26,7 +26,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.5.240627003" />
+    <!-- Windows App SDK 2.x (latest stable line; was 1.5 before user directive). -->
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
     <ProjectReference Include="..\NvimCore\NvimCore.csproj" />
   </ItemGroup>
 

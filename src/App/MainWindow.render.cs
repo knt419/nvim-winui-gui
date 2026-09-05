@@ -19,6 +19,10 @@ public partial class MainWindow
 
     private int _screenRows, _screenCols;
     private bool _renderQueued;
+    // Fixed per-cell pixel size. Star (*) columns collapse to 0px inside a ScrollViewer (which
+    // measures its content with infinite width), so the grid must use fixed pixel sizes to be visible.
+    private const double CellW = 9;
+    private const double CellH = 18;
     private static readonly Color TransparentColor = default;
 
 private static string? MapKey(VirtualKey vk) => vk switch
@@ -87,9 +91,11 @@ private void EnsureScreen(int rows, int cols)
         _screenRows = rows;
         _screenCols = cols;
     }
+private int _schedCount;
 private void ScheduleRender()
-    {
-        if (_renderQueued) return;
+{
+    if (Interlocked.Increment(ref _schedCount) % 50 == 1) LogStartup($"SCHED render count={_schedCount}");
+    if (_renderQueued) return;
         _renderQueued = true;
         var ctx = _uiSyncCtx;
         if (ctx is not null && !ReferenceEquals(ctx, System.Threading.SynchronizationContext.Current))
@@ -102,10 +108,14 @@ private void RenderNow()
     {
         _renderQueued = false;
         int rows = _screenRows, cols = _screenCols;
-        while (GlyphGrid.RowDefinitions.Count < rows) GlyphGrid.RowDefinitions.Add(new RowDefinition());
+        // Fixed pixel cell sizes (NOT Star/Auto): GlyphGrid lives inside a ScrollViewer, which
+        // measures its content with infinite width/height. A Star (*) column under an infinite
+        // constraint resolves to 0px, so the whole grid collapsed invisibly. Pixel cells give the
+        // Grid a definite size that the ScrollViewer lays out and scrolls.
+        while (GlyphGrid.RowDefinitions.Count < rows) GlyphGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(CellH) });
         while (GlyphGrid.RowDefinitions.Count > rows) GlyphGrid.RowDefinitions.RemoveAt(GlyphGrid.RowDefinitions.Count - 1);
         while (GlyphGrid.ColumnDefinitions.Count < cols)
-            GlyphGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            GlyphGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(CellW) });
         while (GlyphGrid.ColumnDefinitions.Count > cols) GlyphGrid.ColumnDefinitions.RemoveAt(GlyphGrid.ColumnDefinitions.Count - 1);
         var children = GlyphGrid.Children;
         int total = rows * cols;
