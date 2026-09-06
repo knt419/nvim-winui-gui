@@ -9,8 +9,11 @@
     <!-- Zip-SDK workaround: MrtCore.PriGen.targets would otherwise auto-set 7 win10-* RIDs that this SDK's RID graph rejects (NETSDK1083). -->
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
 
-    <!-- Pure-C# UI: no XAML items anywhere, so MarkupCompilePass1 is skipped entirely. -->
+    <!-- Pure-C# UI: no XAML items anywhere, so MarkupCompilePass1 is skipped entirely.
+         EnableDefaultPageItems=false stops WindowsAppSDK from auto-globbing the legacy
+         on-disk .xaml files into Page/ApplicationDefinition items (WMC0011 errors). -->
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultPageItems>false</EnableDefaultPageItems>
     <WindowsPackageType>None</WindowsPackageType>
     <!-- This box's net472 XamlCompiler.exe dies silently; force the in-proc MSBuild CompileXaml task instead. -->
     <UseXamlCompilerExecutable>false</UseXamlCompilerExecutable>
