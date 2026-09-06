@@ -83,7 +83,8 @@ public partial class MainWindow : Window
         Closed += OnClosed;
     }
 
-    private sealed class Cell { public string Text = " "; public int Hl = -1; }
+    // R*/fields cache the LAST-RENDERED state so RenderNow can skip unchanged cells entirely.
+    private sealed class Cell { public string Text = " "; public int Hl = -1; public string RTxt = ""; public int RFg = -1; public int RBg = -1; }
     private readonly record struct Hl(Color Fg, Color Bg);
 
     private async void OnKeyDown(object sender, KeyRoutedEventArgs e)
@@ -93,6 +94,12 @@ public partial class MainWindow : Window
         if (kv != null)
         {
             e.Handled = true;
+            // Fire-and-forget: the async-void handler returns to the UI loop at the await, so a
+            // slow nvim reply can't stall key handling or rendering. Writes serialize on the
+            // client's write semaphore (order preserved); each local TCP round-trip is ~1 ms, so
+            // rapid typing just queues a few in-flight calls that drain quickly. No per-keystroke
+            // coalescing: merging repeats via <N>x<N> proved lossy/off-by-one when the first send
+            // had already landed (verified 2026-09-06).
             try { await _client.CallAsync("nvim_input", kv); }
             catch (Exception ex) { SetStatus($"input error: {ex.Message}"); }
         }

@@ -24,6 +24,14 @@ public partial class MainWindow
     private const double CellW = 9;
     private const double CellH = 18;
     private static readonly Color TransparentColor = default;
+    // Render-diff state: layout is only re-applied when the grid shape changes, and per-cell
+    // text/fg are compared against last-rendered values (RTxt/RFg on Cell) so unchanged cells
+    // produce zero XAML writes. Cursor cell background is diffed via _lastCurIdx. Brushes for
+    // colors are cached by packed ARGB value instead of allocating a SolidColorBrush per cell.
+    private readonly Dictionary<int, SolidColorBrush> _brushCache = new();
+    private int _layoutRows = 0, _layoutCols = 0;
+    private bool _layoutDone = false;
+    private int _lastCurIdx = -1;
 
 private static string? MapKey(VirtualKey vk) => vk switch
     {
@@ -105,47 +113,95 @@ private void ScheduleRender()
         RenderNow(); // fallback: run synchronously on current thread (safe for this PoC's non-blocking model)
     }
 private void RenderNow()
+{
+    _renderQueued = false;
+    int rows = _screenRows, cols = _screenCols;
+    if (rows <= 0 || cols <= 0) return;
+    // Fixed pixel cell sizes (NOT Star/Auto): GlyphGrid lives inside a ScrollViewer, which
+    // measures its content with infinite width/height. A Star (*) column under an infinite
+    // constraint resolves to 0px, so the whole grid collapsed invisibly. Pixel cells give the
+    // Grid a definite size that the ScrollViewer lays out and scrolls.
+    while (GlyphGrid.RowDefinitions.Count < rows) GlyphGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(CellH) });
+    while (GlyphGrid.RowDefinitions.Count > rows) GlyphGrid.RowDefinitions.RemoveAt(GlyphGrid.RowDefinitions.Count - 1);
+    while (GlyphGrid.ColumnDefinitions.Count < cols)
+        GlyphGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(CellW) });
+    while (GlyphGrid.ColumnDefinitions.Count > cols) GlyphGrid.ColumnDefinitions.RemoveAt(GlyphGrid.ColumnDefinitions.Count - 1);
+    var children = GlyphGrid.Children;
+    int total = rows * cols;
+    bool layoutDirty = _layoutCols != cols || _layoutRows != rows || _layoutDone == false;
+    while (children.Count > total) children.RemoveAt(children.Count - 1);
+
+    // DIFF-BASED render: walk the grid but only write XAML for cells whose text/foreground/
+    // background changed since last render (RTxt/RFg/RBg on Cell + _lastCurIdx). A keystroke
+    // mutates 1-2 cells, so this is O(total) comparisons with ~0 writes — vs the old full
+    // re-render that set Text and allocated a SolidColorBrush for every cell each frame.
+    var brushCache = _brushCache;
+    int curRow = _curRow, curCol = _curCol;
+    int curIdx = curRow >= 0 ? curRow * cols + Math.Clamp(curCol, 0, cols - 1) : -1;
+    for (int i = 0; i < total; i++)
     {
-        _renderQueued = false;
-        int rows = _screenRows, cols = _screenCols;
-        // Fixed pixel cell sizes (NOT Star/Auto): GlyphGrid lives inside a ScrollViewer, which
-        // measures its content with infinite width/height. A Star (*) column under an infinite
-        // constraint resolves to 0px, so the whole grid collapsed invisibly. Pixel cells give the
-        // Grid a definite size that the ScrollViewer lays out and scrolls.
-        while (GlyphGrid.RowDefinitions.Count < rows) GlyphGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(CellH) });
-        while (GlyphGrid.RowDefinitions.Count > rows) GlyphGrid.RowDefinitions.RemoveAt(GlyphGrid.RowDefinitions.Count - 1);
-        while (GlyphGrid.ColumnDefinitions.Count < cols)
-            GlyphGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(CellW) });
-        while (GlyphGrid.ColumnDefinitions.Count > cols) GlyphGrid.ColumnDefinitions.RemoveAt(GlyphGrid.ColumnDefinitions.Count - 1);
-        var children = GlyphGrid.Children;
-        int total = rows * cols;
-        while (children.Count > total) children.RemoveAt(children.Count - 1);
-        for (int i = 0; i < total; i++)
+        Border box;
+        if (i >= children.Count)
         {
-            Border box;
-            if (i >= children.Count)
-            {
-                var t = new TextBlock();
-                t.FontFamily = new FontFamily("Cascadia Mono, Consolas");
-                t.FontSize = 14;
-                box = new Border { Child = t };
-                children.Add(box);
-            }
-            else box = (Border)children[i];
-            var glyph = (TextBlock)box.Child;
-            int r = i / cols, c = i % cols;
-            Grid.SetRow(box, r);
-            Grid.SetColumn(box, c);
-            var cell = _cells[i];
-            bool isCur = r == _curRow && c == _curCol;
-            glyph.Text = cell.Text.Length > 0 ? cell.Text : " ";
-            Color fg = cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h) ? h.Fg : _defFg;
-            Color bg = cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h2) ? h2.Bg : TransparentColor;
-            if (isCur) { fg = _defBg; bg = _defFg; }
-            glyph.Foreground = new SolidColorBrush(fg);
-            box.Background = isCur ? new SolidColorBrush(bg) : null;
+            var t = new TextBlock();
+            t.FontFamily = new FontFamily("Cascadia Mono, Consolas");
+            t.FontSize = 14;
+            box = new Border { Child = t };
+            children.Add(box);
+        }
+        else box = (Border)children[i];
+        var glyph = (TextBlock)box.Child;
+
+        var cell = _cells[i];
+        int r = i / cols, c = i % cols;
+        if (layoutDirty) { Grid.SetRow(box, r); Grid.SetColumn(box, c); }
+
+        bool isCur = i == curIdx && curIdx >= 0;
+        Color fg, bg;
+        string txt = cell.Text.Length > 0 ? cell.Text : " ";
+        int bgi = -1; // packed background key for cursor/highlight cells only
+        if (isCur) { fg = _defBg; bg = _defFg; bgi = PackColor(bg); } // inverted cursor cell
+        else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h))
+        {
+            fg = h.Fg; bg = h.Bg; bgi = PackColor(bg);
+        }
+        else { fg = _defFg; bg = TransparentColor; }
+        int fgi = PackColor(fg);
+
+        if (!string.Equals(cell.RTxt, txt, StringComparison.Ordinal))
+        {
+            glyph.Text = txt;
+            cell.RTxt = txt;
+        }
+        if (cell.RFg != fgi)
+        {
+            glyph.Foreground = GetBrush(brushCache, fg);
+            cell.RFg = fgi;
+        }
+        if (cell.RBg != bgi || i == _lastCurIdx || i == curIdx) // cursor move: flip old/new cells only
+        {
+            box.Background = bgi >= 0 ? GetBrush(brushCache, bg) : null;
+            cell.RBg = bgi;
         }
     }
+    _layoutRows = rows; _layoutCols = cols; _layoutDone = true;
+    _lastCurIdx = curIdx;
+}
+
+private static SolidColorBrush GetBrush(Dictionary<int, SolidColorBrush> cache, Color c)
+{
+    int key = PackColor(c);
+    if (!cache.TryGetValue(key, out var b))
+    {
+        // Bounded cache: once full we stop adding entries and fall back to fresh brushes.
+        b = new SolidColorBrush(c);
+        if (cache.Count < 4096) cache[key] = b;
+    }
+    return b;
+}
+// WinAppSDK 2.x's Windows.UI.Color has no PackedValue property, so pack ARGB from the
+// component fields ourselves for brush-cache keys.
+private static int PackColor(Color c) => (c.A << 24) | (c.R << 16) | (c.G << 8) | c.B;
 private static int ToInt(object? v) => v switch
     {
         null => -1,
