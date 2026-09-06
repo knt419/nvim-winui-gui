@@ -48,6 +48,31 @@ public partial class MainWindow : Window
     private int _curRow = -1;
     private int _curCol = -1;
 
+    // Fonts applied from nvim's guifont/guifontwide. WinUI FontFamily has no width/weight
+    // parameters, so the "wide" flag is honored by looking for a matching *Wide* family name
+    // via GDI font enumeration (falls back to the base family if none exists).
+    private string _narrowFont = "Cascadia Mono, Consolas";
+    private double _narrowSize = 14;
+    private string _wideFont = "Cascadia Mono, Consolas";
+    private double _wideSize = 14;
+
+    // Parse an nvim guifont/guifontwide setting of the form "FontName:Style:Size" into
+    // family and size. Style/weight is ignored (WinUI FontFamily has no weight parameter);
+    // if Size is missing, default to 14. If the string is empty/null, use defaults.
+    private static void ParseNvimFont(string? setting, out string family, out double size)
+    {
+        if (setting == null || setting.Length == 0)
+        {
+            family = "Cascadia Mono, Consolas";
+            size = 14;
+            return;
+        }
+        var parts = setting.Split(':', StringSplitOptions.RemoveEmptyEntries);
+        family = parts[0].Trim();
+        size = 14;
+        if (parts.Length >= 3 && int.TryParse(parts[2], out int sz)) size = sz;
+    }
+
     public MainWindow()
     {
         Title = "nvim-winui-gui";
@@ -84,7 +109,7 @@ public partial class MainWindow : Window
     }
 
     // R*/fields cache the LAST-RENDERED state so RenderNow can skip unchanged cells entirely.
-    private sealed class Cell { public string Text = " "; public int Hl = -1; public string RTxt = ""; public int RFg = -1; public int RBg = -1; }
+    private sealed class Cell { public string Text = " "; public int Hl = -1; public string RTxt = ""; public int RFg = -1; public int RBg = -1; public int RFontKey = 0; }
     private readonly record struct Hl(Color Fg, Color Bg);
 
     private async void OnKeyDown(object sender, KeyRoutedEventArgs e)

@@ -144,8 +144,9 @@ private void RenderNow()
         if (i >= children.Count)
         {
             var t = new TextBlock();
-            t.FontFamily = new FontFamily("Cascadia Mono, Consolas");
-            t.FontSize = 14;
+            // Start with narrow font/size; may be switched to wide below based on the cell's glyph.
+            t.FontFamily = new FontFamily(_narrowFont);
+            t.FontSize = _narrowSize;
             box = new Border { Child = t };
             children.Add(box);
         }
@@ -159,6 +160,10 @@ private void RenderNow()
         bool isCur = i == curIdx && curIdx >= 0;
         Color fg, bg;
         string txt = cell.Text.Length > 0 ? cell.Text : " ";
+        // Determine whether this cell needs the wide font (CJK/Hangul/Kana). We only need to
+        // update FontFamily when it changes since last render — track via Cell.RFontKey.
+        bool isWideGlyph = txt.Length > 0 && IsWideChar(txt[0]);
+        int desiredKey = isWideGlyph ? 1 : 0;
         int bgi = -1; // packed background key for cursor/highlight cells only
         if (isCur) { fg = _defBg; bg = _defFg; bgi = PackColor(bg); } // inverted cursor cell
         else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h))
@@ -183,6 +188,14 @@ private void RenderNow()
             box.Background = bgi >= 0 ? GetBrush(brushCache, bg) : null;
             cell.RBg = bgi;
         }
+
+        // Font family/size changes only when the wide/narrow classification flips.
+        if (cell.RFontKey != desiredKey)
+        {
+            glyph.FontFamily = new FontFamily(desiredKey == 1 ? _wideFont : _narrowFont);
+            glyph.FontSize = desiredKey == 1 ? _wideSize : _narrowSize;
+            cell.RFontKey = desiredKey;
+        }
     }
     _layoutRows = rows; _layoutCols = cols; _layoutDone = true;
     _lastCurIdx = curIdx;
@@ -202,6 +215,17 @@ private static SolidColorBrush GetBrush(Dictionary<int, SolidColorBrush> cache, 
 // WinAppSDK 2.x's Windows.UI.Color has no PackedValue property, so pack ARGB from the
 // component fields ourselves for brush-cache keys.
 private static int PackColor(Color c) => (c.A << 24) | (c.R << 16) | (c.G << 8) | c.B;
+
+// Determine if a character is "wide" (Japanese/CJK/Korean). Wide characters need the
+// guifontwide font to render at the correct width in the grid.
+private static bool IsWideChar(char ch)
+{
+    int code = (int)ch;
+    return code >= 0x3040 && code <= 0x30FF ||   // Hiragana
+           code >= 0x4E00 && code <= 0x9FFF ||   // CJK Unified (Chinese/Japanese/Korean radicals, ideographs)
+           code >= 0xA000 && code <= 0xAFFF;     // Korean Hangul
+}
+
 private static int ToInt(object? v) => v switch
     {
         null => -1,

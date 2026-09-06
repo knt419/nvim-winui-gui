@@ -74,6 +74,21 @@ public partial class MainWindow
             LogStartup("api_info returned (" + (info is null ? "null" : info.ToString()!.Length) + " chars)");
             SetStatus($"connected (port {port}), API v{ExtractApiMajor(info)}. attaching ui...");
 
+            // Load guifont/guifontwide from nvim's settings before attaching the UI.
+            // Format: "FontName:Style:Size" — we only care about FontName and Size.
+            string? guifont = null, guifontwide = null;
+            try {
+                object? gf = await _client.CallAsync("nvim_get_value", "guifont");
+                if (gf is string s) guifont = s;
+                object? gfw = await _client.CallAsync("nvim_get_value", "guifontwide");
+                if (gfw is string s2) guifontwide = s2;
+            } catch { /* non-fatal: fall back to defaults */ }
+            LogStartup($"guifont={guifont ?? ""} guifontwide={guifontwide ?? ""}");
+            ParseNvimFont(guifont, out _narrowFont, out _narrowSize);
+            if (!string.IsNullOrEmpty(guifontwide))
+                ParseNvimFont(guifontwide, out _wideFont, out _wideSize);
+            else { _wideFont = _narrowFont; _wideSize = _narrowSize; }
+
             _client.OnNotification += OnNvimNotification;
             // ext_linegrid: switch nvim to line-based grid events (grid_line/grid_clear/
             // cursor_position/hl_attr_define). Without it nvim emits only the legacy
