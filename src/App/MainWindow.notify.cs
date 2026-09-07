@@ -94,9 +94,13 @@ public partial class MainWindow
             // cursor_position/hl_attr_define). Without it nvim emits only the legacy
             // terminal protocol (put/cursor_goto/move_cursor), which this handler does not
             // consume -> empty screen. Verified against runtime/doc/api-ui-events.txt (0.12).
-            LogStartup("ATTACH-PRE sending ui_attach");
-            await _client.CallAsync("nvim_ui_attach", _cols, _rows, new Dictionary<string, object?> { ["rgb"] = true, ["ext_linegrid"] = true });
-            LogStartup("ATTACH-POST ui_attach response received");
+            LogStartup("ATTACH-PRE sending ui_attach (notification)");
+            // nvim_ui_attach is a notification per the nvim 0.12 RPC API — it does not send a
+            // response, so CallAsync would hang forever waiting for one that never arrives.
+            // Use NotifyAsync instead: fire-and-forget, then rely on redraw notifications to
+            // confirm the UI was attached (same pattern as tools/rpc-test/Program.cs line 153).
+            await _client.NotifyAsync("nvim_ui_attach", _cols, _rows, new Dictionary<string, object?> { ["rgb"] = true, ["ext_linegrid"] = true }).ConfigureAwait(false);
+            LogStartup("ATTACH-POST ui_attach sent (no response expected; watching for redraw)");
             EnsureScreen(_rows, _cols);
             ScheduleRender();
             SetStatus($"ui attached ({_cols}x{_rows}). typing forwards to nvim.");
