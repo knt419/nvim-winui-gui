@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
+using Windows.Graphics;
 using Windows.System;
 using Windows.UI;
 using Windows.UI.Core;
@@ -19,10 +20,10 @@ public partial class MainWindow
 
     private int _screenRows, _screenCols;
     private bool _renderQueued;
-    // Fixed per-cell pixel size. Star (*) columns collapse to 0px inside a ScrollViewer (which
-    // measures its content with infinite width), so the grid must use fixed pixel sizes to be visible.
-    private const double CellW = 9;
-    private const double CellH = 18;
+    // Dynamic per-cell pixel size. Calculated from the ScrollViewer's actual dimensions so the
+    // grid fills the window when resized. Recalculated every render; no separate size-change
+    // detection needed since RenderNow already runs whenever content changes or fonts update.
+    private double _cellW = 9, _cellH = 18;
     private static readonly Color TransparentColor = default;
     // Render-diff state: layout is only re-applied when the grid shape changes, and per-cell
     // text/fg are compared against last-rendered values (RTxt/RFg on Cell) so unchanged cells
@@ -32,6 +33,8 @@ public partial class MainWindow
     private int _layoutRows = 0, _layoutCols = 0;
     private bool _layoutDone = false;
     private int _lastCurIdx = -1;
+    // Diagnostic counter to cap foreground logging (only logs first few cells).
+    private int _diagFgCount;
 
 private static string? MapKey(VirtualKey vk) => vk switch
     {
@@ -91,14 +94,30 @@ private static int ExtractApiMajor(object? info)
         return -1;
     }
 private void EnsureScreen(int rows, int cols)
-    {
-        if (_cells.Length == rows * cols && _screenRows == rows && _screenCols == cols) return;
-        var c = new Cell[rows * cols];
-        for (int i = 0; i < c.Length; i++) c[i] = new Cell();
-        _cells = c;
-        _screenRows = rows;
-        _screenCols = cols;
-    }
+{
+    if (_cells.Length == rows * cols && _screenRows == rows && _screenCols == cols) return;
+    var c = new Cell[rows * cols];
+    for (int i = 0; i < c.Length; i++) c[i] = new Cell();
+    _cells = c;
+    _screenRows = rows;
+    _screenCols = cols;
+    // Resize the window to exactly fit the grid + status text + title bar.
+    UpdateWindowSize(cols, rows);
+}
+
+private void UpdateWindowSize(int cols, int rows)
+{
+    // Calculate the exact window size so that the content area matches the grid + status text.
+    // With ExtendsContentIntoTitleBar=true (set in MainWindow ctor), the content fills the entire
+    // window — there's no traditional frame border or title bar taking up space. System close/
+    // minimize/maximize buttons are overlaid on top of the top-right corner of the content area,
+    // matching Windows Terminal's behavior. So resizing directly to grid+status dimensions makes
+    // the entire window fill exactly with the terminal content.
+    const double statusTextHeight = 25;
+    int width = (int)(cols * _cellW);
+    int height = (int)(rows * _cellH + statusTextHeight);
+    try { AppWindow.Resize(new SizeInt32(width, height)); } catch { /* ignore */ }
+}
 private int _schedCount;
 private void ScheduleRender()
 {
@@ -117,15 +136,26 @@ private void RenderNow()
     _renderQueued = false;
     int rows = _screenRows, cols = _screenCols;
     if (rows <= 0 || cols <= 0) return;
-    // Fixed pixel cell sizes (NOT Star/Auto): GlyphGrid lives inside a ScrollViewer, which
     // measures its content with infinite width/height. A Star (*) column under an infinite
     // constraint resolves to 0px, so the whole grid collapsed invisibly. Pixel cells give the
     // Grid a definite size that the ScrollViewer lays out and scrolls.
-    while (GlyphGrid.RowDefinitions.Count < rows) GlyphGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(CellH) });
+    // Recalculate cell sizes from the host's actual dimensions so the grid fills the window
+    // whenever it resizes (manual or programmatic). Falls back to defaults if layout hasn't
+    // completed yet (ActualWidth/Height = 0).
+    double availW = Host.ActualWidth, availH = Host.ActualHeight;
+    if (availW > 0 && cols > 0) _cellW = Math.Max(1.0, availW / cols);
+    if (availH > 0 && rows > 0) _cellH = Math.Max(1.0, availH / rows);
+
+    while (GlyphGrid.RowDefinitions.Count < rows) GlyphGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(_cellH) });
     while (GlyphGrid.RowDefinitions.Count > rows) GlyphGrid.RowDefinitions.RemoveAt(GlyphGrid.RowDefinitions.Count - 1);
     while (GlyphGrid.ColumnDefinitions.Count < cols)
-        GlyphGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(CellW) });
+        GlyphGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(_cellW) });
     while (GlyphGrid.ColumnDefinitions.Count > cols) GlyphGrid.ColumnDefinitions.RemoveAt(GlyphGrid.ColumnDefinitions.Count - 1);
+    // Explicitly set the grid's dimensions so the ScrollViewer always knows its size, even when
+    // row/column definitions are dynamically resized. This fixes the "black screen" issue where the
+    // Grid had no intrinsic size due to dynamic layout.
+    GlyphGrid.Width = cols * _cellW;
+    GlyphGrid.Height = rows * _cellH;
     var children = GlyphGrid.Children;
     int total = rows * cols;
     bool layoutDirty = _layoutCols != cols || _layoutRows != rows || _layoutDone == false;
@@ -177,6 +207,13 @@ private void RenderNow()
         {
             glyph.Text = txt;
             cell.RTxt = txt;
+            // Log the first few non-space text changes to verify they land on XAML elements
+            if (txt != " " && i < 10) LogStartup($"RENDER-DIAG idx={i} row={r} col={c} txt='{txt}' glyph.Text='{glyph.Text}'");
+        }
+        // Diagnostic: log foreground values for first few cells to verify colors are correct
+        if (i < 5)
+        {
+            LogStartup($"RENDER-DIAG-FG idx={i} text='{txt}' fg=(A:{fg.A},R:{fg.R},G:{fg.G},B:{bg.B}) bgi={bgi} fgi={fgi}");
         }
         if (cell.RFg != fgi)
         {
@@ -242,13 +279,21 @@ private static Hl ParseHl(object? v)
         return default;
     }
 private static Color HintColor(int slot, int value)
-    {
-        if (value < 0 || value > 16777215)
-            return slot == 1 ? Color.FromArgb(0xFF, 0xDC, 0xDC, 0xDC) : TransparentColor;
-        byte a = (byte)(value >> 24 & 0xFF), r = (byte)(value >> 16 & 0xFF);
-        byte g = (byte)(value >> 8 & 0xFF), b = (byte)(value & 0xFF);
-        return Color.FromArgb(a, r, g, b);
-    }
+{
+    if (value < 0)
+        return slot == 1 ? Color.FromArgb(0xFF, 0xDC, 0xDC, 0xDC) : TransparentColor;
+        
+    // nvim RGB colors (sent with rgb=true in ui_attach) are typically 0xRRGGBB without an alpha
+    // channel. When parsed as ARGB, the alpha byte becomes 0, making text invisible. Detect this
+    // by checking if value < 0x1000000 (no explicit alpha) and default to full opacity.
+    byte a = (byte)(value >> 24 & 0xFF);
+    if (a == 0 && value < 0x1000000) a = 0xFF;  // RGB without alpha -> assume opaque
+        
+    byte r = (byte)(value >> 16 & 0xFF);
+    byte g = (byte)(value >> 8 & 0xFF);
+    byte b = (byte)(value & 0xFF);
+    return Color.FromArgb(a, r, g, b);
+}
 private void OnClosed(object sender, object e)
     {
         try { _client?.Dispose(); } catch { }

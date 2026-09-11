@@ -209,54 +209,66 @@ public partial class MainWindow
             {
                 foreach (var ev in args)
                 {
-                    if (ev is not object?[] ea || ea.Length < 1 || ea[0] is not string ename) continue;
-                    var eargs = new object?[ea.Length - 1];
-                    Array.Copy(ea, 1, eargs, 0, ea.Length - 1);
+                    if (ev is not object?[] ea || ea.Length < 1) continue;
+                    // nvim sends redraw events as arrays. With ext_linegrid, each inner event is
+                    // [grid_id, 0, "event_name", args...]; without it, just ["event_name", args...].
+                    string ename;
+                    object?[] eargs;
+                    if (ea[0] is string s)
+                    {
+                        ename = s;
+                        eargs = new object?[ea.Length - 1];
+                        Array.Copy(ea, 1, eargs, 0, ea.Length - 1);
+                    }
+                    else if (ea.Length > 2 && ea[2] is string s2)
+                    {
+                        ename = s2;
+                        eargs = new object?[ea.Length - 3];
+                        Array.Copy(ea, 3, eargs, 0, ea.Length - 3);
+                    }
+                    else continue;
                     DispatchRedrawEvent(ename, eargs);
                 }
-                return;
             }
-
-            // Defensive: some transports forward individual events directly.
-            DispatchRedrawEvent(method, args);
+            else
+            {
+                // Defensive: some transports forward individual events directly.
+                DispatchRedrawEvent(method, args);
+            }
         }
         catch (Exception ex)
         {
             SetStatus($"notify error: {ex.Message}");
+            LogStartup("NOTIFY EXCEPTION in " + method + ": " + ex.GetType().Name + ": " + ex.Message + "\n" + ex.StackTrace);
         }
     }
 
     private void DispatchRedrawEvent(string name, object?[] a)
     {
+        LogStartup($"DISPATCH event={name} args_len={a.Length}");
         switch (name)
         {
             case "grid_resize":
-                // [grid, rows, cols]
-                if (a.Length >= 3)
+                // Each tuple: [grid_id, rows, cols]. Multiple tuples may be sent.
+                foreach (var tuple in a)
                 {
-                    _rows = ToInt(a[1]); _cols = ToInt(a[2]);
+                    if (tuple is not object?[] t || t.Length < 3) continue;
+                    _rows = ToInt(t[1]); _cols = ToInt(t[2]);
                     EnsureScreen(_rows, _cols);
                     ScheduleRender();
                 }
                 break;
             case "grid_line":
             {
-                // LIVE WIRESHAPE (frame_7.json, 2026-08-28): a is an ARRAY OF ROW OBJECTS.
-                // Each row object: [grid_id:int, row_idx:int, col_start:int, cells_array:[], wrap_bool:bool]
-                // Multiple rows are batched in one grid_line notification.
-                foreach (var rowObjRaw in a)
+                // Each tuple: [grid_id, row_idx, col_start, cells_array, wrap]. Multiple tuples (one per line) may be sent.
+                foreach (var tuple in a)
                 {
-                    if (rowObjRaw is not object?[] rowObj || rowObj.Length < 5) continue;
-                    
-                    int gridId = ToInt(rowObj[0]);
-                    int rowIdx = ToInt(rowObj[1]);
-                    int colStart = ToInt(rowObj[2]);
-                    var cellArray = rowObj[3] as object?[] ?? Array.Empty<object?>();
+                    if (tuple is not object?[] t || t.Length < 4) continue;
+                    int gridId = ToInt(t[0]);
+                    int rowIdx = ToInt(t[1]);
+                    int colStart = ToInt(t[2]);
+                    var cellArray = t[3] as object?[] ?? Array.Empty<object?>();
 
-                    // Process each cell in this row. Per api-ui-events.txt, a cell is either
-                    // "text" or ["text", hl_id?, repeat_count?]. The repeat count means the
-                    // entry occupies N consecutive columns; following entries continue AFTER
-                    // those, so track `col` incrementally instead of colStart+k indexing.
                     if (rowIdx < 0 || rowIdx >= _rows) continue;
                     int col = colStart;
                     foreach (var cellRaw in cellArray)
@@ -285,7 +297,6 @@ public partial class MainWindow
                     }
                     ScheduleRender();
                 }
-                
                 break;
             }
             case "grid_clear":
@@ -293,19 +304,33 @@ public partial class MainWindow
                 ScheduleRender();
                 break;
             case "cursor_position":
-                // [grid, row, col]
-                if (a.Length >= 3) { _curRow = ToInt(a[1]); _curCol = ToInt(a[2]); ScheduleRender(); }
+            case "grid_cursor_goto":
+                // Each tuple: [grid_id, row, col]
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 3) continue;
+                    _curRow = ToInt(t[1]); _curCol = ToInt(t[2]);
+                    ScheduleRender();
+                }
                 break;
             case "hl_attr_define":
-                // [id, rgb_attr, cterm_attr, info?] — id is a plain int; ONE definition per event
-                // (nvim 0.12 api-ui-events.txt). There is no batched "highlight_define" event.
-                if (a.Length >= 3)
-                    _hlDefs[ToInt(a[0])] = ParseHl(a[1]);
-                ScheduleRender();
+            {
+                // Each tuple: [id, rgb_attr, cterm_attr, info?] — id is a plain int
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 3) continue;
+                    _hlDefs[ToInt(t[0])] = ParseHl(t[1]);
+                    ScheduleRender();
+                }
                 break;
+            }
             case "default_colors_set":
-                if (a.Length >= 2) { _defFg = HintColor(1, ToInt(a[0])); _defBg = HintColor(2, ToInt(a[1])); }
-                ScheduleRender();
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 2) continue;
+                    _defFg = HintColor(1, ToInt(t[0])); _defBg = HintColor(2, ToInt(t[1]));
+                    ScheduleRender();
+                }
                 break;
         }
     }

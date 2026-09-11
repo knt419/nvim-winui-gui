@@ -76,6 +76,9 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         Title = "nvim-winui-gui";
+        // ExtendsContentIntoTitleBar makes the content area fill the full window (title bar region
+        // becomes part of content), so Resize(width, height) directly sets the display size.
+        ExtendsContentIntoTitleBar = true;
         try { AppWindow.Resize(new SizeInt32(760, 430)); } catch { }
 
         // Pure-C# unpackaged: Window.Dispatcher is not reliably populated here; capture the queue directly.
@@ -95,7 +98,8 @@ public partial class MainWindow : Window
 
         _root = new Grid { Background = new SolidColorBrush(_defBg) };
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        // Fixed height for the status row so it matches exactly what UpdateWindowSize calculates.
+        _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(25, GridUnitType.Pixel) });
         Grid.SetRow(Host, 0);
         Grid.SetRow(StatusText, 1);
         _root.Children.Add(Host);
