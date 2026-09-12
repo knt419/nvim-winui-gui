@@ -111,45 +111,45 @@ public partial class MainWindow
             await _client.CallAsync("nvim_input", "ihello from nvim-winui-gui");
             LogStartup("POST-INPUT input response received");
 
-            // Self-test: wait for redraw notifications to drain, then read back the buffer line
-            // and count populated cells -> objective proof that (a) key input reached nvim
-            // and executed, and (b) grid_line notifications decoded into the cell model.
-            LogStartup("STEP pre-delay");
-            await Task.Delay(1000).ConfigureAwait(false);
-            LogStartup("STEP post-delay, calling get_current_buf");
+            // Self-test: create a NEW buffer to avoid depending on nvim's initial state (scratch buffer, etc.).
+            // This ensures the typed text goes into a known buffer and can be read back reliably.
+            LogStartup("STEP creating test buffer");
             try
             {
-                // ConfigureAwait(false): the self-test RPC continuations must NOT queue behind
-                // redraw-notification floods on the UI dispatcher — verified 2026-09-06 that a
-                // response arriving at :55.1 was only resumed ~20s later while the dispatcher chewed
-                // through posted HandleNotification work. Cell model reads are plain fields, safe off-thread.
-                object? buf = await _client.CallAsync("nvim_get_current_buf").ConfigureAwait(false);
-                    LogStartup($"STEP got buf={buf} ({(buf is MsgpackStreamDecoder.MsgpackExt ? "MsgpackExt" : "plain")})");
-
-                    // nvim RPC request params must be standard types (int, string, bool, array, object).
-                    // Typed API handles come back as MsgpackExt (fixext) in responses — passing them
-                    // back into another request makes nvim hang. Extract the integer value first.
-                    int bufNum;
-                    if (buf is MsgpackStreamDecoder.MsgpackExt extHandle)
+                // nvim_create_buf takes TWO boolean args: {listed}, {scratch} — not a buffer name.
+                // Buffers in nvim are identified by numeric ID only; there is no "name" parameter.
+                object? testBuf = await _client.CallAsync("nvim_create_buf", false, false).ConfigureAwait(false);
+                int testBufNum;
+                if (testBuf is MsgpackStreamDecoder.MsgpackExt extHandle)
+                {
+                    string dataHex = BitConverter.ToString(extHandle.Data).Replace("-", "").ToLowerInvariant();
+                    LogStartup($"FIXEXT TypeId={extHandle.TypeId} DataLen={extHandle.Data.Length} DataHex={dataHex}");
+                    switch (extHandle.Data.Length)
                     {
-                        string dataHex = BitConverter.ToString(extHandle.Data).Replace("-", "").ToLowerInvariant();
-                        LogStartup($"FIXEXT TypeId={extHandle.TypeId} DataLen={extHandle.Data.Length} DataHex={dataHex}");
-                        switch (extHandle.Data.Length)
-                        {
-                            case 1: bufNum = extHandle.Data[0]; break;
-                            case 2: bufNum = (int)(extHandle.Data[0] << 8 | extHandle.Data[1]); break;
-                            case 4: bufNum = (int)System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(extHandle.Data.AsSpan()); break;
-                            case 8: bufNum = (int)System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(extHandle.Data.AsSpan()); break;
-                            default: throw new InvalidOperationException($"Unexpected buffer handle data length: {extHandle.Data.Length}");
-                        }
+                        case 1: testBufNum = extHandle.Data[0]; break;
+                        case 2: testBufNum = (int)(extHandle.Data[0] << 8 | extHandle.Data[1]); break;
+                        case 4: testBufNum = (int)System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(extHandle.Data.AsSpan()); break;
+                        case 8: testBufNum = (int)System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(extHandle.Data.AsSpan()); break;
+                        default: throw new InvalidOperationException($"Unexpected buffer handle data length: {extHandle.Data.Length}");
                     }
-                    else
-                        bufNum = (int)buf!;
+                }
+                else
+                    testBufNum = (int)testBuf!;
 
-                    var ext2 = buf as MsgpackStreamDecoder.MsgpackExt;
-                    LogStartup($"BUFNUM extracted={bufNum} data_len={(ext2 != null ? ext2.Data.Length : -1)}");
-                    var lines = await _client.CallAsync("nvim_buf_get_lines", bufNum, 0, 1, true);
-                LogStartup("STEP got lines");
+                LogStartup($"STEP got test buffer #{testBufNum}");
+                // Switch to the test buffer so typing goes there
+                await _client.CallAsync("nvim_set_current_buf", testBufNum).ConfigureAwait(false);
+                LogStartup($"STEP switched to test buffer, current={await _client.CallAsync("nvim_get_current_buf").ConfigureAwait(false)}");
+                // Type into it (using set_lines for deterministic self-test; nvim_input can be mode-dependent)
+                // nvim_buf_set_lines(bufid, startline, endline, replace:bool, lines:[string]) — order matters.
+                object?[] putArgs = { testBufNum, 0, 1, true, new string[] { "hello from nvim-winui-gui" } };
+                await _client.CallAsync("nvim_buf_set_lines", putArgs).ConfigureAwait(false);
+                LogStartup("POST-SET lines written to test buffer");
+                // Wait for redraw
+                await Task.Delay(1000).ConfigureAwait(false);
+                // Read from the test buffer
+                var lines = await _client.CallAsync("nvim_buf_get_lines", testBufNum, 0, 1, true).ConfigureAwait(false);
+                LogStartup("STEP got lines (test buffer)");
                 string line1 = (lines is object?[] la && la.Length > 0 && la[0] is string s) ? s : "<none>";
                 // Count cells with a NON-SPACE glyph: every cell starts as " ", so Length>0 always
                 // passed and masked an empty grid. Non-space count only rises when real text lands.
