@@ -33,8 +33,6 @@ public partial class MainWindow
     private int _layoutRows = 0, _layoutCols = 0;
     private bool _layoutDone = false;
     private int _lastCurIdx = -1;
-    // Diagnostic counter to cap foreground logging (only logs first few cells).
-    private int _diagFgCount;
 
 private static string? MapKey(VirtualKey vk) => vk switch
     {
@@ -207,13 +205,6 @@ private void RenderNow()
         {
             glyph.Text = txt;
             cell.RTxt = txt;
-            // Log the first few non-space text changes to verify they land on XAML elements
-            if (txt != " " && i < 10) LogStartup($"RENDER-DIAG idx={i} row={r} col={c} txt='{txt}' glyph.Text='{glyph.Text}'");
-        }
-        // Diagnostic: log foreground values for first few cells to verify colors are correct
-        if (i < 5)
-        {
-            LogStartup($"RENDER-DIAG-FG idx={i} text='{txt}' fg=(A:{fg.A},R:{fg.R},G:{fg.G},B:{bg.B}) bgi={bgi} fgi={fgi}");
         }
         if (cell.RFg != fgi)
         {
