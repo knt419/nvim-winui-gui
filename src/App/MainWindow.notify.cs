@@ -16,14 +16,15 @@ public partial class MainWindow
         try { StatusText.Text = s; } catch { /* XAML already torn down (shutdown path); ignore */ }
     }
 
-    // One-shot diagnostics: dump the real grid_line arg layout from the live code path.
-    private int _gridlineDiagCount;
     private static string DiagVal(object? v)
     {
         if (v is null) return "null";
         if (v is string s) return "\"" + (s.Length > 12 ? s.Substring(0, 12) + "…" : s) + "\"";
         if (v is object?[] a)
-            return "[" + a.Length + "]" + (a.Length > 0 && a[0] != null ? a[0].GetType().Name + "[]" : "");
+        {
+            var first = a.Length > 0 ? a[0] : null;
+            return "[" + a.Length + "]" + (first != null ? first.GetType().Name + "[]" : "");
+        }
         string t = v.GetType().Name;
         string s2 = v.ToString() ?? "?";
         if (s2.Length > 14) s2 = s2.Substring(0, 14) + "…";
@@ -33,7 +34,6 @@ public partial class MainWindow
     // Round-8 diagnostics: event-order trace (first 60 redraw events), every grid_resize in full,
     // and the RAW shape of grid_line cells so we can see exactly what nvim sends vs how we read it.
     private int _evTraceCount;
-    private string[]? _lastCellsDumped = null;
     private void TraceEvent(string name, object?[] a)
     {
         if (_evTraceCount < 60)
@@ -64,6 +64,7 @@ public partial class MainWindow
                 CreateNoWindow = true
             };
             _nvimProc = System.Diagnostics.Process.Start(psi);
+            if (_nvimProc == null) { SetStatus("failed to spawn nvim"); return; }
             LogStartup("spawned nvim pid=" + _nvimProc.Id + " port=" + port);
             _nvimProc.ErrorDataReceived += (s, e) => { if (e.Data != null) LogStartup("NVIM-ERR " + e.Data); };
             _nvimProc.BeginErrorReadLine();
