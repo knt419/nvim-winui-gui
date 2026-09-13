@@ -250,11 +250,11 @@ public partial class MainWindow
         switch (name)
         {
             case "grid_resize":
-                // Each tuple: [grid_id, rows, cols]. Multiple tuples may be sent.
+                // Each tuple: [grid_id, width, height] — per api-ui-events.txt the order is cols then rows.
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 3) continue;
-                    _rows = ToInt(t[1]); _cols = ToInt(t[2]);
+                    _cols = ToInt(t[1]); _rows = ToInt(t[2]);
                     EnsureScreen(_rows, _cols);
                     ScheduleRender();
                 }

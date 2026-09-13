@@ -107,6 +107,13 @@ public partial class MainWindow : Window
 
         Content = _root;
         _root.KeyDown += OnKeyDown;
+        // When the window resizes (or any layout pass occurs), re-render so the grid
+        // recalculates its cell sizes and fills the new display area. RenderNow reads
+        // Host.ActualWidth/Height at render time, so it adapts automatically to the new size.
+        // Also sync the nvim-side grid: debounced (120ms) so a drag sends only one request;
+        // nvim's grid_resize reply then snaps the window back to an exact cell boundary via
+        // EnsureScreen -> UpdateWindowSize, which terminates the loop naturally.
+        Host.SizeChanged += (s, e) => { ScheduleRender(); ScheduleNvimResize(); };
         Host.Loaded += OnLoadedAsync;
         Activated += (s, e) => Host.Focus(FocusState.Programmatic);
         Closed += OnClosed;
