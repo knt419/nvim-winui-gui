@@ -126,7 +126,7 @@ public partial class MainWindow : Window
     private async void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (_client == null || _nvimProc == null) return;
-        string? kv = MapKey(e.Key);
+        string? kv = MapModifierKey(e.Key) ?? MapKey(e.Key);
         if (kv != null)
         {
             e.Handled = true;
@@ -140,6 +140,47 @@ public partial class MainWindow : Window
             catch (Exception ex) { SetStatus($"input error: {ex.Message}"); }
         }
     }
+
+    // Modifier combos (Ctrl/Alt). WinUI's KeyRoutedEventArgs carries no modifier state, so we poll
+    // GetAsyncKeyState for the live Ctrl/Alt bits. Returns nvim notation like "<C-d>" / "<A-h>", or
+    // null when no modifier is held (falls through to MapKey for plain keys). Shift is handled by
+    // ToUnicodeEx inside MapKey (it already produces the shifted char), so it's not needed here.
+    private static string? MapModifierKey(VirtualKey vk)
+    {
+        bool ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0; // VK_CONTROL
+        bool alt  = (GetAsyncKeyState(0x12) & 0x8000) != 0; // VK_MENU
+        if (!ctrl && !alt) return null;
+
+        string baseName = vk switch
+        {
+            VirtualKey.A => "a", VirtualKey.B => "b", VirtualKey.C => "c",
+            VirtualKey.D => "d", VirtualKey.E => "e", VirtualKey.F => "f",
+            VirtualKey.G => "g", VirtualKey.H => "h", VirtualKey.I => "i",
+            VirtualKey.J => "j", VirtualKey.K => "k", VirtualKey.L => "l",
+            VirtualKey.M => "m", VirtualKey.N => "n", VirtualKey.O => "o",
+            VirtualKey.P => "p", VirtualKey.Q => "q", VirtualKey.R => "r",
+            VirtualKey.S => "s", VirtualKey.T => "t", VirtualKey.U => "u",
+            VirtualKey.V => "v", VirtualKey.W => "w", VirtualKey.X => "x",
+            VirtualKey.Y => "y", VirtualKey.Z => "z",
+            VirtualKey.Number0 => "0", VirtualKey.Number1 => "1", VirtualKey.Number2 => "2",
+            VirtualKey.Number3 => "3", VirtualKey.Number4 => "4", VirtualKey.Number5 => "5",
+            VirtualKey.Number6 => "6", VirtualKey.Number7 => "7", VirtualKey.Number8 => "8",
+            VirtualKey.Number9 => "9",
+            VirtualKey.Left => "<Left>", VirtualKey.Right => "<Right>",
+            VirtualKey.Up => "<Up>", VirtualKey.Down => "<Down>",
+            _ => null
+        };
+        if (baseName == null) return null;
+
+        // Ctrl takes precedence in the notation prefix order nvim expects: <C-...> then <A-...>.
+        string inner = baseName;
+        if (alt)  inner = "<A-" + inner + ">";
+        if (ctrl) inner = "<C-" + inner + ">";
+        return inner;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool GetKeyboardState(byte[] state);
