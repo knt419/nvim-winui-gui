@@ -304,6 +304,60 @@ public partial class MainWindow
                 for (int i = 0; i < _cells.Length; i++) { _cells[i].Text = " "; _cells[i].Hl = -1; }
                 ScheduleRender();
                 break;
+            case "grid_scroll":
+            {
+                // Each tuple: [grid_id, top_row, bot_row, left_col, right_col, rows, cols].
+                // Shift content in region [top,bot) x [left,right) by `rows` lines (positive = up).
+                // nvim sends this when the screen scrolls instead of resending every grid_line.
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 7) continue;
+                    int top   = ToInt(t[1]);
+                    int bot   = ToInt(t[2]);
+                    int left  = ToInt(t[3]);
+                    int right = ToInt(t[4]);
+                    int rows  = ToInt(t[5]); // signed: + up, - down
+                    if (rows == 0) continue;
+
+                    top   = Math.Max(0, Math.Min(top, _rows));
+                    bot   = Math.Max(0, Math.Min(bot, _rows));
+                    left  = Math.Max(0, Math.Min(left, _cols));
+                    right = Math.Max(0, Math.Min(right, _cols));
+                    if (top >= bot || left >= right) continue;
+
+                    int regionW = right - left;
+                    // Snapshot the region's VALUES (Text/Hl) so src is independent of _cells and
+                    // no two destination positions ever alias one Cell object.
+                    var srcTxt = new string[(bot - top) * regionW];
+                    var srcHl  = new int[(bot - top) * regionW];
+                    for (int r = top; r < bot; r++)
+                        for (int c = left; c < right; c++)
+                        {
+                            var cc = _cells[r * _cols + c];
+                            srcTxt[(r - top) * regionW + (c - left)] = cc.Text;
+                            srcHl[(r - top) * regionW + (c - left)]  = cc.Hl;
+                        }
+
+                    // Write back shifted: dest row dr takes source row sr = dr + rows.
+                    for (int dr = top; dr < bot; dr++)
+                    {
+                        int sr = dr + rows;
+                        for (int c = left; c < right; c++)
+                        {
+                            var cell = new Cell();
+                            if (sr >= top && sr < bot)
+                            {
+                                int si = (sr - top) * regionW + (c - left);
+                                cell.Text = srcTxt[si];
+                                cell.Hl   = srcHl[si];
+                            } // else stays blank (" ", Hl=-1) where content scrolled out
+                            _cells[dr * _cols + c] = cell;
+                        }
+                    }
+                    ScheduleRender();
+                }
+                break;
+            }
             case "cursor_position":
             case "grid_cursor_goto":
                 // Each tuple: [grid_id, row, col]
