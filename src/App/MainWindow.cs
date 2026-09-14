@@ -92,19 +92,18 @@ public partial class MainWindow : Window
     // that the primary font lacks still render (no tofu).
     private static void ParseNvimFont(string? setting, string fallback, out string family, out double size)
     {
-        if (setting == null || setting.Length == 0)
+        if (string.IsNullOrEmpty(setting))
         {
-            family = "Cascadia Mono, Consolas";
+            family = fallback; // full chain as-is (no duplication); matches field defaults -> no spurious re-render
             size = 14;
+            return;
         }
-        else
-        {
-            var parts = setting.Split(':', StringSplitOptions.RemoveEmptyEntries);
-            family = parts[0].Trim();
-            size = 14;
-            if (parts.Length >= 3 && int.TryParse(parts[2], out int sz)) size = sz;
-        }
-        // Append the fallback chain (dedupe: FontFamily ignores repeated names).
+        var parts = setting.Split(':', StringSplitOptions.RemoveEmptyEntries);
+        family = parts[0].Trim();
+        size = 14;
+        if (parts.Length >= 3 && int.TryParse(parts[2], out int sz)) size = sz;
+        // Append the fallback chain so CJK/emoji/symbol code points the primary font lacks
+        // still render (no tofu). FontFamily ignores repeated family names.
         family += ", " + fallback;
     }
 

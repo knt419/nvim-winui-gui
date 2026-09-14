@@ -58,18 +58,18 @@ public partial class MainWindow
 
             // Load guifont/guifontwide from nvim's settings before attaching the UI.
             // Format: "FontName:Style:Size" — we only care about FontName and Size.
-            string? guifont = null, guifontwide = null;
-            try {
-                object? gf = await _client.CallAsync("nvim_get_value", "guifont");
-                if (gf is string s) guifont = s;
-                object? gfw = await _client.CallAsync("nvim_get_value", "guifontwide");
-                if (gfw is string s2) guifontwide = s2;
-            } catch { /* non-fatal: fall back to defaults */ }
-            LogStartup($"guifont={guifont ?? ""} guifontwide={guifontwide ?? ""}");
-            ParseNvimFont(guifont, NarrowFallback, out _narrowFont, out _narrowSize);
-            if (!string.IsNullOrEmpty(guifontwide))
-                ParseNvimFont(guifontwide, WideFallback, out _wideFont, out _wideSize);
-            else { _wideFont = _narrowFont; _wideSize = _narrowSize; }
+            await RefreshGuifontAsync();
+
+            // Some configs set guifont in a plugin that loads lazily, so the value read right
+            // after connect can be empty/stale. Re-read ~1s after launch and re-apply if it
+            // changed (RefreshGuifontAsync is a no-op when unchanged). Fired fire-and-forget:
+            // NvimClient matches responses by request id, so this concurrent call is safe.
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(1000);
+                try { await RefreshGuifontAsync(); }
+                catch (Exception ex) { LogCritical("guifont re-read failed: " + ex.Message); }
+            });
 
             _client.OnNotification += OnNvimNotification;
             // ext_linegrid: switch nvim to line-based grid events (grid_line/grid_clear/
@@ -156,6 +156,40 @@ public partial class MainWindow
             LogCritical($"\nSTARTUP FAILED: {ex}");
             SetStatus($"STARTUP FAILED: {ex.Message}");
         }
+    }
+
+    // Read guifont/guifontwide from nvim, parse them into the font fields, and re-render only if
+    // they changed. Safe to call repeatedly (startup + ~1s later): when nothing changed it is a
+    // cheap no-op that skips the render. Runs on whatever thread calls it; ScheduleRender marshals
+    // the actual XAML update onto the UI thread via _uiSyncCtx.
+    private async Task RefreshGuifontAsync()
+    {
+        string? guifont = null, guifontwide = null;
+        try
+        {
+            object? gf = await _client!.CallAsync("nvim_get_value", "guifont");
+            if (gf is string s) guifont = s;
+            object? gfw = await _client.CallAsync("nvim_get_value", "guifontwide");
+            if (gfw is string s2) guifontwide = s2;
+        }
+        catch { /* non-fatal: keep current fonts */ }
+
+        LogStartup($"guifont={guifont ?? ""} guifontwide={guifontwide ?? ""}");
+
+        string newNarrow, newWide; double newNSize, newWSize;
+        ParseNvimFont(guifont, NarrowFallback, out newNarrow, out newNSize);
+        if (!string.IsNullOrEmpty(guifontwide))
+            ParseNvimFont(guifontwide, WideFallback, out newWide, out newWSize);
+        else { newWide = newNarrow; newWSize = newNSize; }
+
+        // Apply + re-render only on change so the 1s re-read is a no-op when fonts are stable.
+        if (newNarrow == _narrowFont && newNSize == _narrowSize &&
+            newWide == _wideFont && newWSize == _wideSize) return;
+
+        LogStartup($"guifont APPLIED: narrow={newNarrow}@{newNSize} wide={newWide}@{newWSize}");
+        _narrowFont = newNarrow; _narrowSize = newNSize;
+        _wideFont = newWide; _wideSize = newWSize;
+        ScheduleRender();
     }
 
     // Diagnostic logging (file-based). OFF by default — set NVIM_WINUI_DIAG=1 to enable. The hot
