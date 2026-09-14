@@ -85,11 +85,13 @@ public partial class MainWindow : Window
     private string _wideFont = WideFallback;
     private double _wideSize = 14;
 
-    // Parse an nvim guifont/guifontwide setting of the form "FontName:Style:Size" into
-    // family and size. Style/weight is ignored (WinUI FontFamily has no weight parameter);
-    // if Size is missing, default to 14. If the string is empty/null, use defaults.
-    // The parsed family is always followed by `fallback` so CJK/emoji/symbol code points
-    // that the primary font lacks still render (no tofu).
+    // Parse an nvim guifont/guifontwide setting into family and size. The canonical form is
+    // "FontName:Style:Size" (e.g. "Cascadia Mono:hregular:12"), but the Style field may be omitted,
+    // giving just "FontName:Size" (e.g. "OperatorMono Nerd Font:h16"). Size tokens are written with
+    // an 'h' prefix ("h16") and we accept them in either position; a bare number is also accepted.
+    // Style/weight itself is ignored (WinUI FontFamily has no weight parameter). If no size is
+    // found, default to 14. Empty/null setting -> defaults. The parsed family is always followed by
+    // `fallback` so CJK/emoji/symbol code points the primary font lacks still render (no tofu).
     private static void ParseNvimFont(string? setting, string fallback, out string family, out double size)
     {
         if (string.IsNullOrEmpty(setting))
@@ -101,7 +103,12 @@ public partial class MainWindow : Window
         var parts = setting.Split(':', StringSplitOptions.RemoveEmptyEntries);
         family = parts[0].Trim();
         size = 14;
-        if (parts.Length >= 3 && int.TryParse(parts[2], out int sz)) size = sz;
+        for (int i = 1; i < parts.Length; i++)
+        {
+            string t = parts[i].Trim().ToLowerInvariant();
+            if (t.StartsWith("h") && int.TryParse(t.Substring(1), out int hsz)) { size = hsz; break; } // "h16"
+            if (int.TryParse(t, out int sz)) { size = sz; break; }                                   // bare "16"
+        }
         // Append the fallback chain so CJK/emoji/symbol code points the primary font lacks
         // still render (no tofu). FontFamily ignores repeated family names.
         family += ", " + fallback;

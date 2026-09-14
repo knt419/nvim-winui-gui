@@ -167,9 +167,12 @@ public partial class MainWindow
         string? guifont = null, guifontwide = null;
         try
         {
-            object? gf = await _client!.CallAsync("nvim_get_value", "guifont");
+            // guifont/guifontwide are OPTIONS (&guifont), not Vimscript variables — read them with
+            // nvim_get_option_value. (nvim_get_value reads g:guifont, which is nil unless the user
+            // happens to set a variable of that name.) Empty opts {} = global scope.
+            object? gf = await _client!.CallAsync("nvim_get_option_value", "guifont", new Dictionary<string, object?>());
             if (gf is string s) guifont = s;
-            object? gfw = await _client.CallAsync("nvim_get_value", "guifontwide");
+            object? gfw = await _client.CallAsync("nvim_get_option_value", "guifontwide", new Dictionary<string, object?>());
             if (gfw is string s2) guifontwide = s2;
         }
         catch { /* non-fatal: keep current fonts */ }
