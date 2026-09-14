@@ -28,7 +28,7 @@ public sealed class NvimClient : IDisposable
     private readonly MsgpackStreamDecoder _decoder = new();
     private readonly SemaphoreSlim _writeSemaphore = new(1, 1);
     private readonly ConcurrentDictionary<long, TaskCompletionSource<object?>> _pending = new();
-    private int _nextId = 1;
+    private int _nextId = 0; // Interlocked.Increment'd in CallAsync (starts at 1)
     private bool _disposed;
     private int _frameLogCount;
     private int _notifSeq; // diagnostic: running count of notifications Dispatch has seen
@@ -90,7 +90,7 @@ public sealed class NvimClient : IDisposable
     {
         if (_disposed) throw new ObjectDisposedException(nameof(NvimClient));
 
-        long id = _nextId++;
+        long id = Interlocked.Increment(ref _nextId); // atomic: CallAsync is called from UI + IO threads concurrently
         var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
 
