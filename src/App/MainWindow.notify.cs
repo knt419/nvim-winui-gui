@@ -5,6 +5,7 @@ using Windows.System;
 using Windows.UI;
 using Windows.UI.Core;
 using System.Diagnostics;
+using System.IO;
 using NvimCore;
 
 namespace NvimWinUIGui;
@@ -52,10 +53,17 @@ public partial class MainWindow
         SetStatus("spawning nvim...");
         try
         {
+            string nvimPath = ResolveNvimPath();
+            if (!File.Exists(nvimPath))
+            {
+                LogStartup($"nvim not found (tried NVIM_WINUI_NVIM, PATH, default install dir); got '{nvimPath}'");
+                SetStatus("nvim.exe not found — set NVIM_WINUI_NVIM or add nvim to PATH");
+                return;
+            }
             int port = FindFreePort();
             // --headless: without it, nvim's console-UI init path hangs startup when all stdio is
             // redirected (no real console) and the --listen socket never opens. Verified empirically 2026-08-24.
-            var psi = new ProcessStartInfo(NvimPath, $"--listen 127.0.0.1:{port} --headless")
+            var psi = new ProcessStartInfo(nvimPath, $"--listen 127.0.0.1:{port} --headless")
             {
                 UseShellExecute = false,
                 RedirectStandardInput = true,

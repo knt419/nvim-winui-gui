@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
@@ -24,7 +25,27 @@ namespace NvimWinUIGui;
 /// </summary>
 public partial class MainWindow : Window
 {
-    private const string NvimPath = @"C:\Program Files\Neovim\bin\nvim.exe";
+    // Resolve nvim.exe at startup instead of a hardcoded absolute path.
+    // Order: NVIM_WINUI_NVIM env var (explicit override) -> PATH lookup -> default install dir.
+    private static string ResolveNvimPath()
+    {
+        var ov = Environment.GetEnvironmentVariable("NVIM_WINUI_NVIM");
+        if (!string.IsNullOrEmpty(ov) && File.Exists(ov)) return ov;
+
+        var pathVar = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var dir in pathVar.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            try
+            {
+                string p = Path.Combine(dir.Trim().Trim('"'), "nvim.exe");
+                if (File.Exists(p)) return p;
+            }
+            catch { /* skip malformed PATH entries */ }
+        }
+
+        const string fallback = @"C:\Program Files\Neovim\bin\nvim.exe";
+        return File.Exists(fallback) ? fallback : "nvim.exe"; // last resort: let the OS resolve it
+    }
 
     private readonly Grid GlyphGrid;
     private readonly ScrollViewer Host;
