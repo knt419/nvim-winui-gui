@@ -34,9 +34,13 @@ public sealed class NvimClient : IDisposable
     private int _rxBytesTotal; // diagnostic: total bytes pulled off the socket by ReadLoop
 
     // Diagnostic trace (file-based): every frame Dispatch sees + every CallAsync send.
+    // OFF by default — set NVIM_WINUI_DIAG=1 to enable the per-frame RPC trace (it writes a line
+    // per socket frame, so leaving it on spams client_trace.log and adds IO on the hot path).
+    private static readonly bool _diagEnabled = Environment.GetEnvironmentVariable("NVIM_WINUI_DIAG") == "1";
     private static readonly object _tlogLock = new();
     private static void TLog(string s)
     {
+        if (!_diagEnabled) return; // off by default (see _diagEnabled above)
         try
         {
             var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvimWinUIGui");

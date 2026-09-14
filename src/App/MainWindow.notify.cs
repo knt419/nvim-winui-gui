@@ -29,7 +29,7 @@ public partial class MainWindow
             string nvimPath = ResolveNvimPath();
             if (!File.Exists(nvimPath))
             {
-                LogStartup($"nvim not found (tried NVIM_WINUI_NVIM, PATH, default install dir); got '{nvimPath}'");
+                LogCritical($"nvim not found (tried NVIM_WINUI_NVIM, PATH, default install dir); got '{nvimPath}'");
                 SetStatus("nvim.exe not found — set NVIM_WINUI_NVIM or add nvim to PATH");
                 return;
             }
@@ -47,7 +47,7 @@ public partial class MainWindow
             _nvimProc = System.Diagnostics.Process.Start(psi);
             if (_nvimProc == null) { SetStatus("failed to spawn nvim"); return; }
             LogStartup("spawned nvim pid=" + _nvimProc.Id + " port=" + port);
-            _nvimProc.ErrorDataReceived += (s, e) => { if (e.Data != null) LogStartup("NVIM-ERR " + e.Data); };
+            _nvimProc.ErrorDataReceived += (s, e) => { if (e.Data != null) LogCritical("NVIM-ERR " + e.Data); };
             _nvimProc.BeginErrorReadLine();
             var client = await ConnectWithRetryAsync(port, 5);
             LogStartup("tcp connect OK");
@@ -153,18 +153,36 @@ public partial class MainWindow
         }
         catch (Exception ex)
         {
-            LogStartup($"\nSTARTUP FAILED: {ex}");
+            LogCritical($"\nSTARTUP FAILED: {ex}");
             SetStatus($"STARTUP FAILED: {ex.Message}");
         }
     }
 
+    // Diagnostic logging (file-based). OFF by default — set NVIM_WINUI_DIAG=1 to enable. The hot
+    // path logs every redraw event / resize, so leaving it on spams startup.log and adds file IO
+    // per frame. LogCritical() is the always-on exception: rare fatal errors are recorded even
+    // when diagnostics are off, so a crash stays diagnosable without the env var.
+    private static readonly bool _diagEnabled = Environment.GetEnvironmentVariable("NVIM_WINUI_DIAG") == "1";
+
     private static void LogStartup(string s)
     {
+        if (!_diagEnabled) return; // off by default (see _diagEnabled above)
         try
         {
             var dir = System.IO.Path.GetDirectoryName(StartupLogPath)!;
             System.IO.Directory.CreateDirectory(dir);
             System.IO.File.AppendAllText(StartupLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {s}{System.Environment.NewLine}");
+        }
+        catch { /* best effort */ }
+    }
+
+    private static void LogCritical(string s)
+    {
+        try
+        {
+            var dir = System.IO.Path.GetDirectoryName(StartupLogPath)!;
+            System.IO.Directory.CreateDirectory(dir);
+            System.IO.File.AppendAllText(StartupLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] CRITICAL {s}{System.Environment.NewLine}");
         }
         catch { /* best effort */ }
     }
@@ -227,7 +245,7 @@ public partial class MainWindow
         catch (Exception ex)
         {
             SetStatus($"notify error: {ex.Message}");
-            LogStartup("NOTIFY EXCEPTION in " + method + ": " + ex.GetType().Name + ": " + ex.Message + "\n" + ex.StackTrace);
+            LogCritical("NOTIFY EXCEPTION in " + method + ": " + ex.GetType().Name + ": " + ex.Message + "\n" + ex.StackTrace);
         }
     }
 
