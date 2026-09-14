@@ -30,7 +30,6 @@ public sealed class NvimClient : IDisposable
     private readonly ConcurrentDictionary<long, TaskCompletionSource<object?>> _pending = new();
     private int _nextId = 0; // Interlocked.Increment'd in CallAsync (starts at 1)
     private bool _disposed;
-    private int _frameLogCount;
     private int _notifSeq; // diagnostic: running count of notifications Dispatch has seen
     private int _rxBytesTotal; // diagnostic: total bytes pulled off the socket by ReadLoop
 
@@ -58,8 +57,6 @@ public sealed class NvimClient : IDisposable
 
     /// <summary>Raised for every [2, method, args] notification from nvim (e.g. "redraw").</summary>
     public event Action<string, object?[]?>? OnNotification;
-
-    private sealed record PendingCall(int Id);
 
     private NvimClient(TcpClient tcp)
     {

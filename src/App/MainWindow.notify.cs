@@ -17,33 +17,6 @@ public partial class MainWindow
         try { StatusText.Text = s; } catch { /* XAML already torn down (shutdown path); ignore */ }
     }
 
-    private static string DiagVal(object? v)
-    {
-        if (v is null) return "null";
-        if (v is string s) return "\"" + (s.Length > 12 ? s.Substring(0, 12) + "…" : s) + "\"";
-        if (v is object?[] a)
-        {
-            var first = a.Length > 0 ? a[0] : null;
-            return "[" + a.Length + "]" + (first != null ? first.GetType().Name + "[]" : "");
-        }
-        string t = v.GetType().Name;
-        string s2 = v.ToString() ?? "?";
-        if (s2.Length > 14) s2 = s2.Substring(0, 14) + "…";
-        return t + ":" + s2;
-    }
-
-    // Round-8 diagnostics: event-order trace (first 60 redraw events), every grid_resize in full,
-    // and the RAW shape of grid_line cells so we can see exactly what nvim sends vs how we read it.
-    private int _evTraceCount;
-    private void TraceEvent(string name, object?[] a)
-    {
-        if (_evTraceCount < 60)
-        {
-            _evTraceCount++;
-            LogStartup("EVTRACE " + name + " len=" + a.Length);
-        }
-    }
-
     private static string StartupLogPath => System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvimWinUIGui", "startup.log");
 
