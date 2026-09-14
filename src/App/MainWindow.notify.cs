@@ -304,6 +304,7 @@ public partial class MainWindow
             case "grid_line":
             {
                 // Each tuple: [grid_id, row_idx, col_start, cells_array, wrap]. Multiple tuples (one per line) may be sent.
+                int lastHl = -1; // per grid_line event: a cell with no hl_id inherits the most recently seen one
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 4) continue;
@@ -317,7 +318,7 @@ public partial class MainWindow
                     foreach (var cellRaw in cellArray)
                     {
                         string txt;
-                        int hl = -1;
+                        int hl = lastHl; // inherit most-recently-seen hl_id when this cell omits it
                         int repeatCount = 1;
 
                         if (cellRaw is string s2)
@@ -325,7 +326,7 @@ public partial class MainWindow
                         else if (cellRaw is object?[] ce && ce.Length > 0 && ce[0] is string cs)
                         {
                             txt = cs;
-                            if (ce.Length > 1 && ToInt(ce[1]) >= 0) hl = ToInt(ce[1]); // highlight ID
+                            if (ce.Length > 1 && ToInt(ce[1]) >= 0) { hl = ToInt(ce[1]); lastHl = hl; } // highlight ID
                             if (ce.Length > 2) { int rc = ToInt(ce[2]); if (rc > 1) repeatCount = rc; }
                         }
                         else continue;
