@@ -114,63 +114,69 @@ public partial class MainWindow
             ScheduleRender();
             SetStatus($"ui attached ({_cols}x{_rows}). typing forwards to nvim.");
 
-            // CRITICAL: avoid Ex-mode commands that can error (:w on an unnamed buffer = E32) —
-            // such errors make nvim block at the hit-enter prompt and STOP processing RPC, so every
-            // later CallAsync would hang forever. Plain typing goes through insert mode only.
-            await _client.CallAsync("nvim_input", "ihello from nvim-winui-gui");
-            LogStartup("POST-INPUT input response received");
-
-            // Self-test: create a NEW buffer to avoid depending on nvim's initial state (scratch buffer, etc.).
-            // This ensures the typed text goes into a known buffer and can be read back reliably.
-            LogStartup("STEP creating test buffer");
-            try
+            // Self-test (DIAGNOSTICS ONLY): types text into nvim and creates/switches a test
+            // buffer, so it pollutes the user's real session. OFF by default — enable with
+            // NVIM_WINUI_SELFTEST=1 when verifying the RPC round-trip end to end.
+            if (Environment.GetEnvironmentVariable("NVIM_WINUI_SELFTEST") == "1")
             {
-                // nvim_create_buf takes TWO boolean args: {listed}, {scratch} — not a buffer name.
-                // Buffers in nvim are identified by numeric ID only; there is no "name" parameter.
-                object? testBuf = await _client.CallAsync("nvim_create_buf", false, false).ConfigureAwait(false);
-                int testBufNum;
-                if (testBuf is MsgpackStreamDecoder.MsgpackExt extHandle)
-                {
-                    string dataHex = BitConverter.ToString(extHandle.Data).Replace("-", "").ToLowerInvariant();
-                    LogStartup($"FIXEXT TypeId={extHandle.TypeId} DataLen={extHandle.Data.Length} DataHex={dataHex}");
-                    switch (extHandle.Data.Length)
-                    {
-                        case 1: testBufNum = extHandle.Data[0]; break;
-                        case 2: testBufNum = (int)(extHandle.Data[0] << 8 | extHandle.Data[1]); break;
-                        case 4: testBufNum = (int)System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(extHandle.Data.AsSpan()); break;
-                        case 8: testBufNum = (int)System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(extHandle.Data.AsSpan()); break;
-                        default: throw new InvalidOperationException($"Unexpected buffer handle data length: {extHandle.Data.Length}");
-                    }
-                }
-                else
-                    testBufNum = (int)testBuf!;
+                // CRITICAL: avoid Ex-mode commands that can error (:w on an unnamed buffer = E32) —
+                // such errors make nvim block at the hit-enter prompt and STOP processing RPC, so every
+                // later CallAsync would hang forever. Plain typing goes through insert mode only.
+                await _client.CallAsync("nvim_input", "ihello from nvim-winui-gui");
+                LogStartup("POST-INPUT input response received");
 
-                LogStartup($"STEP got test buffer #{testBufNum}");
-                // Switch to the test buffer so typing goes there
-                await _client.CallAsync("nvim_set_current_buf", testBufNum).ConfigureAwait(false);
-                LogStartup($"STEP switched to test buffer, current={await _client.CallAsync("nvim_get_current_buf").ConfigureAwait(false)}");
-                // Type into it (using set_lines for deterministic self-test; nvim_input can be mode-dependent)
-                // nvim_buf_set_lines(bufid, startline, endline, replace:bool, lines:[string]) — order matters.
-                object?[] putArgs = { testBufNum, 0, 1, true, new string[] { "hello from nvim-winui-gui" } };
-                await _client.CallAsync("nvim_buf_set_lines", putArgs).ConfigureAwait(false);
-                LogStartup("POST-SET lines written to test buffer");
-                // Wait for redraw
-                await Task.Delay(1000).ConfigureAwait(false);
-                // Read from the test buffer
-                var lines = await _client.CallAsync("nvim_buf_get_lines", testBufNum, 0, 1, true).ConfigureAwait(false);
-                LogStartup("STEP got lines (test buffer)");
-                string line1 = (lines is object?[] la && la.Length > 0 && la[0] is string s) ? s : "<none>";
-                // Count cells with a NON-SPACE glyph: every cell starts as " ", so Length>0 always
-                // passed and masked an empty grid. Non-space count only rises when real text lands.
-                int populated = 0;
-                for (int i = 0; i < _cells.Length; i++)
-                    if (_cells[i].Text.Trim().Length > 0) populated++;
-                string row0 = "";
-                for (int c2 = 0; c2 < Math.Min(_cols, 80); c2++) row0 += _cells[c2].Text;
-                LogStartup($"SELFTEST line1=\"{line1}\" cells_total={_cells.Length} nonblank_cells={populated} " +
-                            $"row0=[{row0}] EXPECT line1=hello from nvim-winui-gui, nonblank>25");
+                // Self-test: create a NEW buffer to avoid depending on nvim's initial state (scratch buffer, etc.).
+                // This ensures the typed text goes into a known buffer and can be read back reliably.
+                LogStartup("STEP creating test buffer");
+                try
+                {
+                    // nvim_create_buf takes TWO boolean args: {listed}, {scratch} — not a buffer name.
+                    // Buffers in nvim are identified by numeric ID only; there is no "name" parameter.
+                    object? testBuf = await _client.CallAsync("nvim_create_buf", false, false).ConfigureAwait(false);
+                    int testBufNum;
+                    if (testBuf is MsgpackStreamDecoder.MsgpackExt extHandle)
+                    {
+                        string dataHex = BitConverter.ToString(extHandle.Data).Replace("-", "").ToLowerInvariant();
+                        LogStartup($"FIXEXT TypeId={extHandle.TypeId} DataLen={extHandle.Data.Length} DataHex={dataHex}");
+                        switch (extHandle.Data.Length)
+                        {
+                            case 1: testBufNum = extHandle.Data[0]; break;
+                            case 2: testBufNum = (int)(extHandle.Data[0] << 8 | extHandle.Data[1]); break;
+                            case 4: testBufNum = (int)System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(extHandle.Data.AsSpan()); break;
+                            case 8: testBufNum = (int)System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(extHandle.Data.AsSpan()); break;
+                            default: throw new InvalidOperationException($"Unexpected buffer handle data length: {extHandle.Data.Length}");
+                        }
+                    }
+                    else
+                        testBufNum = (int)testBuf!;
+
+                    LogStartup($"STEP got test buffer #{testBufNum}");
+                    // Switch to the test buffer so typing goes there
+                    await _client.CallAsync("nvim_set_current_buf", testBufNum).ConfigureAwait(false);
+                    LogStartup($"STEP switched to test buffer, current={await _client.CallAsync("nvim_get_current_buf").ConfigureAwait(false)}");
+                    // Type into it (using set_lines for deterministic self-test; nvim_input can be mode-dependent)
+                    // nvim_buf_set_lines(bufid, startline, endline, replace:bool, lines:[string]) — order matters.
+                    object?[] putArgs = { testBufNum, 0, 1, true, new string[] { "hello from nvim-winui-gui" } };
+                    await _client.CallAsync("nvim_buf_set_lines", putArgs).ConfigureAwait(false);
+                    LogStartup("POST-SET lines written to test buffer");
+                    // Wait for redraw
+                    await Task.Delay(1000).ConfigureAwait(false);
+                    // Read from the test buffer
+                    var lines = await _client.CallAsync("nvim_buf_get_lines", testBufNum, 0, 1, true).ConfigureAwait(false);
+                    LogStartup("STEP got lines (test buffer)");
+                    string line1 = (lines is object?[] la && la.Length > 0 && la[0] is string s) ? s : "<none>";
+                    // Count cells with a NON-SPACE glyph: every cell starts as " ", so Length>0 always
+                    // passed and masked an empty grid. Non-space count only rises when real text lands.
+                    int populated = 0;
+                    for (int i = 0; i < _cells.Length; i++)
+                        if (_cells[i].Text.Trim().Length > 0) populated++;
+                    string row0 = "";
+                    for (int c2 = 0; c2 < Math.Min(_cols, 80); c2++) row0 += _cells[c2].Text;
+                    LogStartup($"SELFTEST line1=\"{line1}\" cells_total={_cells.Length} nonblank_cells={populated} " +
+                                $"row0=[{row0}] EXPECT line1=hello from nvim-winui-gui, nonblank>25");
+                }
+                catch (Exception ex) { LogStartup("SELFTEST FAILED: " + ex.Message); }
             }
-            catch (Exception ex) { LogStartup("SELFTEST FAILED: " + ex.Message); }
         }
         catch (Exception ex)
         {
