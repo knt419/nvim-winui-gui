@@ -270,11 +270,22 @@ private void RenderNow()
 
         bool isCur = i == curIdx && curIdx >= 0;
         Color fg, bg;
-        string txt = cell.Text.Length > 0 ? cell.Text : " ";
-        // Determine whether this cell needs the wide font (CJK/Hangul/Kana). We only need to
-        // update FontFamily when it changes since last render — track via Cell.RFontKey.
-        bool isWideGlyph = txt.Length > 0 && IsWideChar(txt[0]);
+        // Use the cell text as-is: nvim sends "" for blank cells AND for the right half of a
+        // double-width glyph (a "covered" tail). Rendering those empty lets the wide head's
+        // ColumnSpan=2 fill both columns with no stray space/tofu in the tail.
+        string txt = cell.Text;
+        // Wide glyphs (CJK/emoji, display width 2) need the guifontwide font AND to span two grid
+        // columns so the glyph isn't clipped to one cell. Tails have Text=="" so they're never wide.
+        bool isWideGlyph = IsWideGlyph(txt);
         int desiredKey = isWideGlyph ? 1 : 0;
+
+        // A wide glyph occupies two grid columns: span the head Border across both so the glyph is
+        // drawn at full width and isn't clipped to a single cell. The tail keeps Text=="" so it
+        // contributes nothing; the ColumnSpan=2 head paints over its column too. Guard the last
+        // column (a wide char can't start there in valid nvim output, but be safe).
+        int span = isWideGlyph && c < cols - 1 ? 2 : 1;
+        if (box.GetValue(Grid.ColumnSpanProperty) is not int cs || cs != span) Grid.SetColumnSpan(box, span);
+
         int bgi = -1; // packed background key for cursor/highlight cells only
         if (isCur) { fg = _defBg; bg = _defFg; bgi = PackColor(bg); } // inverted cursor cell
         else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h))
@@ -336,15 +347,29 @@ private static int PackColor(Color c) => (c.A << 24) | (c.R << 16) | (c.G << 8) 
 // not covered by guifont's glyph set — they fall back to guifontwide instead of showing
 // tofu or misaligning the grid. WinAppSDK has no easy per-character glyph coverage API,
 // so we use Unicode ranges as a reliable proxy for "multibyte" characters.
-private static bool IsWideChar(char ch)
+private static bool IsWideCodePoint(int cp)
 {
-    int code = (int)ch;
-    return code >= 0x3040 && code <= 0x30FF ||   // Hiragana
-           code >= 0x4E00 && code <= 0x9FFF ||   // CJK Unified (Chinese/Japanese/Korean radicals, ideographs)
-           code >= 0xA000 && code <= 0xAFFF ||   // Korean Hangul
-           code >= 0x4300 && code <= 0x46FF ||   // Katakana
-           code == 0x3000 ||                     // Fullwidth space
-           (code >= 0xFF16 && code <= 0xFF5F);    // Fullwidth digits, letters, kana, punctuation
+    return (cp >= 0x1100 && cp <= 0x115F) ||   // Hangul Jamo
+           (cp >= 0x2E80 && cp <= 0xA4CF) ||   // CJK radicals, Kangxi, CJK unified ideographs
+           (cp >= 0xAC00 && cp <= 0xD7A3) ||   // Korean Hangul syllables
+           (cp >= 0xF900 && cp <= 0xFAFF) ||   // CJK compatibility ideographs
+           (cp >= 0xFE30 && cp <= 0xFE4F) ||   // CJK compatibility forms
+           (cp >= 0xFF00 && cp <= 0xFFEF) ||   // Fullwidth forms (incl. fullwidth space 0x3000 handled below)
+           (cp >= 0x1F300 && cp <= 0x1FAFF) || // Emoji & pictographs (astral, surrogate pairs)
+           (cp >= 0x2600 && cp <= 0x27BF) ||   // Misc symbols + dingbats (nerdfont-style glyphs)
+           (cp >= 0x3040 && cp <= 0x30FF) ||   // Hiragana / Katakana
+           cp == 0x3000;                        // Fullwidth space
+}
+
+// String form that handles surrogate pairs: an emoji/astral glyph arrives as two UTF-16 chars, so
+// the first code point must be recombined before the range check (txt[0] alone is just a high surrogate).
+private static bool IsWideGlyph(string s)
+{
+    if (s.Length == 0) return false;
+    int cp = char.IsHighSurrogate(s[0]) && s.Length > 1 && char.IsLowSurrogate(s[1])
+        ? ((int)s[0] - 0xD800) * 0x400 + (int)s[1] - 0xDC00 + 0x10000
+        : s[0];
+    return IsWideCodePoint(cp);
 }
 
 private static int ToInt(object? v) => v switch
@@ -354,7 +379,6 @@ private static int ToInt(object? v) => v switch
         double d => (int)d,
         _ => -1
     };
-private static string Widen(string s) => s.Length > 0 ? s : " ";
 private static Hl ParseHl(object? v)
     {
         if (v is Dictionary<string, object?> m)

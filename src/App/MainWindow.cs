@@ -69,29 +69,43 @@ public partial class MainWindow : Window
     private int _curRow = -1;
     private int _curCol = -1;
 
+    // Font fallback chains. The first family is the user's guifont; the rest are system fonts that
+    // supply glyphs the primary lacks, so wide/CJK/emoji/symbol code points don't render as tofu:
+    //   Yu Gothic / Meiryo / MS Gothic  -> full-width CJK (Japanese)
+    //   Segoe UI Emoji                  -> emoji + astral symbols
+    //   Segoe UI Symbol                 -> box-drawing, arrows, misc symbols
+    private const string NarrowFallback = "Cascadia Mono, Consolas, Segoe UI Symbol";
+    private const string WideFallback = "Cascadia Mono, Consolas, Yu Gothic, Meiryo, MS Gothic, Segoe UI Emoji, Segoe UI Symbol";
+
     // Fonts applied from nvim's guifont/guifontwide. WinUI FontFamily has no width/weight
     // parameters, so the "wide" flag is honored by looking for a matching *Wide* family name
     // via GDI font enumeration (falls back to the base family if none exists).
-    private string _narrowFont = "Cascadia Mono, Consolas";
+    private string _narrowFont = NarrowFallback;
     private double _narrowSize = 14;
-    private string _wideFont = "Cascadia Mono, Consolas";
+    private string _wideFont = WideFallback;
     private double _wideSize = 14;
 
     // Parse an nvim guifont/guifontwide setting of the form "FontName:Style:Size" into
     // family and size. Style/weight is ignored (WinUI FontFamily has no weight parameter);
     // if Size is missing, default to 14. If the string is empty/null, use defaults.
-    private static void ParseNvimFont(string? setting, out string family, out double size)
+    // The parsed family is always followed by `fallback` so CJK/emoji/symbol code points
+    // that the primary font lacks still render (no tofu).
+    private static void ParseNvimFont(string? setting, string fallback, out string family, out double size)
     {
         if (setting == null || setting.Length == 0)
         {
             family = "Cascadia Mono, Consolas";
             size = 14;
-            return;
         }
-        var parts = setting.Split(':', StringSplitOptions.RemoveEmptyEntries);
-        family = parts[0].Trim();
-        size = 14;
-        if (parts.Length >= 3 && int.TryParse(parts[2], out int sz)) size = sz;
+        else
+        {
+            var parts = setting.Split(':', StringSplitOptions.RemoveEmptyEntries);
+            family = parts[0].Trim();
+            size = 14;
+            if (parts.Length >= 3 && int.TryParse(parts[2], out int sz)) size = sz;
+        }
+        // Append the fallback chain (dedupe: FontFamily ignores repeated names).
+        family += ", " + fallback;
     }
 
     public MainWindow()

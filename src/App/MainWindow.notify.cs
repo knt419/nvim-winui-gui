@@ -66,9 +66,9 @@ public partial class MainWindow
                 if (gfw is string s2) guifontwide = s2;
             } catch { /* non-fatal: fall back to defaults */ }
             LogStartup($"guifont={guifont ?? ""} guifontwide={guifontwide ?? ""}");
-            ParseNvimFont(guifont, out _narrowFont, out _narrowSize);
+            ParseNvimFont(guifont, NarrowFallback, out _narrowFont, out _narrowSize);
             if (!string.IsNullOrEmpty(guifontwide))
-                ParseNvimFont(guifontwide, out _wideFont, out _wideSize);
+                ParseNvimFont(guifontwide, WideFallback, out _wideFont, out _wideSize);
             else { _wideFont = _narrowFont; _wideSize = _narrowSize; }
 
             _client.OnNotification += OnNvimNotification;
@@ -293,12 +293,34 @@ public partial class MainWindow
                         }
                         else continue;
 
-                        for (int r = 0; r < repeatCount && col < _cols; r++, col++)
+                        // Place character-by-character so wide glyphs (CJK/emoji, display width 2)
+                        // advance the column by 2 and their tail cell is marked covered-blank. The
+                        // old code advanced col by 1 per entry, which desynced every column after a
+                        // wide char from nvim's grid -> misalignment + tofu in the tail cells.
+                        for (int r = 0; r < repeatCount && col < _cols; r++)
                         {
-                            if (col < 0) continue;
-                            var cell = _cells[rowIdx * _cols + col];
-                            cell.Text = Widen(txt);
-                            cell.Hl = hl >= 0 ? hl : -1; // only apply valid highlight IDs
+                            int p = 0;
+                            while (p < txt.Length)
+                            {
+                                string g;
+                                if (char.IsHighSurrogate(txt[p]) && p + 1 < txt.Length && char.IsLowSurrogate(txt[p + 1]))
+                                    { g = txt.Substring(p, 2); p += 2; }   // full surrogate pair (emoji/astral)
+                                else
+                                    { g = txt[p].ToString(); p += 1; }    // BMP code point
+                                if (col >= _cols) break;
+                                var head = _cells[rowIdx * _cols + col];
+                                head.Text = g;                            // the glyph (never empty here)
+                                head.Hl = hl >= 0 ? hl : -1;              // only apply valid highlight IDs
+                                int w = IsWideGlyph(g) ? 2 : 1;           // display width in cells
+                                col++;
+                                for (int k = 1; k < w && col < _cols; k++)
+                                {
+                                    var tail = _cells[rowIdx * _cols + col];
+                                    tail.Text = "";                       // covered by the wide glyph -> render blank, no tofu
+                                    tail.Hl = hl >= 0 ? hl : -1;
+                                    col++;
+                                }
+                            }
                         }
                     }
                     ScheduleRender();
