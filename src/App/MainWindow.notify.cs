@@ -449,6 +449,7 @@ public partial class MainWindow
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 3) continue;
+                    int cGridId = ToInt(t[0]);
                     _curRow = ToInt(t[1]); _curCol = ToInt(t[2]);
                     ScheduleRender();
                 }

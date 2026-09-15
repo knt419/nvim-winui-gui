@@ -57,6 +57,23 @@ public partial class MainWindow
         }
         catch (Exception ex) { LogCritical("MeasureRefCell failed: " + ex.Message); }
     }
+    // Natural line height of a font/size via an offscreen TextBlock — used to vertically center the
+    // Win2D text inside each cell (DirectWrite draws from the top of its natural line box). UI thread.
+    private double MeasureNatLineH(string fontFamily, double size)
+    {
+        try
+        {
+            var probe = new TextBlock
+            {
+                FontFamily = new FontFamily(fontFamily),
+                FontSize = size,
+                Text = "Hg"
+            };
+            probe.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+            return Math.Max(1.0, probe.DesiredSize.Height);
+        }
+        catch { return _cellH; } // fallback: assume natural height == cell (no offset)
+    }
     // Fixed height of the status row under the grid (see MainWindow.cs visual tree). Must match
     // the XAML so window<->grid conversions are exact.
     private const double StatusTextHeight = 25.0;
@@ -72,6 +89,7 @@ public partial class MainWindow
 private readonly Dictionary<int, Microsoft.Graphics.Canvas.Brushes.ICanvasBrush> _w2dBrushCache = new();
 private string _tfKeyNarrow = "", _tfKeyWide = "";
 private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _tfNarrow, _tfWide;
+private double _natLineHNarrow = -1, _natLineHWide = -1; // natural line heights (for vertical centering)
 private int _invalidateCount; // DIAG: count Invalidate() calls (verify Draw keeps firing)
 
 private static string? MapKey(VirtualKey vk) => vk switch
@@ -283,9 +301,9 @@ private void RenderNow()
 private void EnsureTextFormats()
 {
     string nk = _narrowFont + "@" + _narrowSize;
-    if (nk != _tfKeyNarrow) { _tfNarrow = MakeTf(nk); _tfKeyNarrow = nk; LogStartup($"TF narrow={_narrowFont.Split(',')[0]}@{_narrowSize}"); }
+    if (nk != _tfKeyNarrow) { _tfNarrow = MakeTf(nk); _tfKeyNarrow = nk; _natLineHNarrow = -1; LogStartup($"TF narrow={_narrowFont.Split(',')[0]}@{_narrowSize}"); }
     string wk = _wideFont + "@" + _wideSize;
-    if (wk != _tfKeyWide) { _tfWide = MakeTf(wk); _tfKeyWide = wk; LogStartup($"TF wide={_wideFont.Split(',')[0]}@{_wideSize}"); }
+    if (wk != _tfKeyWide) { _tfWide = MakeTf(wk); _tfKeyWide = wk; _natLineHWide = -1; LogStartup($"TF wide={_wideFont.Split(',')[0]}@{_wideSize}"); }
 }
 
 private static Microsoft.Graphics.Canvas.Text.CanvasTextFormat MakeTf(string key)
@@ -318,10 +336,15 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
     int curRow = _curRow, curCol = _curCol;
     int curIdx = curRow >= 0 ? curRow * cols + Math.Clamp(curCol, 0, cols - 1) : -1;
 
-    // LineSpacing defaults to -1 (font's natural line height), which would offset the text. Pin it
-    // to the cell height so each row's baseline sits exactly at r*_cellH (no vertical drift).
-    _tfNarrow!.LineSpacing = chh;
-    _tfWide!.LineSpacing = chh;
+    // LineSpacing: leave at the font's natural value (-1). Pinning it to _cellH made DirectWrite
+    // place the glyph at the TOP of a taller line box, so text sat high in each cell and the cursor
+    // block (full cell height) appeared shifted down relative to the characters. Instead we center
+    // the natural line box inside the cell via an explicit y offset below.
+
+    // Natural line heights (ascent+descent) for vertical centering — measured once per font/size via
+    // an offscreen TextBlock (same technique as MeasureRefCell). Draw runs on the UI thread.
+    if (_natLineHNarrow < 0) _natLineHNarrow = MeasureNatLineH(_narrowFont, _narrowSize);
+    if (_natLineHWide < 0) _natLineHWide = MeasureNatLineH(_wideFont, _wideSize);
 
     // Pass 1: backgrounds (highlight + inverted cursor). Consecutive same-color cells merge into
     // one rect so a full-width status line is a single DrawRectangle.
@@ -335,15 +358,7 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
             {
                 var cell = _cells[r * cols + c];
                 Color bg;
-                if (r * cols + c == curIdx && curIdx >= 0)
-                {
-                    // Inverted cursor: the block takes the cell's OWN foreground color, so it is
-                    // visible on any highlight (CursorLine etc.), not just the default background.
-                    Color nfg;
-                    if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) nfg = h.Fg;
-                    else nfg = _defFg;
-                    bg = nfg;
-                }
+                if (r * cols + c == curIdx && curIdx >= 0) bg = _defFg; // inverted cursor: default fg as block
                 else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) bg = h.Bg;
                 else bg = TransparentColor;
                 hasBg = bg != TransparentColor; // struct equality (ReferenceEquals is always false for structs)
@@ -366,10 +381,11 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
 
     // Pass 2: text. A "run" is consecutive cells sharing the same foreground color and narrow
     // font — drawn as ONE DrawText call (the big win over per-cell XAML). Wide glyphs break the
-    // run and are drawn individually with the wide format; covered tails ("") add no ink.
+    // run and are drawn individually with the wide format; covered tails ("" ) add no ink.
     for (int r = 0; r < rows; r++)
     {
-        float y = (float)(r * _cellH); // LineSpacing == cell height keeps the glyph inside its row
+        float yNarrow = (float)(r * _cellH + (_cellH - _natLineHNarrow) / 2); // centered natural line box
+        float yWide   = (float)(r * _cellH + (_cellH - _natLineHWide) / 2);
         int c = 0;
         while (c < cols)
         {
@@ -379,20 +395,14 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
 
             bool isCur = r * cols + c == curIdx && curIdx >= 0;
             Color fg;
-            if (isCur)
-            {
-                // Inverted cursor: text takes the cell's OWN background color — the exact inverse of
-                // the block (which uses the cell's foreground), so it stays readable on any highlight.
-                if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) fg = h.Bg;
-                else fg = _defBg;
-            }
+            if (isCur) fg = _defBg; // inverted cursor: default bg as glyph color
             else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) fg = h.Fg;
             else fg = _defFg;
             int fgi = PackColor(fg);
 
             if (IsWideGlyph(txt))
             {
-                ds.DrawText(txt, (float)(c * _cellW), y, GetW2dBrush(sender, fg), _tfWide!);
+                ds.DrawText(txt, (float)(c * _cellW), yWide, GetW2dBrush(sender, fg), _tfWide!);
                 c++; // the tail cell is "" and gets skipped by the loop above
                 continue;
             }
@@ -406,18 +416,14 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
                 if (t2.Length == 0) { c++; continue; } // covered tail: no ink, run continues
                 bool isCur2 = r * cols + c == curIdx && curIdx >= 0;
                 Color fg2;
-                if (isCur2)
-                {
-                    if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = h2.Bg;
-                    else fg2 = _defBg;
-                }
+                if (isCur2) fg2 = _defBg;
                 else if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = h2.Fg;
                 else fg2 = _defFg;
                 if (PackColor(fg2) != fgi || IsWideGlyph(t2)) break; // run boundary
                 sb.Append(t2);
                 c++;
             }
-            ds.DrawText(sb.ToString(), (float)(start * _cellW), y, GetW2dBrush(sender, fg), _tfNarrow!);
+            ds.DrawText(sb.ToString(), (float)(start * _cellW), yNarrow, GetW2dBrush(sender, fg), _tfNarrow!);
         }
     }
 
