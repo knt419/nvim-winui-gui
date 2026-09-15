@@ -47,8 +47,7 @@ public partial class MainWindow : Window
         return File.Exists(fallback) ? fallback : "nvim.exe"; // last resort: let the OS resolve it
     }
 
-    private readonly Grid GlyphGrid;
-    private readonly ScrollViewer Host;
+    private readonly Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl GlyphCanvas;
     private readonly TextBlock StatusText;
     private readonly Grid _root;
 
@@ -127,9 +126,17 @@ public partial class MainWindow : Window
         // Same thread, same moment: grab App.OnLaunched's dispatcher sync context for IO-thread -> UI-thread marshaling.
         _uiSyncCtx = System.Threading.SynchronizationContext.Current;
 
-        GlyphGrid = new Grid();
-        Host = new ScrollViewer { IsTabStop = false };
-        Host.Content = GlyphGrid;
+        // GPU grid: one Win2D CanvasControl replaces the old 1920-element XAML cell grid. It sits
+        // DIRECTLY in row 0 of _root (not inside a ScrollViewer — DirectComposition surfaces don't
+        // composite reliably under WinUI3's ScrollViewer, which left the canvas invisible). The
+        // window is always sized to exactly fit the grid (UpdateWindowSize), so no scrolling is
+        // needed; the canvas is centered in row 0 as a safety net for sub-pixel drift.
+        GlyphCanvas = new Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl
+        {
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        GlyphCanvas.Draw += OnGlyphCanvasDraw; // the GPU render (see MainWindow.render.cs)
         StatusText = new TextBlock
         {
             Margin = new Thickness(8, 3, 8, 3),
@@ -141,27 +148,27 @@ public partial class MainWindow : Window
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         // Fixed height for the status row so it matches exactly what UpdateWindowSize calculates.
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(25, GridUnitType.Pixel) });
-        Grid.SetRow(Host, 0);
+        Grid.SetRow(GlyphCanvas, 0);
         Grid.SetRow(StatusText, 1);
-        _root.Children.Add(Host);
+        _root.Children.Add(GlyphCanvas);
         _root.Children.Add(StatusText);
 
         Content = _root;
         _root.KeyDown += OnKeyDown;
         // When the window resizes (or any layout pass occurs), re-render so the grid
         // recalculates its cell sizes and fills the new display area. RenderNow reads
-        // Host.ActualWidth/Height at render time, so it adapts automatically to the new size.
+        // _root.ActualWidth/Height at render time, so it adapts automatically to the new size.
         // Also sync the nvim-side grid: debounced (120ms) so a drag sends only one request;
         // nvim's grid_resize reply then snaps the window back to an exact cell boundary via
         // EnsureScreen -> UpdateWindowSize, which terminates the loop naturally.
-        Host.SizeChanged += (s, e) => { ScheduleRender(); ScheduleNvimResize(); };
-        Host.Loaded += OnLoadedAsync;
-        Activated += (s, e) => Host.Focus(FocusState.Programmatic);
+        GlyphCanvas.SizeChanged += (s, e) => { ScheduleRender(); FlushRender(); ScheduleNvimResize(); };
+        _root.Loaded += OnLoadedAsync;
+        Activated += (s, e) => _root.Focus(FocusState.Programmatic);
         Closed += OnClosed;
     }
 
-    // R*/fields cache the LAST-RENDERED state so RenderNow can skip unchanged cells entirely.
-    private sealed class Cell { public string Text = " "; public int Hl = -1; public string RTxt = ""; public int RFg = -1; public int RBg = -1; public int RFontKey = 0; }
+    // Win2D renders the whole grid every frame (GPU), so no per-cell last-rendered cache is needed.
+    private sealed class Cell { public string Text = " "; public int Hl = -1; }
     private readonly record struct Hl(Color Fg, Color Bg);
 
     private async void OnKeyDown(object sender, KeyRoutedEventArgs e)

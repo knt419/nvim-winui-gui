@@ -24,14 +24,39 @@ public partial class MainWindow
     // grid fills the window when resized. Recalculated every render; no separate size-change
     // detection needed since RenderNow already runs whenever content changes or fonts update.
     private double _cellW = 9, _cellH = 18;
-    // Fixed reference cell size (px) — the unit for window<->grid conversion in BOTH directions:
-    // UpdateWindowSize sizes the window to cols*RefCellW x rows*RefCellH (+status row), and the
-    // resize sync computes a new grid as floor(avail / RefCell). Must match the initial _cellW/_cellH
-    // so the first render is a no-op. Integer on purpose: fit sizes are then exact pixel values, so
-    // after nvim's grid_resize reply the window sits exactly on a cell boundary and no further sync
-    // fires (no feedback loop).
-    private const double RefCellW = 9.0;
-    private const double RefCellH = 18.0;
+    // Reference cell size (px) — the unit for window<->grid conversion in BOTH directions:
+    // UpdateWindowSize sizes the window to cols*_refCellW x rows*_refCellH (+status row), and the
+    // resize sync computes a new grid as floor(avail / _refCell). Derived from the ACTUAL narrow
+    // guifont metrics (see MeasureRefCell) instead of a hardcoded constant, so changing guifont size
+    // (h12/h20/...) resizes cells to match and glyphs stop clipping. Integer on purpose: fit sizes are
+    // then exact pixel values, so after nvim's grid_resize reply the window sits exactly on a cell
+    // boundary and no further sync fires (no feedback loop). Defaults 9x18 = old constant; replaced
+    // by real measurement once the font is known.
+    private double _refCellW = 9, _refCellH = 18;
+
+    // Measure the reference cell from the narrow guifont using an offscreen TextBlock — the SAME
+    // DirectWrite layout engine that renders the grid, so the numbers match what's actually drawn
+    // (a GDI+ measurement would drift from WinUI and re-introduce clipping). Width = advance of "0"
+    // (monospace cell width); height = line height. Rounded UP to whole px to keep fit sizes exact.
+    // Must run on the UI thread (creates a XAML TextBlock) — RefreshGuifontAsync calls it via UiPostAsync.
+    private void MeasureRefCell()
+    {
+        try
+        {
+            var probe = new TextBlock
+            {
+                FontFamily = new FontFamily(_narrowFont),
+                FontSize = _narrowSize,
+                Text = "0"
+            };
+            probe.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+            double w = Math.Ceiling(probe.DesiredSize.Width);
+            double h = Math.Ceiling(probe.DesiredSize.Height);
+            if (w >= 1 && h >= 1) { _refCellW = w; _refCellH = h; }
+            LogStartup($"CELL-METRICS narrow={_narrowFont}@{_narrowSize} -> refcell {_refCellW}x{_refCellH}");
+        }
+        catch (Exception ex) { LogCritical("MeasureRefCell failed: " + ex.Message); }
+    }
     // Fixed height of the status row under the grid (see MainWindow.cs visual tree). Must match
     // the XAML so window<->grid conversions are exact.
     private const double StatusTextHeight = 25.0;
@@ -39,14 +64,15 @@ public partial class MainWindow
     private const int MaxGridCols = 1000;
     private const int MaxGridRows = 400;
     private static readonly Color TransparentColor = default;
-    // Render-diff state: layout is only re-applied when the grid shape changes, and per-cell
-    // text/fg are compared against last-rendered values (RTxt/RFg on Cell) so unchanged cells
-    // produce zero XAML writes. Cursor cell background is diffed via _lastCurIdx. Brushes for
-    // colors are cached by packed ARGB value instead of allocating a SolidColorBrush per cell.
-    private readonly Dictionary<int, SolidColorBrush> _brushCache = new();
-    private int _layoutRows = 0, _layoutCols = 0;
-    private bool _layoutDone = false;
-    private int _lastCurIdx = -1;
+
+// ---- Win2D (Direct2D GPU) grid rendering ----------------------------------------------------
+// The whole grid is drawn onto ONE CanvasControl each frame: the CPU encodes draw commands
+// (~8ms for 1920 cells, measured in a spike) and the GPU rasterizes. This replaces the old
+// 1920-element XAML cell grid whose per-cell layout pass was the real latency bottleneck.
+private readonly Dictionary<int, Microsoft.Graphics.Canvas.Brushes.ICanvasBrush> _w2dBrushCache = new();
+private string _tfKeyNarrow = "", _tfKeyWide = "";
+private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _tfNarrow, _tfWide;
+private int _invalidateCount; // DIAG: count Invalidate() calls (verify Draw keeps firing)
 
 private static string? MapKey(VirtualKey vk) => vk switch
     {
@@ -123,8 +149,8 @@ private void UpdateWindowSize(int cols, int rows)
     // ExtendsContentIntoTitleBar=true there's no title bar in the client area, but the frame
     // still eats _chromeW x _chromeH pixels (measured at runtime; 16x9 on this box). Add it
     // back so the content area is exactly grid + status row.
-    int width = (int)(cols * RefCellW) + _chromeW;
-    int height = (int)(rows * RefCellH + StatusTextHeight) + _chromeH;
+    int width = (int)(cols * _refCellW) + _chromeW;
+    int height = (int)(rows * _refCellH + StatusTextHeight) + _chromeH;
     try { AppWindow.Resize(new SizeInt32(width, height)); } catch { /* ignore */ }
     LogStartup($"RESIZE-DBG UpdateWindowSize req={width}x{height} actual={(AppWindow.Size.Width)}x{(AppWindow.Size.Height)}");
 }
@@ -170,18 +196,18 @@ private void ScheduleNvimResize()
 private void SendNvimResize()
 {
     if (_client == null) return;
-    // Derive cols/rows from AppWindow.Size (synchronous, always current), NOT Host.ActualWidth/
-    // Height — the XAML Actual* values lag one layout pass behind a programmatic window resize,
-    // which made this read a stale (smaller) height and shrink nvim by a row every cycle.
+    // Derive cols/rows from AppWindow.Size (synchronous, always current), NOT XAML Actual* values —
+    // those lag one layout pass behind a programmatic window resize, which made this read a stale
+    // (smaller) height and shrink nvim by a row every cycle.
     int outerW = AppWindow.Size.Width;
     int outerH = AppWindow.Size.Height;
-    int cols = Math.Clamp((int)((outerW - _chromeW) / RefCellW), 2, MaxGridCols);
+    int cols = Math.Clamp((int)((outerW - _chromeW) / _refCellW), 2, MaxGridCols);
     // Content height = outer - frame border - fixed status row; that's the grid area.
-    int rows = Math.Clamp((int)((outerH - _chromeH - StatusTextHeight) / RefCellH), 1, MaxGridRows);
+    int rows = Math.Clamp((int)((outerH - _chromeH - StatusTextHeight) / _refCellH), 1, MaxGridRows);
     LogStartup($"RESIZE-DBG appwin={outerW}x{outerH} chrome={_chromeW}x{_chromeH} -> {cols}x{rows}");
     if (cols == _lastSentCols && rows == _lastSentRows) return; // no change since last send
     _lastSentCols = cols; _lastSentRows = rows;
-    LogStartup($"RESIZE-REQ {cols}x{rows} host={Host.ActualWidth:F0}x{Host.ActualHeight:F0} appwin={(AppWindow.Size.Width)}x{(AppWindow.Size.Height)}");
+    LogStartup($"RESIZE-REQ {cols}x{rows} root={_root.ActualWidth:F0}x{_root.ActualHeight:F0} appwin={(AppWindow.Size.Width)}x{(AppWindow.Size.Height)}");
     try
     {
         // nvim_ui_try_resize is a notification (no response). On success nvim answers with
@@ -203,140 +229,223 @@ private int _schedCount;
 private void ScheduleRender()
 {
     if (Interlocked.Increment(ref _schedCount) % 50 == 1) LogStartup($"SCHED render count={_schedCount}");
+    // Coalesce: mark dirty only. On the UI thread, HandleNotification flushes at its end (one
+    // render per batch, not one per event). Off-thread, post to UI context for immediate render.
     if (_renderQueued) return;
-        _renderQueued = true;
-        var ctx = _uiSyncCtx;
-        if (ctx is not null && !ReferenceEquals(ctx, System.Threading.SynchronizationContext.Current))
-        {
-            try { ctx.Post(_ => RenderNow(), null); return; } catch { /* fall through */ }
-        }
-        RenderNow(); // fallback: run synchronously on current thread (safe for this PoC's non-blocking model)
+    _renderQueued = true;
+    var ctx = _uiSyncCtx;
+    if (ctx is not null && !ReferenceEquals(ctx, System.Threading.SynchronizationContext.Current))
+    {
+        try { ctx.Post(_ => FlushRender(), null); return; }
+        catch { _renderQueued = false; LogCritical("ScheduleRender Post failed — reset flag"); return; } // never wedge the queue
     }
+    // On UI thread: do NOT render inline — the caller (HandleNotification) will flush at its end.
+}
+
+/// <summary>Flush a pending render. Call at the end of HandleNotification (UI thread).</summary>
+private void FlushRender()
+{
+    if (!_renderQueued) return;
+    _renderQueued = false;
+    RenderNow();
+}
+private double _renderMsTotal; private int _renderCount;
 private void RenderNow()
 {
-    _renderQueued = false;
+    var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+    _renderQueued = false; // clear FIRST so a mutation arriving mid-render posts a fresh pass (no drop)
     int rows = _screenRows, cols = _screenCols;
     if (rows <= 0 || cols <= 0) return;
-    // measures its content with infinite width/height. A Star (*) column under an infinite
-    // constraint resolves to 0px, so the whole grid collapsed invisibly. Pixel cells give the
-    // Grid a definite size that the ScrollViewer lays out and scrolls.
-    // Recalculate cell sizes from the host's actual dimensions so the grid fills the window
-    // whenever it resizes (manual or programmatic). Falls back to defaults if layout hasn't
-    // completed yet (ActualWidth/Height = 0).
-    double availW = Host.ActualWidth, availH = Host.ActualHeight;
+
+    // Cell pixel size from the root's actual dimensions minus the fixed status row: the grid fills
+    // the window whenever it resizes (manual or programmatic). Falls back to defaults until layout
+    // has completed.
+    double availW = _root.ActualWidth, availH = Math.Max(0, _root.ActualHeight - StatusTextHeight);
     if (availW > 0 && cols > 0) _cellW = Math.Max(1.0, availW / cols);
     if (availH > 0 && rows > 0) _cellH = Math.Max(1.0, availH / rows);
 
-    while (GlyphGrid.RowDefinitions.Count < rows) GlyphGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(_cellH) });
-    while (GlyphGrid.RowDefinitions.Count > rows) GlyphGrid.RowDefinitions.RemoveAt(GlyphGrid.RowDefinitions.Count - 1);
-    while (GlyphGrid.ColumnDefinitions.Count < cols)
-        GlyphGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(_cellW) });
-    while (GlyphGrid.ColumnDefinitions.Count > cols) GlyphGrid.ColumnDefinitions.RemoveAt(GlyphGrid.ColumnDefinitions.Count - 1);
-    // Explicitly set the grid's dimensions so the ScrollViewer always knows its size, even when
-    // row/column definitions are dynamically resized. This fixes the "black screen" issue where the
-    // Grid had no intrinsic size due to dynamic layout.
-    GlyphGrid.Width = cols * _cellW;
-    GlyphGrid.Height = rows * _cellH;
-    var children = GlyphGrid.Children;
-    int total = rows * cols;
-    bool layoutDirty = _layoutCols != cols || _layoutRows != rows || _layoutDone == false;
-    while (children.Count > total) children.RemoveAt(children.Count - 1);
-
-    // DIFF-BASED render: walk the grid but only write XAML for cells whose text/foreground/
-    // background changed since last render (RTxt/RFg/RBg on Cell + _lastCurIdx). A keystroke
-    // mutates 1-2 cells, so this is O(total) comparisons with ~0 writes — vs the old full
-    // re-render that set Text and allocated a SolidColorBrush for every cell each frame.
-    var brushCache = _brushCache;
-    int curRow = _curRow, curCol = _curCol;
-    int curIdx = curRow >= 0 ? curRow * cols + Math.Clamp(curCol, 0, cols - 1) : -1;
-    for (int i = 0; i < total; i++)
-    {
-        Border box;
-        if (i >= children.Count)
-        {
-            var t = new TextBlock();
-            // Start with narrow font/size; may be switched to wide below based on the cell's glyph.
-            t.FontFamily = new FontFamily(_narrowFont);
-            t.FontSize = _narrowSize;
-            box = new Border { Child = t };
-            children.Add(box);
-        }
-        else box = (Border)children[i];
-        var glyph = (TextBlock)box.Child;
-
-        var cell = _cells[i];
-        int r = i / cols, c = i % cols;
-        if (layoutDirty) { Grid.SetRow(box, r); Grid.SetColumn(box, c); }
-
-        bool isCur = i == curIdx && curIdx >= 0;
-        Color fg, bg;
-        // Use the cell text as-is: nvim sends "" for blank cells AND for the right half of a
-        // double-width glyph (a "covered" tail). Rendering those empty lets the wide head's
-        // ColumnSpan=2 fill both columns with no stray space/tofu in the tail.
-        string txt = cell.Text;
-        // Wide glyphs (CJK/emoji, display width 2) need the guifontwide font AND to span two grid
-        // columns so the glyph isn't clipped to one cell. Tails have Text=="" so they're never wide.
-        bool isWideGlyph = IsWideGlyph(txt);
-        int desiredKey = isWideGlyph ? 1 : 0;
-
-        // A wide glyph occupies two grid columns: span the head Border across both so the glyph is
-        // drawn at full width and isn't clipped to a single cell. The tail keeps Text=="" so it
-        // contributes nothing; the ColumnSpan=2 head paints over its column too. Guard the last
-        // column (a wide char can't start there in valid nvim output, but be safe).
-        int span = isWideGlyph && c < cols - 1 ? 2 : 1;
-        if (box.GetValue(Grid.ColumnSpanProperty) is not int cs || cs != span) Grid.SetColumnSpan(box, span);
-
-        int bgi = -1; // packed background key for cursor/highlight cells only
-        if (isCur) { fg = _defBg; bg = _defFg; bgi = PackColor(bg); } // inverted cursor cell
-        else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h))
-        {
-            fg = h.Fg; bg = h.Bg; bgi = PackColor(bg);
-        }
-        else { fg = _defFg; bg = TransparentColor; }
-        int fgi = PackColor(fg);
-
-        if (!string.Equals(cell.RTxt, txt, StringComparison.Ordinal))
-        {
-            glyph.Text = txt;
-            cell.RTxt = txt;
-        }
-        if (cell.RFg != fgi)
-        {
-            glyph.Foreground = GetBrush(brushCache, fg);
-            cell.RFg = fgi;
-        }
-        if (cell.RBg != bgi || i == _lastCurIdx || i == curIdx) // cursor move: flip old/new cells only
-        {
-            box.Background = bgi >= 0 ? GetBrush(brushCache, bg) : null;
-            cell.RBg = bgi;
-        }
-
-        // Font family/size changes only when the wide/narrow classification flips.
-        if (cell.RFontKey != desiredKey)
-        {
-            glyph.FontFamily = new FontFamily(desiredKey == 1 ? _wideFont : _narrowFont);
-            glyph.FontSize = desiredKey == 1 ? _wideSize : _narrowSize;
-            cell.RFontKey = desiredKey;
-        }
-    }
-    _layoutRows = rows; _layoutCols = cols; _layoutDone = true;
-    _lastCurIdx = curIdx;
+    // Size the canvas to exactly the grid; the ScrollViewer centers it in the content area.
+    GlyphCanvas.Width = cols * _cellW;
+    GlyphCanvas.Height = rows * _cellH;
+    EnsureTextFormats();
+    if (_diagEnabled && Interlocked.Increment(ref _invalidateCount) % 25 == 1)
+        LogStartup($"INVALIDATE #{_invalidateCount} canvas={GlyphCanvas.Width:F0}x{GlyphCanvas.Height:F0} root={_root.ActualWidth:F0}x{_root.ActualHeight:F0}");
+    GlyphCanvas.Invalidate(); // the Draw handler does the real (GPU) render this frame
 
     // Measure the non-client frame (first layout pass) and snap to exact fit. No-op once stable.
     MeasureChromeAndSnap(rows, cols);
+
+    double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+    if (_diagEnabled && ms > 8) LogStartup($"RENDER-SCHED {ms:F1}ms cells={rows*cols}");
 }
 
-private static SolidColorBrush GetBrush(Dictionary<int, SolidColorBrush> cache, Color c)
+// Win2D text formats are expensive to create — build them once per font/size change and cache.
+private void EnsureTextFormats()
+{
+    string nk = _narrowFont + "@" + _narrowSize;
+    if (nk != _tfKeyNarrow) { _tfNarrow = MakeTf(nk); _tfKeyNarrow = nk; LogStartup($"TF narrow={_narrowFont.Split(',')[0]}@{_narrowSize}"); }
+    string wk = _wideFont + "@" + _wideSize;
+    if (wk != _tfKeyWide) { _tfWide = MakeTf(wk); _tfKeyWide = wk; LogStartup($"TF wide={_wideFont.Split(',')[0]}@{_wideSize}"); }
+}
+
+private static Microsoft.Graphics.Canvas.Text.CanvasTextFormat MakeTf(string key)
+{
+    var tf = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat();
+    // DirectWrite takes a single family name (no comma lists); its automatic font fallback covers
+    // CJK/emoji/symbols the primary lacks, so use just the first family of the parsed chain.
+    int at = key.IndexOf('@');
+    string fam = (at >= 0 ? key.Substring(0, at) : key).Split(',')[0].Trim();
+    if (!string.IsNullOrEmpty(fam)) tf.FontFamily = fam;
+    double size = 14;
+    if (at >= 0 && double.TryParse(key.Substring(at + 1), out var s)) size = s;
+    tf.FontSize = (float)size;
+    return tf;
+}
+
+// The GPU render: clear, then one pass for backgrounds (merged rects) and one for text
+// (consecutive same-color cells batched into single DrawText runs). Runs on the UI thread.
+private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl sender, Microsoft.Graphics.Canvas.UI.Xaml.CanvasDrawEventArgs args)
+{
+    try
+    {
+    var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+    int rows = _screenRows, cols = _screenCols;
+    if (rows <= 0 || cols <= 0) return;
+    var ds = args.DrawingSession;
+    ds.Clear(_defBg);
+
+    float chh = (float)_cellH;
+    int curRow = _curRow, curCol = _curCol;
+    int curIdx = curRow >= 0 ? curRow * cols + Math.Clamp(curCol, 0, cols - 1) : -1;
+
+    // LineSpacing defaults to -1 (font's natural line height), which would offset the text. Pin it
+    // to the cell height so each row's baseline sits exactly at r*_cellH (no vertical drift).
+    _tfNarrow!.LineSpacing = chh;
+    _tfWide!.LineSpacing = chh;
+
+    // Pass 1: backgrounds (highlight + inverted cursor). Consecutive same-color cells merge into
+    // one rect so a full-width status line is a single DrawRectangle.
+    for (int r = 0; r < rows; r++)
+    {
+        int runStart = -1, runKey = -2;
+        for (int c = 0; c <= cols; c++)
+        {
+            bool hasBg = false; int key = -1;
+            if (c < cols)
+            {
+                var cell = _cells[r * cols + c];
+                Color bg;
+                if (r * cols + c == curIdx && curIdx >= 0)
+                {
+                    // Inverted cursor: the block takes the cell's OWN foreground color, so it is
+                    // visible on any highlight (CursorLine etc.), not just the default background.
+                    Color nfg;
+                    if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) nfg = h.Fg;
+                    else nfg = _defFg;
+                    bg = nfg;
+                }
+                else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) bg = h.Bg;
+                else bg = TransparentColor;
+                hasBg = bg != TransparentColor; // struct equality (ReferenceEquals is always false for structs)
+                key = PackColor(bg);
+            }
+            bool runActive = c < cols && hasBg && key == runKey;
+            if (!runActive)
+            {
+                if (runStart >= 0) // flush the previous run
+                    ds.DrawRectangle(new Windows.Foundation.Rect((float)(runStart * _cellW), (float)(r * _cellH), (float)((c - runStart) * _cellW), chh), GetW2dBrush(sender, UnpackPacked(runKey)));
+                // CRITICAL: reset the open run. Without this, a transparent cell after a colored
+                // one leaves runStart pointing at the old start, and every later same-color cell
+                // "extends" that stale run — painting background over intervening blank cells and
+                // emitting a cascade of overlapping rects (the spurious cursor-row band).
+                runStart = -1;
+                if (c < cols && hasBg) { runStart = c; runKey = key; } // start a new one
+            }
+        }
+    }
+
+    // Pass 2: text. A "run" is consecutive cells sharing the same foreground color and narrow
+    // font — drawn as ONE DrawText call (the big win over per-cell XAML). Wide glyphs break the
+    // run and are drawn individually with the wide format; covered tails ("") add no ink.
+    for (int r = 0; r < rows; r++)
+    {
+        float y = (float)(r * _cellH); // LineSpacing == cell height keeps the glyph inside its row
+        int c = 0;
+        while (c < cols)
+        {
+            var cell = _cells[r * cols + c];
+            string txt = cell.Text;
+            if (txt.Length == 0) { c++; continue; } // covered tail of a wide glyph
+
+            bool isCur = r * cols + c == curIdx && curIdx >= 0;
+            Color fg;
+            if (isCur)
+            {
+                // Inverted cursor: text takes the cell's OWN background color — the exact inverse of
+                // the block (which uses the cell's foreground), so it stays readable on any highlight.
+                if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) fg = h.Bg;
+                else fg = _defBg;
+            }
+            else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) fg = h.Fg;
+            else fg = _defFg;
+            int fgi = PackColor(fg);
+
+            if (IsWideGlyph(txt))
+            {
+                ds.DrawText(txt, (float)(c * _cellW), y, GetW2dBrush(sender, fg), _tfWide!);
+                c++; // the tail cell is "" and gets skipped by the loop above
+                continue;
+            }
+
+            int start = c;
+            var sb = new System.Text.StringBuilder();
+            while (c < cols)
+            {
+                var cc2 = _cells[r * cols + c];
+                string t2 = cc2.Text;
+                if (t2.Length == 0) { c++; continue; } // covered tail: no ink, run continues
+                bool isCur2 = r * cols + c == curIdx && curIdx >= 0;
+                Color fg2;
+                if (isCur2)
+                {
+                    if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = h2.Bg;
+                    else fg2 = _defBg;
+                }
+                else if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = h2.Fg;
+                else fg2 = _defFg;
+                if (PackColor(fg2) != fgi || IsWideGlyph(t2)) break; // run boundary
+                sb.Append(t2);
+                c++;
+            }
+            ds.DrawText(sb.ToString(), (float)(start * _cellW), y, GetW2dBrush(sender, fg), _tfNarrow!);
+        }
+    }
+
+    double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+    _renderMsTotal += ms; int rc = Interlocked.Increment(ref _renderCount);
+    if (_diagEnabled && (rc % 25 == 0 || ms > 8)) LogStartup($"RENDER #{rc} {ms:F1}ms avg={_renderMsTotal/rc:F1}ms cells={rows*cols}");
+    }
+    catch (Exception ex)
+    {
+        LogCritical("DRAW EXCEPTION: " + ex.GetType().Name + ": " + ex.Message);
+    }
+}
+
+// Win2D brushes cached by packed ARGB. Must be created inside a Draw/CreateResources handler
+// (they need the canvas's device), so this is only called from OnGlyphCanvasDraw.
+private Microsoft.Graphics.Canvas.Brushes.ICanvasBrush GetW2dBrush(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl canvas, Color c)
 {
     int key = PackColor(c);
-    if (!cache.TryGetValue(key, out var b))
+    if (!_w2dBrushCache.TryGetValue(key, out var b))
     {
-        // Bounded cache: once full we stop adding entries and fall back to fresh brushes.
-        b = new SolidColorBrush(c);
-        if (cache.Count < 4096) cache[key] = b;
+        b = new Microsoft.Graphics.Canvas.Brushes.CanvasSolidColorBrush(canvas, c);
+        _w2dBrushCache[key] = b;
     }
     return b;
 }
+
+// Inverse of PackColor (for the background-run flush path).
+private static Color UnpackPacked(int p) => Color.FromArgb((byte)(p >> 24), (byte)(p >> 16), (byte)(p >> 8), (byte)p);
 // WinAppSDK 2.x's Windows.UI.Color has no PackedValue property, so pack ARGB from the
 // component fields ourselves for brush-cache keys.
 private static int PackColor(Color c) => (c.A << 24) | (c.R << 16) | (c.G << 8) | c.B;

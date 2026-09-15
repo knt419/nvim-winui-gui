@@ -14,7 +14,9 @@ public partial class MainWindow
 {
     private void SetStatus(string s)
     {
-        try { StatusText.Text = s; } catch { /* XAML already torn down (shutdown path); ignore */ }
+        // May be called from the IO thread (notification error path); StatusText is XAML, so
+        // marshal to the UI thread. UiPostAsync runs inline when already on the UI thread.
+        try { UiPostAsync(() => StatusText.Text = s); } catch { /* XAML already torn down (shutdown path); ignore */ }
     }
 
     private static string StartupLogPath => System.IO.Path.Combine(
@@ -85,6 +87,7 @@ public partial class MainWindow
             LogStartup("ATTACH-POST ui_attach sent (no response expected; watching for redraw)");
             EnsureScreen(_rows, _cols);
             ScheduleRender();
+            FlushRender(); // ui_attach path is not inside HandleNotification — flush here
             SetStatus($"ui attached ({_cols}x{_rows}). typing forwards to nvim.");
 
             // Self-test (DIAGNOSTICS ONLY): types text into nvim and creates/switches a test
@@ -192,7 +195,11 @@ public partial class MainWindow
         LogStartup($"guifont APPLIED: narrow={newNarrow}@{newNSize} wide={newWide}@{newWSize}");
         _narrowFont = newNarrow; _narrowSize = newNSize;
         _wideFont = newWide; _wideSize = newWSize;
+        // Derive the reference cell size from the real font metrics so window<->grid conversions
+        // track the guifont (UI thread: MeasureRefCell creates a XAML TextBlock).
+        UiPostAsync(MeasureRefCell);
         ScheduleRender();
+        FlushRender(); // runs on the UI thread (async continuation) — not inside HandleNotification
     }
 
     // Diagnostic logging (file-based). OFF by default — set NVIM_WINUI_DIAG=1 to enable. The hot
@@ -227,6 +234,9 @@ public partial class MainWindow
     private void OnNvimNotification(string method, object?[]? args)
     {
         // Notifications arrive on the IO thread; XAML must only be touched from the UI thread.
+        // State mutation (_cells) is done HERE too (on the UI thread) — moving it to the IO thread
+        // caused a render-queue wedge that blanked the screen, so we keep the proven single-thread
+        // model: every notification posts one HandleNotification onto the UI thread.
         var ctx = _uiSyncCtx;
         if (ctx is not null && !ReferenceEquals(ctx, System.Threading.SynchronizationContext.Current))
         {
@@ -237,9 +247,11 @@ public partial class MainWindow
 
     private int _hnTrace;
     private int _hbCount;
+    private double _handleMsTotal; private int _handleCount;
     private void HandleNotification(string method, object?[]? args)
     {
         if (args is null) return;
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         bool trc = Interlocked.Increment(ref _hnTrace) <= 40;
         if (trc) LogStartup($"HN ENTER #{_hnTrace} thread={System.Threading.Thread.CurrentThread.ManagedThreadId}");
         int hb = Interlocked.Increment(ref _hbCount);
@@ -283,6 +295,14 @@ public partial class MainWindow
         {
             SetStatus($"notify error: {ex.Message}");
             LogCritical("NOTIFY EXCEPTION in " + method + ": " + ex.GetType().Name + ": " + ex.Message + "\n" + ex.StackTrace);
+        }
+        finally
+        {
+            double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            _handleMsTotal += ms; int hc = Interlocked.Increment(ref _handleCount);
+            if (_diagEnabled && (hc % 25 == 0 || ms > 8)) LogStartup($"HANDLE #{hc} {ms:F1}ms avg={_handleMsTotal/hc:F1}ms events={(args?.Length ?? 0)}");
+            // One render per notification batch: ScheduleRender only marked dirty during the loop.
+            FlushRender();
         }
     }
 
