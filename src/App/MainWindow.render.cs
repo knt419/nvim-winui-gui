@@ -324,17 +324,25 @@ private static Microsoft.Graphics.Canvas.Text.CanvasTextFormat MakeTf(string key
 // (consecutive same-color cells batched into single DrawText runs). Runs on the UI thread.
 private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl sender, Microsoft.Graphics.Canvas.UI.Xaml.CanvasDrawEventArgs args)
 {
+    try { RenderCore(args.DrawingSession, sender); }
+    catch (Exception ex) { LogCritical("DRAW EXCEPTION: " + ex.GetType().Name + ": " + ex.Message); }
+}
+
+// Shared render body — also used by the DIAG snapshot path (offscreen CanvasRenderTarget).
+private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc)
+{
     try
     {
     var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
     int rows = _screenRows, cols = _screenCols;
     if (rows <= 0 || cols <= 0) return;
-    var ds = args.DrawingSession;
     ds.Clear(_defBg);
 
     float chh = (float)_cellH;
     int curRow = _curRow, curCol = _curCol;
-    int curIdx = curRow >= 0 ? curRow * cols + Math.Clamp(curCol, 0, cols - 1) : -1;
+    // Clamp: a stale cursor row beyond the current grid (e.g. after a shrink before nvim's next
+    // cursor_position) would make curIdx land outside _cells and the block silently vanish.
+    int curIdx = (curRow >= 0 && curRow < rows) ? curRow * cols + Math.Clamp(curCol, 0, cols - 1) : -1;
 
     // LineSpacing: leave at the font's natural value (-1). Pinning it to _cellH made DirectWrite
     // place the glyph at the TOP of a taller line box, so text sat high in each cell and the cursor
@@ -368,7 +376,7 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
             if (!runActive)
             {
                 if (runStart >= 0) // flush the previous run
-                    ds.DrawRectangle(new Windows.Foundation.Rect((float)(runStart * _cellW), (float)(r * _cellH), (float)((c - runStart) * _cellW), chh), GetW2dBrush(sender, UnpackPacked(runKey)));
+                    ds.DrawRectangle(new Windows.Foundation.Rect((float)(runStart * _cellW), (float)(r * _cellH), (float)((c - runStart) * _cellW), chh), GetW2dBrush(rc, UnpackPacked(runKey)));
                 // CRITICAL: reset the open run. Without this, a transparent cell after a colored
                 // one leaves runStart pointing at the old start, and every later same-color cell
                 // "extends" that stale run — painting background over intervening blank cells and
@@ -402,7 +410,7 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
 
             if (IsWideGlyph(txt))
             {
-                ds.DrawText(txt, (float)(c * _cellW), yWide, GetW2dBrush(sender, fg), _tfWide!);
+                ds.DrawText(txt, (float)(c * _cellW), yWide, GetW2dBrush(rc, fg), _tfWide!);
                 c++; // the tail cell is "" and gets skipped by the loop above
                 continue;
             }
@@ -423,13 +431,13 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
                 sb.Append(t2);
                 c++;
             }
-            ds.DrawText(sb.ToString(), (float)(start * _cellW), yNarrow, GetW2dBrush(sender, fg), _tfNarrow!);
+            ds.DrawText(sb.ToString(), (float)(start * _cellW), yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
         }
     }
 
     double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-    _renderMsTotal += ms; int rc = Interlocked.Increment(ref _renderCount);
-    if (_diagEnabled && (rc % 25 == 0 || ms > 8)) LogStartup($"RENDER #{rc} {ms:F1}ms avg={_renderMsTotal/rc:F1}ms cells={rows*cols}");
+    _renderMsTotal += ms; int rcc = Interlocked.Increment(ref _renderCount);
+    if (_diagEnabled && (rcc % 25 == 0 || ms > 8)) LogStartup($"RENDER #{rcc} {ms:F1}ms avg={_renderMsTotal/rcc:F1}ms cells={rows*cols}");
     }
     catch (Exception ex)
     {
@@ -438,13 +446,13 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
 }
 
 // Win2D brushes cached by packed ARGB. Must be created inside a Draw/CreateResources handler
-// (they need the canvas's device), so this is only called from OnGlyphCanvasDraw.
-private Microsoft.Graphics.Canvas.Brushes.ICanvasBrush GetW2dBrush(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl canvas, Color c)
+// (they need the canvas's device), so this is only called from OnGlyphCanvasDraw / RenderCore.
+private Microsoft.Graphics.Canvas.Brushes.ICanvasBrush GetW2dBrush(Microsoft.Graphics.Canvas.ICanvasResourceCreator creator, Color c)
 {
     int key = PackColor(c);
     if (!_w2dBrushCache.TryGetValue(key, out var b))
     {
-        b = new Microsoft.Graphics.Canvas.Brushes.CanvasSolidColorBrush(canvas, c);
+        b = new Microsoft.Graphics.Canvas.Brushes.CanvasSolidColorBrush(creator, c);
         _w2dBrushCache[key] = b;
     }
     return b;
