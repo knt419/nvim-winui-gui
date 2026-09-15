@@ -282,9 +282,11 @@ private void RenderNow()
     if (availW > 0 && cols > 0) _cellW = Math.Max(1.0, availW / cols);
     if (availH > 0 && rows > 0) _cellH = Math.Max(1.0, availH / rows);
 
-    // Size the canvas to exactly the grid; the ScrollViewer centers it in the content area.
-    GlyphCanvas.Width = cols * _cellW;
-    GlyphCanvas.Height = rows * _cellH;
+    // Size the canvas to exactly the grid; the ScrollViewer centers it in the content area. Use
+    // whole pixels (same rounding as RenderCore's rowTop/colLeft) so the last cell edge lands on
+    // the canvas boundary — no sliver of clear color beyond the final row/column.
+    GlyphCanvas.Width = Math.Round(cols * _cellW);
+    GlyphCanvas.Height = Math.Round(rows * _cellH);
     EnsureTextFormats();
     if (_diagEnabled && Interlocked.Increment(ref _invalidateCount) % 25 == 1)
         LogStartup($"INVALIDATE #{_invalidateCount} canvas={GlyphCanvas.Width:F0}x{GlyphCanvas.Height:F0} root={_root.ActualWidth:F0}x{_root.ActualHeight:F0}");
@@ -338,11 +340,20 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     if (rows <= 0 || cols <= 0) return;
     ds.Clear(_defBg);
 
-    float chh = (float)_cellH;
     int curRow = _curRow, curCol = _curCol;
     // Clamp: a stale cursor row beyond the current grid (e.g. after a shrink before nvim's next
     // cursor_position) would make curIdx land outside _cells and the block silently vanish.
     int curIdx = (curRow >= 0 && curRow < rows) ? curRow * cols + Math.Clamp(curCol, 0, cols - 1) : -1;
+
+    // Integer-pixel row/column boundaries: _cellW/_cellH are fractional (avail/cols), so r*_cellH
+    // lands on subpixel y values and Direct2D rasterization leaves a 1-2px gap between adjacent
+    // rows. Invisible over the clear color, but when a dimmed background highlight is drawn the
+    // default bg shows through the seams as thin lines (visible behind floating windows). Snapping
+    // every boundary to whole pixels makes cells share exact edges — no gaps, no overlaps.
+    var rowTop = new int[rows + 1];
+    for (int r = 0; r <= rows; r++) rowTop[r] = (int)Math.Round(r * _cellH);
+    var colLeft = new int[cols + 1];
+    for (int c = 0; c <= cols; c++) colLeft[c] = (int)Math.Round(c * _cellW);
 
     // LineSpacing: leave at the font's natural value (-1). Pinning it to _cellH made DirectWrite
     // place the glyph at the TOP of a taller line box, so text sat high in each cell and the cursor
@@ -376,7 +387,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
             if (!runActive)
             {
                 if (runStart >= 0) // flush the previous run
-                    ds.DrawRectangle(new Windows.Foundation.Rect((float)(runStart * _cellW), (float)(r * _cellH), (float)((c - runStart) * _cellW), chh), GetW2dBrush(rc, UnpackPacked(runKey)));
+                    ds.DrawRectangle(new Windows.Foundation.Rect(colLeft[runStart], rowTop[r], colLeft[c] - colLeft[runStart], rowTop[r + 1] - rowTop[r]), GetW2dBrush(rc, UnpackPacked(runKey)));
                 // CRITICAL: reset the open run. Without this, a transparent cell after a colored
                 // one leaves runStart pointing at the old start, and every later same-color cell
                 // "extends" that stale run — painting background over intervening blank cells and
@@ -392,8 +403,9 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     // run and are drawn individually with the wide format; covered tails ("" ) add no ink.
     for (int r = 0; r < rows; r++)
     {
-        float yNarrow = (float)(r * _cellH + (_cellH - _natLineHNarrow) / 2); // centered natural line box
-        float yWide   = (float)(r * _cellH + (_cellH - _natLineHWide) / 2);
+        int rh = rowTop[r + 1] - rowTop[r]; // this row's pixel height (integer)
+        float yNarrow = (float)(rowTop[r] + (rh - _natLineHNarrow) / 2); // centered natural line box
+        float yWide   = (float)(rowTop[r] + (rh - _natLineHWide) / 2);
         int c = 0;
         while (c < cols)
         {
@@ -410,7 +422,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
 
             if (IsWideGlyph(txt))
             {
-                ds.DrawText(txt, (float)(c * _cellW), yWide, GetW2dBrush(rc, fg), _tfWide!);
+                ds.DrawText(txt, colLeft[c], yWide, GetW2dBrush(rc, fg), _tfWide!);
                 c++; // the tail cell is "" and gets skipped by the loop above
                 continue;
             }
@@ -431,7 +443,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 sb.Append(t2);
                 c++;
             }
-            ds.DrawText(sb.ToString(), (float)(start * _cellW), yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
+            ds.DrawText(sb.ToString(), colLeft[start], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
         }
     }
 
