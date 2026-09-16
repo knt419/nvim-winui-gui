@@ -91,6 +91,8 @@ private string _tfKeyNarrow = "", _tfKeyWide = "";
 private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _tfNarrow, _tfWide;
 private double _natLineHNarrow = -1, _natLineHWide = -1; // natural line heights (for vertical centering)
 private int _invalidateCount; // DIAG: count Invalidate() calls (verify Draw keeps firing)
+private bool _snapDone;       // DIAG: one-shot snapshot flag
+private double _dpiScale = 0; // device px per DIP, measured once from the window handle (0 = not yet)
 
 private static string? MapKey(VirtualKey vk) => vk switch
     {
@@ -338,6 +340,8 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
     int rows = _screenRows, cols = _screenCols;
     if (rows <= 0 || cols <= 0) return;
+    // Measure the window's DPI scale once — needed to snap cell boundaries to whole DEVICE pixels.
+    if (_dpiScale < 1.0) { try { IntPtr dh = FindWindow(null, Title); uint d = GetDpiForWindow(dh); if (d > 0) _dpiScale = d / 96.0; } catch { } }
     ds.Clear(_defBg);
 
     int curRow = _curRow, curCol = _curCol;
@@ -350,10 +354,15 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     // rows. Invisible over the clear color, but when a dimmed background highlight is drawn the
     // default bg shows through the seams as thin lines (visible behind floating windows). Snapping
     // every boundary to whole pixels makes cells share exact edges — no gaps, no overlaps.
-    var rowTop = new int[rows + 1];
-    for (int r = 0; r <= rows; r++) rowTop[r] = (int)Math.Round(r * _cellH);
-    var colLeft = new int[cols + 1];
-    for (int c = 0; c <= cols; c++) colLeft[c] = (int)Math.Round(c * _cellW);
+    // Snap in DEVICE-pixel space: Win2D draws in DIPs and scales by DPI internally, so at 125%/150%
+    // an integer-DIP boundary is fractional device px and the seam returns. Round to whole device
+    // pixels, then convert back to DIPs — exact on screen at any scale. Fall back to 1.0 if the
+    // DPI probe failed (a zero divisor would produce NaN coordinates).
+    double dpi = _dpiScale > 0 ? _dpiScale : 1.0;
+    var rowTop = new double[rows + 1];
+    for (int r = 0; r <= rows; r++) rowTop[r] = Math.Round(r * _cellH * dpi) / dpi;
+    var colLeft = new double[cols + 1];
+    for (int c = 0; c <= cols; c++) colLeft[c] = Math.Round(c * _cellW * dpi) / dpi;
 
     // LineSpacing: leave at the font's natural value (-1). Pinning it to _cellH made DirectWrite
     // place the glyph at the TOP of a taller line box, so text sat high in each cell and the cursor
@@ -365,45 +374,58 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     if (_natLineHNarrow < 0) _natLineHNarrow = MeasureNatLineH(_narrowFont, _narrowSize);
     if (_natLineHWide < 0) _natLineHWide = MeasureNatLineH(_wideFont, _wideSize);
 
-    // Pass 1: backgrounds (highlight + inverted cursor). Consecutive same-color cells merge into
-    // one rect so a full-width status line is a single DrawRectangle.
-    for (int r = 0; r < rows; r++)
+    // Pass 1: backgrounds (highlight + inverted cursor). Horizontal runs per row; consecutive rows
+    // whose run structure is IDENTICAL extend the previous rects' height instead of drawing new ones,
+    // so a uniform region becomes ONE big rect with no interior edges. Win2D exposes no AA toggle, and
+    // two rects sharing an edge are rasterized independently — they blend ~50% at the seam and the
+    // clear color (default bg) shows through as 1-2px lines between rows (visible in the dimmed
+    // backdrop behind floating windows). Merging eliminates every interior boundary; only true color
+    // changes keep an edge, where anti-aliasing is wanted.
+    var prevRuns = new List<(int s, int e, int key)>();
+    int blockTop = 0; // top row of the open merged block
+    for (int r = 0; r <= rows; r++)
     {
-        int runStart = -1, runKey = -2;
-        for (int c = 0; c <= cols; c++)
+        var curRuns = new List<(int s, int e, int key)>();
+        if (r < rows)
         {
-            bool hasBg = false; int key = -1;
-            if (c < cols)
+            int c = 0;
+            while (c < cols)
             {
-                var cell = _cells[r * cols + c];
-                Color bg;
+                Color bg = TransparentColor;
                 if (r * cols + c == curIdx && curIdx >= 0) bg = _defFg; // inverted cursor: default fg as block
-                else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) bg = h.Bg;
-                else bg = TransparentColor;
-                hasBg = bg != TransparentColor; // struct equality (ReferenceEquals is always false for structs)
-                key = PackColor(bg);
-            }
-            bool runActive = c < cols && hasBg && key == runKey;
-            if (!runActive)
-            {
-                if (runStart >= 0) // flush the previous run
-                    ds.DrawRectangle(new Windows.Foundation.Rect(colLeft[runStart], rowTop[r], colLeft[c] - colLeft[runStart], rowTop[r + 1] - rowTop[r]), GetW2dBrush(rc, UnpackPacked(runKey)));
-                // CRITICAL: reset the open run. Without this, a transparent cell after a colored
-                // one leaves runStart pointing at the old start, and every later same-color cell
-                // "extends" that stale run — painting background over intervening blank cells and
-                // emitting a cascade of overlapping rects (the spurious cursor-row band).
-                runStart = -1;
-                if (c < cols && hasBg) { runStart = c; runKey = key; } // start a new one
+                else if (_cells[r * cols + c].Hl >= 0 && _hlDefs.TryGetValue(_cells[r * cols + c].Hl, out var h)) bg = h.Bg;
+                int key = (bg != TransparentColor) ? PackColor(bg) : -1;
+                if (key < 0) { c++; continue; } // transparent: no fill
+                int s = c;
+                while (c < cols)
+                {
+                    Color b2 = TransparentColor;
+                    if (r * cols + c == curIdx && curIdx >= 0) b2 = _defFg;
+                    else if (_cells[r * cols + c].Hl >= 0 && _hlDefs.TryGetValue(_cells[r * cols + c].Hl, out var h2)) b2 = h2.Bg;
+                    int k2 = (b2 != TransparentColor) ? PackColor(b2) : -1;
+                    if (k2 != key) break;
+                    c++;
+                }
+                curRuns.Add((s, c, key));
             }
         }
+        bool same = prevRuns.Count == curRuns.Count;
+        for (int i = 0; same && i < curRuns.Count; i++) if (prevRuns[i] != curRuns[i]) same = false;
+        if (!same) // structure changed: flush the open block, start a new one at this row
+        {
+            foreach (var run in prevRuns)
+                ds.DrawRectangle(new Windows.Foundation.Rect(colLeft[run.s], rowTop[blockTop], colLeft[run.e] - colLeft[run.s], rowTop[r] - rowTop[blockTop]), GetW2dBrush(rc, UnpackPacked(run.key)));
+            prevRuns = curRuns;
+            blockTop = r;
+        } // else: identical structure — the open rects simply extend one more row (no new draw)
     }
 
     // Pass 2: text. A "run" is consecutive cells sharing the same foreground color and narrow
     // font — drawn as ONE DrawText call (the big win over per-cell XAML). Wide glyphs break the
-    // run and are drawn individually with the wide format; covered tails ("" ) add no ink.
+    // run and are drawn individually with the wide format; covered tails ("") add no ink.
     for (int r = 0; r < rows; r++)
     {
-        int rh = rowTop[r + 1] - rowTop[r]; // this row's pixel height (integer)
+        double rh = rowTop[r + 1] - rowTop[r]; // this row's pixel height (device-px snapped)
         float yNarrow = (float)(rowTop[r] + (rh - _natLineHNarrow) / 2); // centered natural line box
         float yWide   = (float)(rowTop[r] + (rh - _natLineHWide) / 2);
         int c = 0;
@@ -422,7 +444,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
 
             if (IsWideGlyph(txt))
             {
-                ds.DrawText(txt, colLeft[c], yWide, GetW2dBrush(rc, fg), _tfWide!);
+                ds.DrawText(txt, (float)colLeft[c], yWide, GetW2dBrush(rc, fg), _tfWide!);
                 c++; // the tail cell is "" and gets skipped by the loop above
                 continue;
             }
@@ -443,7 +465,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 sb.Append(t2);
                 c++;
             }
-            ds.DrawText(sb.ToString(), colLeft[start], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
+            ds.DrawText(sb.ToString(), (float)colLeft[start], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
         }
     }
 
