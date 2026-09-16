@@ -162,6 +162,12 @@ public partial class MainWindow : Window
         // nvim's grid_resize reply then snaps the window back to an exact cell boundary via
         // EnsureScreen -> UpdateWindowSize, which terminates the loop naturally.
         GlyphCanvas.SizeChanged += (s, e) => { ScheduleRender(); FlushRender(); ScheduleNvimResize(); };
+        // The canvas has explicit Width/Height, so it does NOT resize with the window — its own
+        // SizeChanged never fires on a user drag. Hook _root (fills the whole client area) instead:
+        // every size change re-renders (RenderNow reads _root.Actual* and rescales cells) and
+        // re-syncs the nvim grid (debounced; the equality check in SendNvimResize terminates
+        // programmatic-resize loops).
+        _root.SizeChanged += (s, e) => { ScheduleRender(); FlushRender(); ScheduleNvimResize(); };
         _root.Loaded += OnLoadedAsync;
         Activated += (s, e) => _root.Focus(FocusState.Programmatic);
         Closed += OnClosed;
