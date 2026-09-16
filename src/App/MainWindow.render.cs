@@ -512,7 +512,6 @@ private static bool IsWideCodePoint(int cp)
            (cp >= 0xFE30 && cp <= 0xFE4F) ||   // CJK compatibility forms
            (cp >= 0xFF00 && cp <= 0xFFEF) ||   // Fullwidth forms (incl. fullwidth space 0x3000 handled below)
            (cp >= 0x1F300 && cp <= 0x1FAFF) || // Emoji & pictographs (astral, surrogate pairs)
-           (cp >= 0x2600 && cp <= 0x27BF) ||   // Misc symbols + dingbats (nerdfont-style glyphs)
            (cp >= 0x3040 && cp <= 0x30FF) ||   // Hiragana / Katakana
            cp == 0x3000;                        // Fullwidth space
 }
