@@ -167,7 +167,7 @@ public partial class MainWindow : Window
         // every size change re-renders (RenderNow reads _root.Actual* and rescales cells) and
         // re-syncs the nvim grid (debounced; the equality check in SendNvimResize terminates
         // programmatic-resize loops).
-        _root.SizeChanged += (s, e) => { ScheduleRender(); FlushRender(); ScheduleNvimResize(); };
+        _root.SizeChanged += (s, e) => { if (_diagEnabled) LogStartup($"ROOT-SIZECHG root={_root.ActualWidth:F0}x{_root.ActualHeight:F0}"); ScheduleRender(); FlushRender(); ScheduleNvimResize(); };
         _root.Loaded += OnLoadedAsync;
         Activated += (s, e) => _root.Focus(FocusState.Programmatic);
         Closed += OnClosed;
