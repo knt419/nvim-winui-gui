@@ -378,35 +378,26 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     // whose run structure is IDENTICAL extend the previous rects' height instead of drawing new ones,
     // so a uniform region becomes ONE big rect with no interior edges. Win2D exposes no AA toggle, and
     // two rects sharing an edge are rasterized independently — they blend ~50% at the seam and the
-    // clear color (default bg) shows through as 1-2px lines between rows (visible in the dimmed
-    // backdrop behind floating windows). Merging eliminates every interior boundary; only true color
-    // changes keep an edge, where anti-aliasing is wanted.
-    var prevRuns = new List<(int s, int e, int key)>();
+    // clear color (default bg) shows through as 1-2px lines between rows (visible behind floating
+    // windows). Merging eliminates every interior boundary; only true color changes keep an edge,
+    // where anti-aliasing is wanted. Runs are keyed by Color value directly — NOT PackColor: with
+    // A=255 the packed int has its sign bit set and a `key < 0` transparency test silently drops
+    // every opaque cell (this was why fills never appeared).
+    var prevRuns = new List<(int s, int e, Color key)>();
     int blockTop = 0; // top row of the open merged block
     for (int r = 0; r <= rows; r++)
     {
-        var curRuns = new List<(int s, int e, int key)>();
+        var curRuns = new List<(int s, int e, Color key)>();
         if (r < rows)
         {
             int c = 0;
             while (c < cols)
             {
-                Color bg = TransparentColor;
-                if (r * cols + c == curIdx && curIdx >= 0) bg = _defFg; // inverted cursor: default fg as block
-                else if (_cells[r * cols + c].Hl >= 0 && _hlDefs.TryGetValue(_cells[r * cols + c].Hl, out var h)) bg = h.Bg;
-                int key = (bg != TransparentColor) ? PackColor(bg) : -1;
-                if (key < 0) { c++; continue; } // transparent: no fill
+                Color bg = CellBg(r, c, curIdx);
+                if (bg == TransparentColor) { c++; continue; } // no fill: clear color shows through
                 int s = c;
-                while (c < cols)
-                {
-                    Color b2 = TransparentColor;
-                    if (r * cols + c == curIdx && curIdx >= 0) b2 = _defFg;
-                    else if (_cells[r * cols + c].Hl >= 0 && _hlDefs.TryGetValue(_cells[r * cols + c].Hl, out var h2)) b2 = h2.Bg;
-                    int k2 = (b2 != TransparentColor) ? PackColor(b2) : -1;
-                    if (k2 != key) break;
-                    c++;
-                }
-                curRuns.Add((s, c, key));
+                do { c++; } while (c < cols && CellBg(r, c, curIdx) == bg);
+                curRuns.Add((s, c, bg));
             }
         }
         bool same = prevRuns.Count == curRuns.Count;
@@ -414,7 +405,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
         if (!same) // structure changed: flush the open block, start a new one at this row
         {
             foreach (var run in prevRuns)
-                ds.FillRectangle(new Windows.Foundation.Rect(colLeft[run.s], rowTop[blockTop], colLeft[run.e] - colLeft[run.s], rowTop[r] - rowTop[blockTop]), GetW2dBrush(rc, UnpackPacked(run.key)));
+                ds.FillRectangle(new Windows.Foundation.Rect(colLeft[run.s], rowTop[blockTop], colLeft[run.e] - colLeft[run.s], rowTop[r] - rowTop[blockTop]), GetW2dBrush(rc, run.key));
             prevRuns = curRuns;
             blockTop = r;
         } // else: identical structure — the open rects simply extend one more row (no new draw)
@@ -494,6 +485,14 @@ private Microsoft.Graphics.Canvas.Brushes.ICanvasBrush GetW2dBrush(Microsoft.Gra
 
 // Inverse of PackColor (for the background-run flush path).
 private static Color UnpackPacked(int p) => Color.FromArgb((byte)(p >> 24), (byte)(p >> 16), (byte)(p >> 8), (byte)p);
+// Background color of one cell for Pass 1: inverted cursor block, highlight bg, or transparent.
+private Color CellBg(int r, int c, int curIdx)
+{
+    if (r * _screenCols + c == curIdx && curIdx >= 0) return _defFg; // inverted cursor: default fg as block
+    var cell = _cells[r * _screenCols + c];
+    if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) return h.Bg;
+    return TransparentColor;
+}
 // WinAppSDK 2.x's Windows.UI.Color has no PackedValue property, so pack ARGB from the
 // component fields ourselves for brush-cache keys.
 private static int PackColor(Color c) => (c.A << 24) | (c.R << 16) | (c.G << 8) | c.B;
