@@ -414,7 +414,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
         if (!same) // structure changed: flush the open block, start a new one at this row
         {
             foreach (var run in prevRuns)
-                ds.DrawRectangle(new Windows.Foundation.Rect(colLeft[run.s], rowTop[blockTop], colLeft[run.e] - colLeft[run.s], rowTop[r] - rowTop[blockTop]), GetW2dBrush(rc, UnpackPacked(run.key)));
+                ds.FillRectangle(new Windows.Foundation.Rect(colLeft[run.s], rowTop[blockTop], colLeft[run.e] - colLeft[run.s], rowTop[r] - rowTop[blockTop]), GetW2dBrush(rc, UnpackPacked(run.key)));
             prevRuns = curRuns;
             blockTop = r;
         } // else: identical structure — the open rects simply extend one more row (no new draw)
