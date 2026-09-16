@@ -49,6 +49,14 @@ public partial class MainWindow
             _nvimProc = System.Diagnostics.Process.Start(psi);
             if (_nvimProc == null) { SetStatus("failed to spawn nvim"); return; }
             LogStartup("spawned nvim pid=" + _nvimProc.Id + " port=" + port);
+            // When nvim exits (user quit, crash, killed), close the GUI window and terminate.
+            // Exited fires on a thread-pool thread — UiPostAsync marshals Close() to the UI thread.
+            _nvimProc.EnableRaisingEvents = true;
+            _nvimProc.Exited += (s, e) =>
+            {
+                LogStartup("NVIM-EXIT detected — closing window");
+                UiPostAsync(() => { try { Close(); } catch { } });
+            };
             _nvimProc.ErrorDataReceived += (s, e) => { if (e.Data != null) LogCritical("NVIM-ERR " + e.Data); };
             _nvimProc.BeginErrorReadLine();
             var client = await ConnectWithRetryAsync(port, 5);
