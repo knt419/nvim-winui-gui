@@ -93,6 +93,7 @@ private double _natLineHNarrow = -1, _natLineHWide = -1; // natural line heights
 private int _invalidateCount; // DIAG: count Invalidate() calls (verify Draw keeps firing)
 private bool _snapDone;       // DIAG: one-shot snapshot flag
 private double _dpiScale = 0; // device px per DIP, measured once from the window handle (0 = not yet)
+private int _rowLogCount;     // DIAG: throttle ROWTOP logging
 
 private static string? MapKey(VirtualKey vk) => vk switch
     {
@@ -361,6 +362,12 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     double dpi = _dpiScale > 0 ? _dpiScale : 1.0;
     var rowTop = new double[rows + 1];
     for (int r = 0; r <= rows; r++) rowTop[r] = Math.Round(r * _cellH * dpi) / dpi;
+    if (_diagEnabled && Interlocked.Increment(ref _rowLogCount) % 50 == 1)
+    {
+        var sbr2 = new System.Text.StringBuilder();
+        for (int r = 0; r < Math.Min(6, rows); r++) sbr2.Append($"r{r}:[{rowTop[r]:F2},{rowTop[r+1]-rowTop[r]:F2}] ");
+        LogStartup($"ROWTOP cellH={_cellH:F4} dpi={dpi:F3} {sbr2}");
+    }
     var colLeft = new double[cols + 1];
     for (int c = 0; c <= cols; c++) colLeft[c] = Math.Round(c * _cellW * dpi) / dpi;
 
@@ -419,6 +426,13 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
         double rh = rowTop[r + 1] - rowTop[r]; // this row's pixel height (device-px snapped)
         float yNarrow = (float)(rowTop[r] + (rh - _natLineHNarrow) / 2); // centered natural line box
         float yWide   = (float)(rowTop[r] + (rh - _natLineHWide) / 2);
+        if (_diagEnabled && r == curRow)
+        {
+            var sbd = new System.Text.StringBuilder();
+            for (int cc = 0; cc < Math.Min(8, cols); cc++)
+                sbd.Append($"[{cc}:'{_cells[r * cols + cc].Text}'{(IsWideGlyph(_cells[r * cols + cc].Text) ? "W" : "")}]");
+            LogStartup($"CURROW-CELLS row={r} {sbd} yNarrow={yNarrow:F2} yWide={yWide:F2} rh={rh:F2}");
+        }
         int c = 0;
         while (c < cols)
         {
@@ -435,6 +449,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
 
             if (IsWideGlyph(txt))
             {
+                if (_diagEnabled && r == curRow) LogStartup($"WIDE-CELL row={r} col={c} txt='{txt}' cp={(int)txt[0]:X4} yWide={yWide:F2} yNarrow={yNarrow:F2}");
                 ds.DrawText(txt, (float)colLeft[c], yWide, GetW2dBrush(rc, fg), _tfWide!);
                 c++; // the tail cell is "" and gets skipped by the loop above
                 continue;

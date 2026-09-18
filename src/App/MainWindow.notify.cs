@@ -343,6 +343,18 @@ public partial class MainWindow
 
                     if (rowIdx < 0 || rowIdx >= _rows) continue;
                     int col = colStart;
+                    if (_diagEnabled)
+                    {
+                        var sbr = new System.Text.StringBuilder();
+                        foreach (var cr in cellArray)
+                        {
+                            if (cr is string ss) sbr.Append($"'{ss}' ");
+                            else if (cr is object?[] ce2)
+                                sbr.Append("[" + string.Join(",", ce2.Select(x => x?.ToString() ?? "null")) + "] ");
+                            else sbr.Append($"[{System.Convert.ToString(cr)}] ");
+                        }
+                        LogStartup($"GRIDLINE-RAW row={rowIdx} colstart={colStart} cells=[{sbr}]");
+                    }
                     foreach (var cellRaw in cellArray)
                     {
                         string txt;

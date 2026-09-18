@@ -45,5 +45,6 @@
     <Compile Include="MainWindow.cs" />
     <Compile Include="MainWindow.notify.cs" />
     <Compile Include="MainWindow.render.cs" />
+    <Compile Include="MainWindow.mouse.cs" />
   </ItemGroup>
 </Project>

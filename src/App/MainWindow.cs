@@ -155,6 +155,18 @@ public partial class MainWindow : Window
 
         Content = _root;
         _root.KeyDown += OnKeyDown;
+        // Mouse -> nvim_input_mouse (see MainWindow.mouse.cs). Handlers are attached to _root, NOT
+        // GlyphCanvas: keyboard already proves _root receives routed input in this app, while the
+        // Win2D canvas is a DirectComposition surface that may not get XAML pointer routing. Pointer
+        // events bubble up the tree, so _root always sees them; GetCurrentPoint(GlyphCanvas) still
+        // yields canvas-relative coords regardless of which element raised the event. MUST come
+        // after `_root = new Grid` (a NRE here crashes natively in Microsoft.UI.Xaml.dll).
+        _root.PointerPressed += OnGlyphCanvasPointerPressed;
+        _root.PointerReleased += OnGlyphCanvasPointerReleased;
+        _root.PointerMoved += OnGlyphCanvasPointerMoved;
+        // PointerWheelChanged is a DIRECT event in XAML (no bubbling), so it must be attached to
+        // the element under the pointer — the canvas itself. Verified: on _root it never fired.
+        GlyphCanvas.PointerWheelChanged += OnGlyphCanvasPointerWheelChanged;
         // When the window resizes (or any layout pass occurs), re-render so the grid
         // recalculates its cell sizes and fills the new display area. RenderNow reads
         // _root.ActualWidth/Height at render time, so it adapts automatically to the new size.
