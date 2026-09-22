@@ -74,6 +74,26 @@ public partial class MainWindow
         }
         catch { return _cellH; } // fallback: assume natural height == cell (no offset)
     }
+
+    // Monospace advance of the narrow font (DIPs) via an offscreen TextBlock: n digits render at
+    // exactly n*advance. The CELL grid must equal this width — when _cellW is derived from the
+    // window size instead (availW/cols), a ~0.2px mismatch per column makes batched runs drift
+    // left of the grid and RESET at every run boundary (the cursor cell breaks its run), moving
+    // the cursor glyph's left whitespace and everything after it rightward by cursorCol*delta.
+    private double MeasureFontAdvance(string fontFamily, double size)
+    {
+        // True DWrite advance the batched runs will use — the difference between a 10-char and a
+        // 20-char layout width (side bearings cancel, the delta is exactly 10 advances). A TextBlock
+        // DesiredSize probe reads ~0.1px/cell high for this font, which would keep a residual drift.
+        try
+        {
+            using var l10 = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(GlyphCanvas, new string('0', 10), _tfNarrow!, 5000, 0);
+            using var l20 = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(GlyphCanvas, new string('0', 20), _tfNarrow!, 5000, 0);
+            double adv = (l20.LayoutBounds.Width - l10.LayoutBounds.Width) / 10.0;
+            return Math.Max(1.0, adv);
+        }
+        catch { return _cellW; }
+    }
     // Fixed height of the status row under the grid (see MainWindow.cs visual tree). Must match
     // the XAML so window<->grid conversions are exact.
     private const double StatusTextHeight = 25.0;
@@ -91,6 +111,7 @@ private string _tfKeyNarrow = "", _tfKeyWide = "";
 private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _tfNarrow, _tfWide;
 private double _natLineHNarrow = -1, _natLineHWide = -1; // natural line heights (for vertical centering)
     private double _liftNarrow = -1, _liftWide = -1;         // glyph INK center offset inside each line box
+    private double _fontAdvance = -1;                        // narrow font's monospace advance (= _cellW, kills run drift)
 private int _invalidateCount; // DIAG: count Invalidate() calls (verify Draw keeps firing)
 private double _dpiScale = 0; // device px per DIP, measured once from the window handle (0 = not yet)
 private int _rowLogCount;     // DIAG: throttle ROWTOP logging
@@ -279,11 +300,15 @@ private void RenderNow()
     int rows = _screenRows, cols = _screenCols;
     if (rows <= 0 || cols <= 0) return;
 
-    // Cell pixel size from the root's actual dimensions minus the fixed status row: the grid fills
-    // the window whenever it resizes (manual or programmatic). Falls back to defaults until layout
-    // has completed.
+    // Cell pixel size: the grid is sized from the FONT's monospace advance (a terminal, not a
+    // stretcher) so glyphs, fills and the cursor block all share one exact coordinate space — any
+    // mismatch makes batched runs drift and reset at cursor/color splits. Falls back to stretching
+    // (availW/cols) only until the advance has been measured or if its measurement failed.
     double availW = _root.ActualWidth, availH = Math.Max(0, _root.ActualHeight - StatusTextHeight);
-    if (availW > 0 && cols > 0) _cellW = Math.Max(1.0, availW / cols);
+    EnsureTextFormats();
+    if (_fontAdvance < 0) _fontAdvance = MeasureFontAdvance(_narrowFont, _narrowSize);
+    if (_fontAdvance > 0 && cols > 0) _cellW = Math.Max(1.0, _fontAdvance);
+    else if (availW > 0 && cols > 0) _cellW = Math.Max(1.0, availW / cols);
     if (availH > 0 && rows > 0) _cellH = Math.Max(1.0, availH / rows);
 
     // Size the canvas to exactly the grid; the ScrollViewer centers it in the content area. Use
@@ -291,7 +316,6 @@ private void RenderNow()
     // the canvas boundary — no sliver of clear color beyond the final row/column.
     GlyphCanvas.Width = Math.Round(cols * _cellW);
     GlyphCanvas.Height = Math.Round(rows * _cellH);
-    EnsureTextFormats();
     if (_diagEnabled && Interlocked.Increment(ref _invalidateCount) % 25 == 1)
         LogStartup($"INVALIDATE #{_invalidateCount} canvas={GlyphCanvas.Width:F0}x{GlyphCanvas.Height:F0} root={_root.ActualWidth:F0}x{_root.ActualHeight:F0}");
     GlyphCanvas.Invalidate(); // the Draw handler does the real (GPU) render this frame
@@ -307,7 +331,7 @@ private void RenderNow()
 private void EnsureTextFormats()
 {
     string nk = _narrowFont + "@" + _narrowSize;
-    if (nk != _tfKeyNarrow) { _tfNarrow = MakeTf(nk); _tfKeyNarrow = nk; _natLineHNarrow = -1; _liftNarrow = -1; LogStartup($"TF narrow={_narrowFont.Split(',')[0]}@{_narrowSize}"); }
+    if (nk != _tfKeyNarrow) { _tfNarrow = MakeTf(nk); _tfKeyNarrow = nk; _natLineHNarrow = -1; _liftNarrow = -1; _fontAdvance = -1; LogStartup($"TF narrow={_narrowFont.Split(',')[0]}@{_narrowSize}"); }
     string wk = _wideFont + "@" + _wideSize;
     if (wk != _tfKeyWide) { _tfWide = MakeTf(wk); _tfKeyWide = wk; _natLineHWide = -1; _liftWide = -1; LogStartup($"TF wide={_wideFont.Split(',')[0]}@{_wideSize}"); }
 }
@@ -465,6 +489,31 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 LogStartup($"GLYPH-ADV '{ch}' U+{char.ConvertToUtf32(ch, 0):X4} class={(wide ? "WIDE" : "narrow")} " +
                            $"narrowAdv={an:F3} wideAdv={aw:F3} cellW={_cellW:F2} " +
                            $"narrowCells={an / _cellW:F2} liftN={liftN:F2} {(ok ? "OK" : ">> MISALIGNED <<")}");
+            }
+            // Kerning probe: if 'AV'/'WA'/'LO' layout width < sum of the two solo glyph advances the
+            // font pairs kern, and ANY run split (the cursor cell gets its own run) loses the pair —
+            // the gap grows ("余白が増えて") and the glyphs after the cursor shift. Monospace fonts
+            // usually have no kerning; this tells us which behavior drives the cursor-row artifact.
+            { string[] pairs = { "AV", "WA", "AT", "LO", "HE", "TA", "LY" };
+              foreach (var p in pairs)
+              {
+                  using var lp = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, p, _tfNarrow!, 5000, 0);
+                  double pairW = lp.LayoutBounds.Width;
+                  double solo = 0;
+                  foreach (var ch in p)
+                  {
+                      using var ls = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, ch.ToString(), _tfNarrow!, 5000, 0);
+                      solo += ls.LayoutBounds.Width;
+                  }
+                  LogStartup($"KERN-PAIR '{p}' pairW={pairW:F2} soloSum={solo:F2} diff={pairW - solo:F2}px {(Math.Abs(pairW - solo) > 0.05 ? ">> KERNED <<" : "mono")}");
+              }
+              // True per-glyph advance: diff of 10-char vs 20-char layout width (side bearings cancel).
+              using (var l10 = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, new string('0', 10), _tfNarrow!, 5000, 0))
+              using (var l20 = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, new string('0', 20), _tfNarrow!, 5000, 0))
+              {
+                  double a10 = l10.LayoutBounds.Width, a20 = l20.LayoutBounds.Width;
+                  LogStartup($"ADV-TRUE 10ch={a10:F2} 20ch={a20:F2} perGlyph={(a20 - a10) / 10.0:F4} cellW={_cellW:F2} match={Math.Abs((a20 - a10) / 10.0 - _cellW):F3}px");
+              }
             }
             // Vertical: this block reported the OLD line-box centering misalignment and is now moot —
             // yNarrow/yWide compensate via _liftNarrow/_liftWide (INK-LIFT logs the actual centers).
