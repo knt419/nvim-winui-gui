@@ -157,7 +157,7 @@ public partial class MainWindow
                     LogStartup($"STEP switched to test buffer, current={await _client.CallAsync("nvim_get_current_buf").ConfigureAwait(false)}");
                     // Type into it (using set_lines for deterministic self-test; nvim_input can be mode-dependent)
                     // nvim_buf_set_lines(bufid, startline, endline, replace:bool, lines:[string]) — order matters.
-                    object?[] putArgs = { testBufNum, 0, 1, true, new string[] { "hello from nvim-winui-gui" } };
+                    object?[] putArgs = { testBufNum, 0, 1, true, new string[] { "hello from nvim-winui-gui", "skew check: --> ★ ◆ ✔ ▶ ─ long tail to prove alignment" } };
                     await _client.CallAsync("nvim_buf_set_lines", putArgs).ConfigureAwait(false);
                     LogStartup("POST-SET lines written to test buffer");
                     // Wait for redraw
@@ -252,19 +252,33 @@ public partial class MainWindow
                         LogStartup("COMPOSITE-COLOR\n" + sb2.ToString());
                         // 4) DIM-CHECK: where a float cell is blank the compositor must keep the parent
                         //    glyph but drawn FAINTER than the float's own text, scaled by the float's
-                        //    blend (keepPct=blend) so the layers read separately. Probe a blank cell of
-                        //    the winblend=30 float: DIAG shows (14,38) as blank-over-parent-'i'.
+                        //    blend (keepPct=blend) so the layers read separately. Scan the winblend=30
+                        //    float region (rows 11-18 cols 30-49) for any blank float cell that preserved
+                        //    a NON-BLANK parent glyph, and verify its fg is dimmed between parent colors.
                         var dimOk = false;
-                        if (comp.Length >= _cols * 15)
+                        if (comp.Length >= _cols * 19)
                         {
-                            var dcell = comp[14 * _cols + 38];
-                            var dfg = ResolveCellFgColor(dcell);
-                            var cbg = CellBg(14, 38, -1);
-                            // keepPct=30 over parent bg must sit strictly between defFg and parent bg
-                            dimOk = dcell.Text.Length > 0 && dcell.Text != " " &&
-                                    PackColor(dfg) > PackColor(cbg) && PackColor(dfg) < PackColor(ResolveCellFgColor(comp[14 * _cols + 25]));
-                            LogStartup($"DIM-CHECK (14,38) '{dcell.Text}' fg=0x{PackColor(dfg):X8} bg=0x{PackColor(cbg):X8} " +
-                                       $"parentFg(ref) EXPECT parentFg(bright)>fg>bg && text is parent glyph (dimmed to blend rate): {dimOk}");
+                            Color parentBg = CellBg(11, 25, -1);
+                            Color parentFg = ResolveCellFgColor(comp[11 * _cols + 25]);
+                            // A preserved parent glyph is dimmed BELOW the midpoint of the parent colors
+                            // (keepPct=30 of defFg over parentBg ~= 0xFF3338..); the float's own text stays
+                            // above it (~70%). This rejects the "FLOAT-A" labels as a false positive.
+                            Color mid = Color.FromArgb(0xFF,
+                                (byte)((parentFg.R + parentBg.R) / 2), (byte)((parentFg.G + parentBg.G) / 2), (byte)((parentFg.B + parentBg.B) / 2));
+                            for (int r = 11; r <= 18 && !dimOk; r++)
+                                for (int c = 30; c <= 49 && !dimOk; c++)
+                                {
+                                    var dcell = comp[r * _cols + c];
+                                    if (dcell.Text.Length == 0 || dcell.Text == " ") continue; // blank float cell only
+                                    var cbg = CellBg(r, c, -1);
+                                    if (cbg == parentBg) continue; // outside the blend float (parent bg untouched)
+                                    var dfg = ResolveCellFgColor(dcell);
+                                    dimOk = PackColor(dfg) > PackColor(cbg) && PackColor(dfg) < PackColor(mid);
+                                    if (dimOk)
+                                        LogStartup($"DIM-CHECK ({r},{c}) '{dcell.Text}' fg=0x{PackColor(dfg):X8} bg=0x{PackColor(cbg):X8} " +
+                                                   $"parentFg=0x{PackColor(parentFg):X8} mid=0x{PackColor(mid):X8} -> PASS");
+                                }
+                            if (!dimOk) LogStartup("DIM-CHECK no preserved+dimmed parent glyph found in float1 region");
                         }
                         LogStartup("SELFTEST FLOAT RESULT: " + (dimOk ? "PASS" : "FAIL"));
                     }

@@ -93,6 +93,7 @@ private double _natLineHNarrow = -1, _natLineHWide = -1; // natural line heights
 private int _invalidateCount; // DIAG: count Invalidate() calls (verify Draw keeps firing)
 private double _dpiScale = 0; // device px per DIP, measured once from the window handle (0 = not yet)
 private int _rowLogCount;     // DIAG: throttle ROWTOP logging
+private bool _advDiagLogged;  // DIAG: one-shot per-glyph advance probe (column-alignment analysis)
 
 private static string? MapKey(VirtualKey vk) => vk switch
     {
@@ -408,6 +409,35 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     if (_natLineHNarrow < 0) _natLineHNarrow = MeasureNatLineH(_narrowFont, _narrowSize);
     if (_natLineHWide < 0) _natLineHWide = MeasureNatLineH(_wideFont, _wideSize);
 
+    // One-shot DIAG probe: measure the rendered advance of representative glyphs with BOTH text
+    // formats and report how far each strays from the cell grid. A glyph whose advance != cellW
+    // (narrow) or != 2*cellW (wide) misaligns every column AFTER it in the SAME DrawText run —
+    // rows containing such a glyph drift while pure-ASCII rows stay put, which is the "行によって
+    // 幅が異なる" effect. The data tells us exactly which codepoints overflow the grid.
+    if (_diagEnabled && !_advDiagLogged)
+    {
+        _advDiagLogged = true;
+        try
+        {
+            string[] sample = { "0", "A", "a", "W", " ", "・", "…", "─", "│", "┌", "┐", "└", "┘", "→", "←", "↑", "↓", "•", "≈", "±", "°", "★", "✔", "✘", "◆", "日", "あ", "ア", "中", "ㅎ", "─", "”", "’", "‑" };
+            foreach (var ch in sample)
+            {
+                using var lN = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, ch, _tfNarrow!, 0, 0);
+                using var lW = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, ch, _tfWide!, 0, 0);
+                double an = Math.Round(lN.LayoutBounds.Width * 1000) / 1000.0;
+                double aw = Math.Round(lW.LayoutBounds.Width * 1000) / 1000.0;
+                bool wide = IsWideGlyph(ch);
+                bool ok = wide
+                    ? Math.Abs(aw - 2 * _cellW) < _cellW * 0.1
+                    : Math.Abs(an - _cellW) < _cellW * 0.1;
+                LogStartup($"GLYPH-ADV '{ch}' U+{char.ConvertToUtf32(ch, 0):X4} class={(wide ? "WIDE" : "narrow")} " +
+                           $"narrowAdv={an:F3} wideAdv={aw:F3} cellW={_cellW:F2} " +
+                           $"narrowCells={an / _cellW:F2} {(ok ? "OK" : ">> MISALIGNED <<")}");
+            }
+        }
+        catch (Exception ex) { LogStartup("GLYPH-ADV probe failed: " + ex.Message); }
+    }
+
     // Pass 1: backgrounds (highlight + inverted cursor). Horizontal runs per row; consecutive rows
     // whose run structure is IDENTICAL extend the previous rects' height instead of drawing new ones,
     // so a uniform region becomes ONE big rect with no interior edges. Win2D exposes no AA toggle, and
@@ -482,6 +512,23 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 continue;
             }
 
+            // Ambiguous/proportional glyph whose natural advance is NOT ~1 cell (arrows, stars,
+            // dingbats, special hyphens... = EAW Ambiguous placed in a single cell by nvim but drawn
+            // ~1.5-2.5 cells wide by the font). Draw it at ITS OWN cell origin instead of inside the
+            // run: a run would accumulate the extra advance and shift every later column of the row
+            // (the "width differs between rows" effect). Individually placed, ink may still bleed a
+            // couple px into the neighbor but column positions stay locked to the grid.
+            if (!IsGridAlignedNarrow(txt))
+            {
+                int cpS = txt.Length > 0 && char.IsHighSurrogate(txt[0]) && txt.Length > 1 && char.IsLowSurrogate(txt[1])
+                    ? char.ConvertToUtf32(txt, 0) : (txt.Length > 0 ? txt[0] : 0);
+                if (_diagEnabled && _skewDiagAdded.Add(cpS))
+                    LogStartup($"SKEW-CELL row={r} col={c} txt='{txt}' cp=U+{cpS:X4} advCells={GlyphAdvCells(txt):F2} (drawn at own cell origin)");
+                ds.DrawText(txt, (float)colLeft[c], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
+                c++;
+                continue;
+            }
+
             int start = c;
             var sb = new System.Text.StringBuilder();
             while (c < cols)
@@ -494,7 +541,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 if (isCur2) fg2 = _defBg;
                 else if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = h2.Fg;
                 else fg2 = _defFg;
-                if (PackColor(fg2) != fgi || IsWideGlyph(t2)) break; // run boundary
+                if (PackColor(fg2) != fgi || IsWideGlyph(t2) || !IsGridAlignedNarrow(t2)) break; // run boundary
                 sb.Append(t2);
                 c++;
             }
@@ -570,6 +617,51 @@ private static bool IsWideGlyph(string s)
         ? ((int)s[0] - 0xD800) * 0x400 + (int)s[1] - 0xDC00 + 0x10000
         : s[0];
     return IsWideCodePoint(cp);
+}
+
+// ---- Column-alignment guard ---------------------------------------------------------------
+// A batched DrawText run is only grid-locked when every glyph in it advances ~one cell. Glyphs the
+// narrow font renders proportionally or ~1.5-2.5 cells wide (EAW-Ambiguous arrows/stars/dingbats,
+// special hyphens, etc., all placed in ONE cell by nvim) would accumulate their skew across the run
+// and push later columns off the grid — differently on each row, so columns stop lining up between
+// adjacent lines. Measure once per code point (DirectWrite + fallback = exactly what the run would
+// draw) and keep only ~1-cell glyphs in runs; everything else is placed at its own cell origin.
+private readonly Dictionary<int, float> _glyphAdv = new();
+private readonly HashSet<int> _skewDiagAdded = new(); // DIAG: log each skewed code point once
+
+private float GlyphAdvCells(string s)
+{
+    int cp = s.Length > 0 && char.IsHighSurrogate(s[0]) && s.Length > 1 && char.IsLowSurrogate(s[1])
+        ? char.ConvertToUtf32(s, 0)
+        : (s.Length > 0 ? s[0] : 0);
+    return MeasureGlyphAdv(cp, s) / Math.Max(0.1f, (float)_cellW);
+}
+
+private bool IsGridAlignedNarrow(string s)
+{
+    if (s.Length == 0) return true;
+    int cp = char.IsHighSurrogate(s[0]) && s.Length > 1 && char.IsLowSurrogate(s[1])
+        ? char.ConvertToUtf32(s, 0)
+        : s[0];
+    if (IsWideCodePoint(cp)) return false; // wide glyphs break the narrow run regardless
+    if (cp == 0x20) return true; // space: LayoutBounds reports no ink (0 width) but advances mono cell width
+    float cells = GlyphAdvCells(s);
+    return Math.Abs(cells - 1.0f) <= 0.10f;
+}
+
+// Advance (DIPs) of a single glyph in the narrow format, cached by code point.
+private float MeasureGlyphAdv(int cp, string s)
+{
+    if (_glyphAdv.TryGetValue(cp, out var cached)) return cached;
+    float a;
+    try
+    {
+        using var l = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(GlyphCanvas, s, _tfNarrow!, 0, 0);
+        a = (float)l.LayoutBounds.Width; // ink width; spaces are special-cased in IsGridAlignedNarrow
+    }
+    catch { a = (float)_cellW; } // measurement failure -> assume aligned (conservative: stays in runs)
+    _glyphAdv[cp] = a;
+    return a;
 }
 
 private static int ToInt(object? v) => v switch
