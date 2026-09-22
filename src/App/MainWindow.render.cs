@@ -90,6 +90,7 @@ private readonly Dictionary<int, Microsoft.Graphics.Canvas.Brushes.ICanvasBrush>
 private string _tfKeyNarrow = "", _tfKeyWide = "";
 private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _tfNarrow, _tfWide;
 private double _natLineHNarrow = -1, _natLineHWide = -1; // natural line heights (for vertical centering)
+    private double _liftNarrow = -1, _liftWide = -1;         // glyph INK center offset inside each line box
 private int _invalidateCount; // DIAG: count Invalidate() calls (verify Draw keeps firing)
 private double _dpiScale = 0; // device px per DIP, measured once from the window handle (0 = not yet)
 private int _rowLogCount;     // DIAG: throttle ROWTOP logging
@@ -306,9 +307,9 @@ private void RenderNow()
 private void EnsureTextFormats()
 {
     string nk = _narrowFont + "@" + _narrowSize;
-    if (nk != _tfKeyNarrow) { _tfNarrow = MakeTf(nk); _tfKeyNarrow = nk; _natLineHNarrow = -1; LogStartup($"TF narrow={_narrowFont.Split(',')[0]}@{_narrowSize}"); }
+    if (nk != _tfKeyNarrow) { _tfNarrow = MakeTf(nk); _tfKeyNarrow = nk; _natLineHNarrow = -1; _liftNarrow = -1; LogStartup($"TF narrow={_narrowFont.Split(',')[0]}@{_narrowSize}"); }
     string wk = _wideFont + "@" + _wideSize;
-    if (wk != _tfKeyWide) { _tfWide = MakeTf(wk); _tfKeyWide = wk; _natLineHWide = -1; LogStartup($"TF wide={_wideFont.Split(',')[0]}@{_wideSize}"); }
+    if (wk != _tfKeyWide) { _tfWide = MakeTf(wk); _tfKeyWide = wk; _natLineHWide = -1; _liftWide = -1; LogStartup($"TF wide={_wideFont.Split(',')[0]}@{_wideSize}"); }
 }
 
 private static Microsoft.Graphics.Canvas.Text.CanvasTextFormat MakeTf(string key)
@@ -409,6 +410,35 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     if (_natLineHNarrow < 0) _natLineHNarrow = MeasureNatLineH(_narrowFont, _narrowSize);
     if (_natLineHWide < 0) _natLineHWide = MeasureNatLineH(_wideFont, _wideSize);
 
+    // Vertical alignment: centering each font's LINE BOX (natH) in the cell does not align the two
+    // fonts' INK, because ascent/descent asymmetry differs per font — e.g. narrow '0' ink center
+    // sits ~0.4px above the cell center while wide '日' sits ~1.0px below (measured ~1.38px apart)
+    // → mixed rows / cursor row look vertically shifted. Instead record each font's ink-center
+    // offset inside its line box (LayoutBounds.Y + H/2) so both fonts draw their ink to the SAME
+    // point: yDraw = rowTop + rh/2 - lift.
+    if (_liftNarrow < 0 || _liftWide < 0)
+    {
+        try
+        {
+            using var p0 = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, "0", _tfNarrow!, 0, 0);
+            using var pW = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, "日", _tfWide!, 0, 0);
+            var b0 = p0.LayoutBounds; var bW = pW.LayoutBounds;
+            _liftNarrow = b0.Y + b0.Height / 2;
+            _liftWide = bW.Y + bW.Height / 2;
+            if (_diagEnabled)
+            {
+                double rh = rowTop.Length > 1 ? rowTop[1] - rowTop[0] : 0;
+                LogStartup($"INK-LIFT narrow={_liftNarrow:F2} wide={_liftWide:F2} | yNarrow={rh / 2 - _liftNarrow:F2} yWide={rh / 2 - _liftWide:F2} " +
+                           $"-> inkCenterNarrow={rh / 2:F2} inkCenterWide={rh / 2:F2} (cell center = shared)");
+            }
+        }
+        catch (Exception ex)
+        {
+            _liftNarrow = 0; _liftWide = 0;
+            LogStartup("INK-LIFT measure failed: " + ex.Message);
+        }
+    }
+
     // One-shot DIAG probe: measure the rendered advance of representative glyphs with BOTH text
     // formats and report how far each strays from the cell grid. A glyph whose advance != cellW
     // (narrow) or != 2*cellW (wide) misaligns every column AFTER it in the SAME DrawText run —
@@ -434,6 +464,8 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                            $"narrowAdv={an:F3} wideAdv={aw:F3} cellW={_cellW:F2} " +
                            $"narrowCells={an / _cellW:F2} {(ok ? "OK" : ">> MISALIGNED <<")}");
             }
+            // Vertical: this block reported the OLD line-box centering misalignment and is now moot —
+            // yNarrow/yWide compensate via _liftNarrow/_liftWide (INK-LIFT logs the actual centers).
         }
         catch (Exception ex) { LogStartup("GLYPH-ADV probe failed: " + ex.Message); }
     }
@@ -481,8 +513,8 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     for (int r = 0; r < rows; r++)
     {
         double rh = rowTop[r + 1] - rowTop[r]; // this row's pixel height (device-px snapped)
-        float yNarrow = (float)(rowTop[r] + (rh - _natLineHNarrow) / 2); // centered natural line box
-        float yWide   = (float)(rowTop[r] + (rh - _natLineHWide) / 2);
+        float yNarrow = (float)(rowTop[r] + rh / 2 - _liftNarrow); // both fonts aligned on ink center
+        float yWide   = (float)(rowTop[r] + rh / 2 - _liftWide);
         if (_diagEnabled && r == curRow)
         {
             var sbd = new System.Text.StringBuilder();
