@@ -117,6 +117,7 @@ private double _dpiScale = 0; // device px per DIP, measured once from the windo
 private int _rowLogCount;     // DIAG: throttle ROWTOP logging
 private bool _advDiagLogged;  // DIAG: one-shot per-glyph advance probe (column-alignment analysis)
     private bool _emojiDiagLogged; // DIAG: one-shot color-emoji path probe
+    private bool _emojiShotLogged0;// DIAG: one-shot offscreen color-emoji snapshot
 
 private static string? MapKey(VirtualKey vk) => vk switch
     {
@@ -549,6 +550,41 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
         catch (Exception ex) { LogStartup("EMOJI-DIAG probe failed: " + ex.Message); }
     }
 
+    // One-shot DIAG snapshot: render the emoji cells into an OFFSCREEN render target (same formats
+    // and centering as the live path) and save a PNG so the actual pixels — color vs monochrome
+    // outline — can be inspected. COLR/CPAL layers only appear if the drawing stack honors them.
+    if (_diagEnabled && !_emojiShotLogged0)
+    {
+        _emojiShotLogged0 = true;
+        try
+        {
+            double rhS = rowTop.Length > 1 ? rowTop[1] - rowTop[0] : _cellH;
+            var rt = new Microsoft.Graphics.Canvas.CanvasRenderTarget(rc, 240, 90, 96);
+            using (var ds2 = rt.CreateDrawingSession())
+            {
+                ds2.Clear(Windows.UI.Color.FromArgb(255, 60, 60, 60));
+                float x = 12;
+                foreach (var sc in new[] { "✅", "⚠️", "😀", "★" })
+                {
+                    bool w = IsWideGlyph(sc);
+                    bool em = IsEmojiPresentation(sc);
+                    float size = (float)Math.Min(w ? 2 * _cellW : _cellW, rhS);
+                    float lift = em ? EmojiLift(sc, size) : (w ? (float)_liftWide : (float)GlyphLiftN(sc));
+                    float y = (float)(rhS / 2 - lift) + 12;
+                    // Use the STRING DrawText overload (exactly what the live path does) — the
+                    // DrawTextLayout overload does not consult the format's EnableColorFont option.
+                    if (em) ds2.DrawText(sc, x, y, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), EmojiTf(size));
+                    else ds2.DrawText(sc, x, y, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), w ? _tfWide! : _tfNarrow!);
+                    x += 56;
+                }
+            }
+            string shotPath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvimWinUIGui", "emojid.png");
+            _ = SaveRtAsync(rt, shotPath);
+            LogStartup("EMOJI-SHOT queued -> " + shotPath);
+        }
+        catch (Exception ex) { LogStartup("EMOJI-SHOT failed: " + ex.Message); }
+    }
+
     // Pass 1: backgrounds (highlight + inverted cursor). Horizontal runs per row; consecutive rows
     // whose run structure is IDENTICAL extend the previous rects' height instead of drawing new ones,
     // so a uniform region becomes ONE big rect with no interior edges. Win2D exposes no AA toggle, and
@@ -806,7 +842,19 @@ private readonly Dictionary<int, float> _emojiLift = new();
 private Microsoft.Graphics.Canvas.Text.CanvasTextFormat EmojiTf(float size)
 {
     if (_tfEmoji.TryGetValue(size, out var tf)) return tf;
-    tf = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat { FontFamily = "Segoe UI Emoji", FontSize = size };
+    // EnableColorFont: like Direct2D, Win2D draws color fonts (COLR/CPAL, e.g. Segoe UI Emoji)
+    // as their MONOCHROME outline unless the format opts in to color glyph rendering. Without it
+    // the emoji stays a black/white outline no matter which family the layout resolves.
+    tf = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat
+    {
+        FontFamily = "Segoe UI Emoji",
+        FontSize = size,
+        // Like Direct2D, Win2D draws color fonts (COLR/CPAL, e.g. Segoe UI Emoji) as their
+        // MONOCHROME outline unless the format opts in to color glyph rendering via
+        // CanvasDrawTextOptions.EnableColorFont. Without it the emoji stays a black/white
+        // outline no matter which family the layout resolves.
+        Options = Microsoft.Graphics.Canvas.Text.CanvasDrawTextOptions.EnableColorFont
+    };
     _tfEmoji[size] = tf;
     return tf;
 }
@@ -825,6 +873,18 @@ private float EmojiLift(string s, float size)
     catch { lift = 0.0f; } // measurement failure -> draw with layout top at the cell center line
     _emojiLift[cp] = lift;
     return lift;
+}
+
+// DIAG only: asynchronously save an offscreen render target to a PNG (Win2D has no synchronous
+// image save); keep the target alive until the save completes, then dispose it.
+private static async Task SaveRtAsync(Microsoft.Graphics.Canvas.CanvasRenderTarget rt, string path)
+{
+    try
+    {
+        await rt.SaveAsync(path, Microsoft.Graphics.Canvas.CanvasBitmapFileFormat.Png);
+    }
+    catch (Exception ex) { LogStartup("EMOJI-SHOT save failed: " + ex.Message); }
+    finally { rt.Dispose(); }
 }
 
 // ---- Column-alignment guard ---------------------------------------------------------------
