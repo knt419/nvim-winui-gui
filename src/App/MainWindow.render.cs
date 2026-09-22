@@ -543,8 +543,9 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 using var lN = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, sc, _tfNarrow!, 0, 0);
                 double bleedCells = Math.Round(lN.LayoutBounds.Width / _cellW * 100) / 100.0;
                 bool wide = IsWideGlyph(sc);
-                float size = (float)Math.Min(wide ? 2 * _cellW : _cellW, _cellH > 0 ? rowTop.Length > 1 ? rowTop[1] - rowTop[0] : _cellH : _cellH);
-                LogStartup($"EMOJI-DIAG '{sc}' U+{cp:X4} emoji={IsEmojiPresentation(sc)} wide={wide} oldNarrowCells={bleedCells:F2} -> emoji fits {size:F2}px");
+                float rhD = (float)(_cellH > 0 ? (rowTop.Length > 1 ? rowTop[1] - rowTop[0] : _cellH) : _cellH);
+                float size = EmojiSlotSize(sc, rhD);
+                LogStartup($"EMOJI-DIAG '{sc}' U+{cp:X4} emoji={IsEmojiPresentation(sc)} wide={wide} oldNarrowCells={bleedCells:F2} -> 2-cell slot fits {size:F2}px");
             }
         }
         catch (Exception ex) { LogStartup("EMOJI-DIAG probe failed: " + ex.Message); }
@@ -568,7 +569,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 {
                     bool w = IsWideGlyph(sc);
                     bool em = IsEmojiPresentation(sc);
-                    float size = (float)Math.Min(w ? 2 * _cellW : _cellW, rhS);
+                    float size = em ? EmojiSlotSize(sc, (float)rhS) : (float)Math.Min(w ? 2 * _cellW : _cellW, rhS);
                     float lift = em ? EmojiLift(sc, size) : (w ? (float)_liftWide : (float)GlyphLiftN(sc));
                     float y = (float)(rhS / 2 - lift) + 12;
                     // Use the STRING DrawText overload (exactly what the live path does) — the
@@ -654,16 +655,18 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
 
             if (IsEmojiPresentation(txt))
             {
-                // Color-emoji cell: draw with the dedicated emoji font sized to fit the slot
-                // (min(slotWidth, lineHeight)) so the glyph never bleeds into the neighbor and the
-                // VS16/ZWJ variants stay one clean glyph. Ink is optically centered like the Latin
-                // reference via the same lift-based alignment used for _tfNarrow/_tfWide.
-                bool w = IsWideGlyph(txt);
-                float size = (float)Math.Min(w ? 2 * _cellW : _cellW, rh);
+                // Color-emoji cell. Emoji-presentation glyphs never fit the half-width slot (their
+                // natural ink spans ~2 cells), and shrinking them to 8.8px makes them look tiny —
+                // so every emoji claims the FULL 2-cell span: size is fitted so the ink fills
+                // exactly two cells (EmojiSlotSize), and the trailing cell is reserved blank (nvim
+                // already emits a covered tail "" for emoji-presentation chars; a real char there is
+                // hidden by design so the glyph never collides with the following text). Ink is
+                // optically centered like the Latin reference via the lift-based alignment.
+                float size = EmojiSlotSize(txt, (float)rh);
                 float yEm = (float)(rowTop[r] + rh / 2 - EmojiLift(txt, size));
-                if (_diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} wide={w} size={size:F2}R yEm={yEm:F2}");
+                if (_diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} size={size:F2}R yEm={yEm:F2} (2-cell slot, spacer after)");
                 ds.DrawText(txt, (float)colLeft[c], yEm, GetW2dBrush(rc, fg), EmojiTf(size));
-                c += w ? 2 : 1; // wide emoji covers its own tail; narrow takes one cell
+                c += 2; // this cell + the reserved trailing spacer
                 continue;
             }
 
@@ -886,6 +889,24 @@ private float EmojiLift(string s, float size)
     catch { lift = 0.0f; } // measurement failure -> draw with layout top at the cell center line
     _emojiLift[cp] = lift;
     return lift;
+}
+
+// Emoji slot size: the glyph ink should fill a full 2-cell span (narrow emoji get a reserved
+// spacer after them, wide ones span their own 2 cells) and cap at the row height. Start from
+// the natural-ish 2-cell size and, if the emoji's advance still exceeds the span, rescale
+// linearly so it always fits — big emoji, not half-width shrunk ones.
+private float EmojiSlotSize(string s, float rh)
+{
+    float target = (float)(2 * _cellW);
+    float size = Math.Min(target, rh);
+    try
+    {
+        using var l = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(GlyphCanvas, s, EmojiTf(size), 5000, 0);
+        double adv = l.LayoutBounds.Width;
+        if (adv > target + 0.01) size = (float)(size * target / adv);
+    }
+    catch { } // measurement failure -> keep the natural 2-cell size
+    return Math.Min(size, rh);
 }
 
 // DIAG only: asynchronously save an offscreen render target to a PNG (Win2D has no synchronous
