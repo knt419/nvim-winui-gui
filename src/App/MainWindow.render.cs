@@ -311,9 +311,9 @@ private void RenderNow()
     else if (availW > 0 && cols > 0) _cellW = Math.Max(1.0, availW / cols);
     if (availH > 0 && rows > 0) _cellH = Math.Max(1.0, availH / rows);
 
-    // Size the canvas to exactly the grid; the ScrollViewer centers it in the content area. Use
-    // whole pixels (same rounding as RenderCore's rowTop/colLeft) so the last cell edge lands on
-    // the canvas boundary — no sliver of clear color beyond the final row/column.
+    // Size the canvas to exactly the grid; the ScrollViewer centers it in the content area. The
+    // whole-pixel size lets the last cell edge land on the canvas boundary — no sliver of clear
+    // color beyond the final row/column (interior edges use the rowTop/colLeft spaces above).
     GlyphCanvas.Width = Math.Round(cols * _cellW);
     GlyphCanvas.Height = Math.Round(rows * _cellH);
     if (_diagEnabled && Interlocked.Increment(ref _invalidateCount) % 25 == 1)
@@ -421,8 +421,15 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
         for (int r = 0; r < Math.Min(6, rows); r++) sbr2.Append($"r{r}:[{rowTop[r]:F2},{rowTop[r+1]-rowTop[r]:F2}] ");
         LogStartup($"ROWTOP cellH={_cellH:F4} dpi={dpi:F3} {sbr2}");
     }
+    // Horizontal: NO snap. Batched runs advance glyphs at the font's true fractional cell (8.8px);
+    // snapping colLeft to whole pixels would make the cursor's split-out run + suffix land at the
+    // ROUNDED boundary while the cursor-off line sits at c*cellW — a ±0.5px jump of the glyph the
+    // cursor touches and everything after it. Cartesian: text, fills, wide/skew and the cursor
+    // block ALL share the exact c*cellW space, so run splits never move anything. Fills crossing a
+    // color boundary keep an AA hairline there, which is wanted; interior seams are vertical-only
+    // and remain eliminated by the rowTop merge below.
     var colLeft = new double[cols + 1];
-    for (int c = 0; c <= cols; c++) colLeft[c] = Math.Round(c * _cellW * dpi) / dpi;
+    for (int c = 0; c <= cols; c++) colLeft[c] = c * _cellW;
 
     // LineSpacing: leave at the font's natural value (-1). Pinning it to _cellH made DirectWrite
     // place the glyph at the TOP of a taller line box, so text sat high in each cell and the cursor
