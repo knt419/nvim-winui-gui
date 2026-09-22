@@ -79,10 +79,13 @@ public partial class MainWindow : Window
     private int _curLocalCol = -1;
 
     // Font fallback chains. The first family is the user's guifont; the rest are system fonts that
-    // supply glyphs the primary lacks, so wide/CJK/emoji/symbol code points don't render as tofu:
+    // supply glyphs the primary lacks, so wide/CJK/symbol code points don't render as tofu:
     //   Yu Gothic / Meiryo / MS Gothic  -> full-width CJK (Japanese)
-    //   Segoe UI Emoji                  -> emoji + astral symbols
+    //   Segoe UI Emoji                  -> retried here for wide text if the wide font lacks a glyph
     //   Segoe UI Symbol                 -> box-drawing, arrows, misc symbols
+    // NOTE: Emoji-presentation cells (✅ ⚠ ❤ ... and any VS16/ZWJ sequence) are NOT resolved
+    // through these chains — DWrite's automatic fallback renders them as monochrome/out-of-grid.
+    // They take the dedicated "Segoe UI Emoji" path in RenderCore (color, fitted to the cell).
     private const string NarrowFallback = "Cascadia Mono, Consolas, Segoe UI Symbol";
     private const string WideFallback = "Cascadia Mono, Consolas, Yu Gothic, Meiryo, MS Gothic, Segoe UI Emoji, Segoe UI Symbol";
 

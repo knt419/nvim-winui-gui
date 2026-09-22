@@ -116,6 +116,7 @@ private int _invalidateCount; // DIAG: count Invalidate() calls (verify Draw kee
 private double _dpiScale = 0; // device px per DIP, measured once from the window handle (0 = not yet)
 private int _rowLogCount;     // DIAG: throttle ROWTOP logging
 private bool _advDiagLogged;  // DIAG: one-shot per-glyph advance probe (column-alignment analysis)
+    private bool _emojiDiagLogged; // DIAG: one-shot color-emoji path probe
 
 private static string? MapKey(VirtualKey vk) => vk switch
     {
@@ -528,6 +529,26 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
         catch (Exception ex) { LogStartup("GLYPH-ADV probe failed: " + ex.Message); }
     }
 
+    // One-shot DIAG probe: which cells take the color-emoji path and, if so, how the emoji font
+    // sizes into the cell (fit width vs the raw ~1.5-2.5-cell bleed the old monochrome fallback had).
+    if (_diagEnabled && !_emojiDiagLogged)
+    {
+        _emojiDiagLogged = true;
+        try
+        {
+            foreach (var sc in new[] { "✅", "✔", "⚠", "⚠️", "⭐", "★", "❤", "😀", "❌" })
+            {
+                int cp = FirstCodePoint(sc);
+                using var lN = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, sc, _tfNarrow!, 0, 0);
+                double bleedCells = Math.Round(lN.LayoutBounds.Width / _cellW * 100) / 100.0;
+                bool wide = IsWideGlyph(sc);
+                float size = (float)Math.Min(wide ? 2 * _cellW : _cellW, _cellH > 0 ? rowTop.Length > 1 ? rowTop[1] - rowTop[0] : _cellH : _cellH);
+                LogStartup($"EMOJI-DIAG '{sc}' U+{cp:X4} emoji={IsEmojiPresentation(sc)} wide={wide} oldNarrowCells={bleedCells:F2} -> emoji fits {size:F2}px");
+            }
+        }
+        catch (Exception ex) { LogStartup("EMOJI-DIAG probe failed: " + ex.Message); }
+    }
+
     // Pass 1: backgrounds (highlight + inverted cursor). Horizontal runs per row; consecutive rows
     // whose run structure is IDENTICAL extend the previous rects' height instead of drawing new ones,
     // so a uniform region becomes ONE big rect with no interior edges. Win2D exposes no AA toggle, and
@@ -594,6 +615,21 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
             else fg = _defFg;
             int fgi = PackColor(fg);
 
+            if (IsEmojiPresentation(txt))
+            {
+                // Color-emoji cell: draw with the dedicated emoji font sized to fit the slot
+                // (min(slotWidth, lineHeight)) so the glyph never bleeds into the neighbor and the
+                // VS16/ZWJ variants stay one clean glyph. Ink is optically centered like the Latin
+                // reference via the same lift-based alignment used for _tfNarrow/_tfWide.
+                bool w = IsWideGlyph(txt);
+                float size = (float)Math.Min(w ? 2 * _cellW : _cellW, rh);
+                float yEm = (float)(rowTop[r] + rh / 2 - EmojiLift(txt, size));
+                if (_diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} wide={w} size={size:F2}R yEm={yEm:F2}");
+                ds.DrawText(txt, (float)colLeft[c], yEm, GetW2dBrush(rc, fg), EmojiTf(size));
+                c += w ? 2 : 1; // wide emoji covers its own tail; narrow takes one cell
+                continue;
+            }
+
             if (IsWideGlyph(txt))
             {
                 if (_diagEnabled && r == curRow) LogStartup($"WIDE-CELL row={r} col={c} txt='{txt}' cp={(int)txt[0]:X4} yWide={yWide:F2} yNarrow={yNarrow:F2}");
@@ -636,7 +672,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 if (isCur2) fg2 = _defBg;
                 else if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = h2.Fg;
                 else fg2 = _defFg;
-                if (PackColor(fg2) != fgi || IsWideGlyph(t2) || !IsGridAlignedNarrow(t2) || VertDeviantNarrow(t2)) break; // run boundary
+                if (PackColor(fg2) != fgi || IsEmojiPresentation(t2) || IsWideGlyph(t2) || !IsGridAlignedNarrow(t2) || VertDeviantNarrow(t2)) break; // run boundary
                 sb.Append(t2);
                 c++;
             }
@@ -712,6 +748,83 @@ private static bool IsWideGlyph(string s)
         ? ((int)s[0] - 0xD800) * 0x400 + (int)s[1] - 0xDC00 + 0x10000
         : s[0];
     return IsWideCodePoint(cp);
+}
+
+// ---- Color emoji path ---------------------------------------------------------------
+// DWrite's automatic fallback renders emoji-presentation glyphs (✅ ⚠ ❤ ⭐ ...) from Segoe UI
+// Symbol as MONOCHROME at ~1.5-2.5 cells wide, so they bleed over the next cell AND come out
+// black-and-white; a sequence ending in U+FE0F (⚠️) even draws a tofu box for the selector.
+// Those cells belong to the equality presentation semantics (Unicode Emoji_Presentation + any
+// cell carrying a variation selector / ZWJ) and Windows only renders them COLORED when the
+// layout's font family actually IS an emoji font — a plain comma-chained fallback list does not
+// control DWrite's resolver (MakeTf uses only the first family). So: classify emoji-presentation
+// cells and draw them with a dedicated "Segoe UI Emoji" format, sized to FIT the cell — min(slot
+// width, line height) — so a 1-cell emoji no longer bleeds into its neighbor (the "no space after
+// ✅" overlap) and the VS16/ZWJ sequences collapse into one glyph (no tofu after ⚠️).
+private static readonly (int Lo, int Hi)[] EmojiBmpRanges =
+{
+    (0x231A,0x231B),(0x2328,0x2328),(0x23CF,0x23CF),(0x23E9,0x23F3),(0x23F8,0x23FA),
+    (0x24C2,0x24C2),(0x25AA,0x25AB),(0x25B6,0x25B6),(0x25C0,0x25C0),(0x25FB,0x25FE),
+    (0x2600,0x2604),(0x260E,0x260E),(0x2611,0x2611),(0x2614,0x2615),(0x2618,0x2618),
+    (0x261D,0x261D),(0x2620,0x2620),(0x2622,0x2623),(0x2626,0x2626),(0x262A,0x262A),
+    (0x262E,0x262F),(0x2638,0x263A),(0x2640,0x2640),(0x2642,0x2642),(0x2648,0x2653),
+    (0x265F,0x265F),(0x2660,0x2660),(0x2663,0x2663),(0x2665,0x2666),(0x2668,0x2668),
+    (0x267B,0x267B),(0x267E,0x267F),(0x2692,0x2697),(0x2699,0x2699),(0x269B,0x269C),
+    (0x26A0,0x26A1),(0x26A7,0x26A7),(0x26AA,0x26AB),(0x26B0,0x26B1),(0x26BD,0x26BE),
+    (0x26C4,0x26C5),(0x26C8,0x26C8),(0x26CE,0x26CF),(0x26D1,0x26D1),(0x26D3,0x26D4),
+    (0x26E9,0x26EA),(0x26F0,0x26F5),(0x26F7,0x26F8),(0x26F9,0x26FA),(0x26FD,0x26FD),
+    (0x2702,0x2702),(0x2705,0x2705),(0x2708,0x2709),(0x270A,0x270D),(0x270F,0x270F),
+    (0x2712,0x2712),(0x2714,0x2714),(0x2716,0x2716),(0x271D,0x271D),(0x2721,0x2721),
+    (0x2728,0x2728),(0x2733,0x2734),(0x2744,0x2744),(0x2747,0x2747),(0x274C,0x274C),
+    (0x274E,0x274E),(0x2753,0x2755),(0x2757,0x2757),(0x2763,0x2764),(0x2795,0x2797),
+    (0x27A1,0x27A1),(0x27B0,0x27B0),(0x27BF,0x27BF),(0x2934,0x2935),(0x2B05,0x2B07),
+    (0x2B1B,0x2B1C),(0x2B50,0x2B50),(0x2B55,0x2B55),(0x3030,0x3030),(0x303D,0x303D),
+    (0x3297,0x3297),(0x3299,0x3299)
+};
+
+private static int FirstCodePoint(string s)
+{
+    if (s.Length == 0) return 0;
+    return char.IsHighSurrogate(s[0]) && s.Length > 1 && char.IsLowSurrogate(s[1])
+        ? char.ConvertToUtf32(s, 0)
+        : s[0];
+}
+
+private static bool IsEmojiPresentation(string s)
+{
+    if (s.Length == 0) return false;
+    int cp = FirstCodePoint(s);
+    if (cp >= 0x1F000 && cp <= 0x1FAFF) return true; // astral emoji & pictographs
+    foreach (var ch in s) if (ch == 0xFE0F || ch == 0x200D) return true; // explicit emoji request
+    foreach (var r in EmojiBmpRanges) if (cp >= r.Lo && cp <= r.Hi) return true;
+    return false;
+}
+
+private readonly Dictionary<float, Microsoft.Graphics.Canvas.Text.CanvasTextFormat> _tfEmoji = new();
+private readonly Dictionary<int, float> _emojiLift = new();
+
+private Microsoft.Graphics.Canvas.Text.CanvasTextFormat EmojiTf(float size)
+{
+    if (_tfEmoji.TryGetValue(size, out var tf)) return tf;
+    tf = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat { FontFamily = "Segoe UI Emoji", FontSize = size };
+    _tfEmoji[size] = tf;
+    return tf;
+}
+
+private float EmojiLift(string s, float size)
+{
+    int cp = FirstCodePoint(s);
+    if (_emojiLift.TryGetValue(cp, out var cached)) return cached;
+    float lift;
+    try
+    {
+        using var l = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(GlyphCanvas, s, EmojiTf(size), 0, 0);
+        var b = l.LayoutBounds;
+        lift = (float)(b.Y + b.Height / 2);
+    }
+    catch { lift = 0.0f; } // measurement failure -> draw with layout top at the cell center line
+    _emojiLift[cp] = lift;
+    return lift;
 }
 
 // ---- Column-alignment guard ---------------------------------------------------------------
