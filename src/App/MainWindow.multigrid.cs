@@ -32,6 +32,11 @@ public partial class MainWindow
 
     private IEnumerable<MGrid> MGrids => _mgrid.Values;
 
+    // A grid that renders ON TOP of the window stack (floating window, :messages). Grids with
+    // zindex <= 0 are regular windows / parts of the parent surface. Used both to decide when the
+    // parent layer should be blurred and to split the composite into (blurred base) + (sharp overlay).
+    private static bool MGridIsOverlay(MGrid g) => g.PosRow < int.MaxValue && (g.IsMessageGrid || g.ZIndex > 0);
+
     private void MGridReset()
     {
         _mgrid.Clear();
@@ -325,7 +330,7 @@ public partial class MainWindow
         _nextBlendHlId = 2_000_000_000;
     }
 
-    private Cell[] BuildRenderCells()
+    private Cell[] BuildRenderCells(bool skipOverlayLayers = false)
     {
         int rows = _screenRows, cols = _screenCols;
         if (rows <= 0 || cols <= 0) return _cells;
@@ -337,6 +342,7 @@ public partial class MainWindow
         foreach (var g in _mgrid.Values.OrderBy(g => g.ZIndex))
         {
             if (g.PosRow >= int.MaxValue) continue; // hidden
+            if (skipOverlayLayers && MGridIsOverlay(g)) continue; // float/message → sharp overlay layer
             for (int r = 0; r < g.Rows; r++)
             {
                 int tr = g.PosRow + r;

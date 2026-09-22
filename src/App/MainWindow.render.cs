@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
@@ -8,6 +9,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.Graphics.Canvas;
+using Microsoft.Graphics.Canvas.Effects;
 using Windows.Graphics;
 using Windows.System;
 using Windows.UI;
@@ -361,21 +363,43 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
     catch (Exception ex) { LogCritical("DRAW EXCEPTION: " + ex.GetType().Name + ": " + ex.Message); }
 }
 
-// Shared render body — also used by the DIAG snapshot path (offscreen CanvasRenderTarget).
-private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc)
+// When a floating window (:help, completion, terminal-in-float...) is up, the underlying parent
+// layer gets a Gaussian blur so the float reads as focused foreground (configurable via
+// NVIM_WINUI_FLOAT_BLUR, DIP radius). 0 disables.
+private double _floatBlurAmount = ParseFloatBlur();
+private bool _blurDiagLogged;
+private static double ParseFloatBlur()
 {
+    var v = Environment.GetEnvironmentVariable("NVIM_WINUI_FLOAT_BLUR");
+    return double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d) && d >= 0 ? d : 6.0;
+}
+
+// Shared render body — also used by the DIAG snapshot path (offscreen CanvasRenderTarget).
+// cellsOverride: draw this exact buffer (base-only during the blur split) instead of compositing
+// fresh. blurLayerPass: marks the recursive render of the parent layer into the offscreen target
+// (skips DIAG one-shots and the overlay orchestration).
+private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc, Cell[]? cellsOverride = null, bool blurLayerPass = false)
+{
+    bool outer = cellsOverride is null && !blurLayerPass;
     try
     {
     var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
     int rows = _screenRows, cols = _screenCols;
     if (rows <= 0 || cols <= 0) return;
+    // Floating/message grid on top of the window stack → blur the parent layer behind it, then
+    // redraw the float(s) sharp. Anything else renders as one flat composite (previous behavior).
+    if (outer && _multigridActive && _mgrid.Values.Any(MGridIsOverlay))
+    {
+        RenderBlurredBase(ds, rc);
+        return;
+    }
     // Measure the window's DPI scale once — needed to snap cell boundaries to whole DEVICE pixels.
     if (_dpiScale < 1.0) { try { IntPtr dh = FindWindow(null, Title); uint d = GetDpiForWindow(dh); if (d > 0) _dpiScale = d / 96.0; } catch { } }
     ds.Clear(_defBg);
 
     // One-shot resolved-color DIAG: log the EXACT packed ARGB that is about to be drawn, so we can
     // tell whether "pure black" comes from _defBg/_defFg themselves or from compositing/canvas bg.
-    if (_diagEnabled && !_colorDiagLogged)
+    if (outer && _diagEnabled && !_colorDiagLogged)
     {
         _colorDiagLogged = true;
         var sbrC = new System.Text.StringBuilder();
@@ -397,7 +421,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
 
     // Multigrid: composite outer frame (grid 1) + window grids into the draw buffer, and resolve
     // the per-grid cursor to outer-frame coordinates. In linegrid mode this is a no-op passthrough.
-    var cells = BuildRenderCells();
+    var cells = cellsOverride ?? BuildRenderCells();
     _activeRenderCells = cells;
 
     int curRow = _curLocalRow, curCol = _curLocalCol;
@@ -418,7 +442,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     double dpi = _dpiScale > 0 ? _dpiScale : 1.0;
     var rowTop = new double[rows + 1];
     for (int r = 0; r <= rows; r++) rowTop[r] = Math.Round(r * _cellH * dpi) / dpi;
-    if (_diagEnabled && Interlocked.Increment(ref _rowLogCount) % 50 == 1)
+    if (outer && _diagEnabled && Interlocked.Increment(ref _rowLogCount) % 50 == 1)
     {
         var sbr2 = new System.Text.StringBuilder();
         for (int r = 0; r < Math.Min(6, rows); r++) sbr2.Append($"r{r}:[{rowTop[r]:F2},{rowTop[r+1]-rowTop[r]:F2}] ");
@@ -459,7 +483,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
             var b0 = p0.LayoutBounds; var bW = pW.LayoutBounds;
             _liftNarrow = b0.Y + b0.Height / 2;
             _liftWide = bW.Y + bW.Height / 2;
-            if (_diagEnabled)
+            if (outer && _diagEnabled)
             {
                 double rh = rowTop.Length > 1 ? rowTop[1] - rowTop[0] : 0;
                 LogStartup($"INK-LIFT narrow={_liftNarrow:F2} wide={_liftWide:F2} | yNarrow={rh / 2 - _liftNarrow:F2} yWide={rh / 2 - _liftWide:F2} " +
@@ -478,7 +502,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     // (narrow) or != 2*cellW (wide) misaligns every column AFTER it in the SAME DrawText run —
     // rows containing such a glyph drift while pure-ASCII rows stay put, which is the "行によって
     // 幅が異なる" effect. The data tells us exactly which codepoints overflow the grid.
-    if (_diagEnabled && !_advDiagLogged)
+    if (outer && _diagEnabled && !_advDiagLogged)
     {
         _advDiagLogged = true;
         try
@@ -533,7 +557,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
 
     // One-shot DIAG probe: which cells take the color-emoji path and, if so, how the emoji font
     // sizes into the cell (fit width vs the raw ~1.5-2.5-cell bleed the old monochrome fallback had).
-    if (_diagEnabled && !_emojiDiagLogged)
+    if (outer && _diagEnabled && !_emojiDiagLogged)
     {
         _emojiDiagLogged = true;
         try
@@ -557,7 +581,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     // One-shot DIAG snapshot: render the emoji cells into an OFFSCREEN render target (same formats
     // and centering as the live path) and save a PNG so the actual pixels — color vs monochrome
     // outline — can be inspected. COLR/CPAL layers only appear if the drawing stack honors them.
-    if (_diagEnabled && !_emojiShotLogged0)
+    if (outer && _diagEnabled && !_emojiShotLogged0)
     {
         _emojiShotLogged0 = true;
         try
@@ -660,7 +684,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
         double rh = rowTop[r + 1] - rowTop[r]; // this row's pixel height (device-px snapped)
         float yNarrow = (float)(rowTop[r] + rh / 2 - _liftNarrow); // both fonts aligned on ink center
         float yWide   = (float)(rowTop[r] + rh / 2 - _liftWide);
-        if (_diagEnabled && r == curRow)
+        if (outer && _diagEnabled && r == curRow)
         {
             var sbd = new System.Text.StringBuilder();
             for (int cc = 0; cc < Math.Min(8, cols); cc++)
@@ -714,7 +738,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 while (occ < cols - c && colLeft[c + occ] < inkEnd + blankMargin) occ++;
                 if (realCol >= 0 && occ > realCol - c) occ = realCol - c; // never swallow real text
                 float yEm = (float)(rowTop[r] + rh / 2 - EmojiLift(txt, size));
-                if (_diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} inkW={adv:F2}px size={size:F2}R realCol={realCol} inkEnd={inkEnd:F2}px cells={occ} yEm={yEm:F2}");
+                if (outer && _diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} inkW={adv:F2}px size={size:F2}R realCol={realCol} inkEnd={inkEnd:F2}px cells={occ} yEm={yEm:F2}");
                 ds.DrawText(txt, (float)colLeft[c], yEm, GetW2dBrush(rc, fg), EmojiTf(size));
                 c += occ; // this cell + the reserved blank span
                 continue;
@@ -742,7 +766,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
             {
                 int cpS = txt.Length > 0 && char.IsHighSurrogate(txt[0]) && txt.Length > 1 && char.IsLowSurrogate(txt[1])
                     ? char.ConvertToUtf32(txt, 0) : (txt.Length > 0 ? txt[0] : 0);
-                if (_diagEnabled && _skewDiagAdded.Add(cpS))
+                if (outer && _diagEnabled && _skewDiagAdded.Add(cpS))
                     LogStartup($"SKEW-CELL row={r} col={c} txt='{txt}' cp=U+{cpS:X4} advCells={GlyphAdvCells(txt):F2} liftN={GlyphLiftN(txt):F2} (drawn at own cell origin)");
                 float yOwn = (float)(rowTop[r] + rh / 2 - GlyphLiftN(txt));
                 // DEFER to a late pass: this glyph draws ~1.5-2.5 cells of INK from a 1-cell slot, so
@@ -809,6 +833,98 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     catch (Exception ex)
     {
         LogCritical("DRAW EXCEPTION: " + ex.GetType().Name + ": " + ex.Message);
+    }
+}
+
+// Parent-layer blur when a floating/message grid is up. The base composite (outer frame + regular
+// windows, i.e. everything except the overlay grids) is rasterized into an OFFSCREEN target, run
+// through an RGBA Gaussian blur, and drawn as the backdrop; the overlay grids are then redrawn
+// SHARP on top via RenderOverlayLayer. BlurAmount is the halo radius in DIPs — cells far from the
+// float wash out, cells near it read through — giving the float a focused foreground feel.
+private void RenderBlurredBase(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc)
+{
+    if (_floatBlurAmount <= 0) { RenderCore(ds, rc, BuildRenderCells(), blurLayerPass: true); return; } // disabled → flat composite
+    var baseCells = BuildRenderCells(true);
+    float w = (float)Math.Round(GlyphCanvas.Width), h = (float)Math.Round(GlyphCanvas.Height);
+    if (w <= 0 || h <= 0) return;
+    if (_diagEnabled && !_blurDiagLogged)
+    {
+        _blurDiagLogged = true;
+        LogStartup($"BLUR-ACTIVE overlayGrids={_mgrid.Values.Count(MGridIsOverlay)} blur={_floatBlurAmount:F1}DIP base={w:F0}x{h:F0}");
+    }
+    ds.Clear(_defBg);
+    try
+    {
+        using (var rt = new Microsoft.Graphics.Canvas.CanvasRenderTarget((Microsoft.Graphics.Canvas.ICanvasResourceCreatorWithDpi)rc,
+                                                                          w, h,
+                                                                          ((Microsoft.Graphics.Canvas.ICanvasResourceCreatorWithDpi)rc).Dpi))
+        {
+            using (var dsv = rt.CreateDrawingSession())
+                RenderCore(dsv, rc, baseCells, blurLayerPass: true);
+            using (var blur = new GaussianBlurEffect
+            {
+                Source = rt,
+                BlurAmount = (float)_floatBlurAmount,
+                Optimization = EffectOptimization.Balanced,
+            })
+                ds.DrawImage(blur);
+        }
+        RenderOverlayLayer(ds, rc);
+    }
+    catch (Exception ex)
+    {
+        LogCritical("BLUR overlay render failed: " + ex.GetType().Name + ": " + ex.Message);
+        RenderCore(ds, rc, BuildRenderCells(), blurLayerPass: true); // fallback: previous sharp composite
+    }
+}
+
+// The sharp foreground: floating/message grids redrawn after the blurred parent. Each float cell's
+// own background (opaque or blended alpha over the blur) is filled, then its glyph is drawn with
+// the correct wide/emoji/narrow path using the SAME centering math as the main pass, so a float
+// looks pixel-identical to the non-blurred render.
+private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc)
+{
+    int rows = _screenRows, cols = _screenCols;
+    double dpi = _dpiScale > 0 ? _dpiScale : 1.0;
+    var rowTop = new double[rows + 1];
+    for (int r = 0; r <= rows; r++) rowTop[r] = Math.Round(r * _cellH * dpi) / dpi;
+    var colLeft = new double[cols + 1];
+    for (int c = 0; c <= cols; c++) colLeft[c] = c * _cellW;
+
+    foreach (var g in _mgrid.Values.OrderBy(g => g.ZIndex))
+    {
+        if (!MGridIsOverlay(g)) continue;
+        for (int r = 0; r < g.Rows; r++)
+        {
+            int tr = g.PosRow + r;
+            if (tr < 0 || tr >= rows) continue;
+            double rh = rowTop[tr + 1] - rowTop[tr];
+            float yNarrow = (float)(rowTop[tr] + rh / 2 - _liftNarrow);
+            float yWide   = (float)(rowTop[tr] + rh / 2 - _liftWide);
+            for (int c = 0; c < g.Cols; c++)
+            {
+                int tc = g.PosCol + c;
+                if (tc < 0 || tc >= cols) continue;
+                var cell = g.Cells[r * g.Cols + c];
+                var rawBg = GetRawHlBg(cell);
+                if (rawBg is { } rb && rb.A > 0)
+                    ds.FillRectangle(new Windows.Foundation.Rect(colLeft[tc], rowTop[tr], _cellW, rh), GetW2dBrush(rc, rb));
+                string t = cell.Text;
+                if (t.Length == 0) continue;
+                Color fg = _defFg;
+                if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) { if (h.Fg.A > 0) fg = h.Fg; }
+                if (IsEmojiPresentation(t))
+                {
+                    float size = EmojiNaturalSize(t, (float)rh);
+                    float yEm = (float)(rowTop[tr] + rh / 2 - EmojiLift(t, size));
+                    ds.DrawText(t, (float)colLeft[tc], yEm, GetW2dBrush(rc, fg), EmojiTf(size));
+                }
+                else if (IsWideGlyph(t))
+                    ds.DrawText(t, (float)colLeft[tc], yWide, GetW2dBrush(rc, fg), _tfWide!);
+                else
+                    ds.DrawText(t, (float)colLeft[tc], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
+            }
+        }
     }
 }
 
