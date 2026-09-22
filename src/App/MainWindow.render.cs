@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.Graphics.Canvas;
 using Windows.Graphics;
 using Windows.System;
 using Windows.UI;
@@ -580,6 +581,17 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                     else ds2.DrawText(sc, x, y, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), w ? _tfWide! : _tfNarrow!);
                     x += 56;
                 }
+                // Probe band: an overwide symbol (★, deferred pass) followed immediately by text "OK".
+                // The deferred ink must be clipped at the first real-text cell so 'O' stays intact.
+                // Star and text go to SEPARATE y-bands so the clip can be measured independently:
+                // the star's band must show NO ink right of the clip boundary (12+cellW), and the
+                // OK band must show 'O' starting exactly at its own cell.
+                float yB = (float)(rhS / 2 - GlyphLiftN("★")) + 44;
+                float yT = (float)(rhS / 2 - _liftNarrow) + 64;
+                ds2.DrawText("OK", 12 + (float)_cellW, yT, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), _tfNarrow!);
+                float clipX = 12 + (float)_cellW;
+                using (ds2.CreateLayer(1.0f, new Windows.Foundation.Rect(0, 0, clipX, 20000)))
+                    ds2.DrawText("★", 12, yB, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), _tfNarrow!);
             }
             string shotPath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvimWinUIGui", "emojid.png");
             _ = SaveRtAsync(rt, shotPath);
@@ -628,7 +640,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     // Pass 2: text. A "run" is consecutive cells sharing the same foreground color and narrow
     // font — drawn as ONE DrawText call (the big win over per-cell XAML). Wide glyphs break the
     // run and are drawn individually with the wide format; covered tails ("") add no ink.
-    var skewPending = new System.Collections.Generic.List<(string Text, float X, float Y, int Fg)>();
+    var skewPending = new System.Collections.Generic.List<(string Text, float X, float Y, int Fg, float ClipX)>();
     for (int r = 0; r < rows; r++)
     {
         double rh = rowTop[r + 1] - rowTop[r]; // this row's pixel height (device-px snapped)
@@ -708,7 +720,15 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 // paints OVER the bleed and shears the symbol's second half. Flushing the deferred
                 // list after every batched glyph makes the symbol's ink win the overlap, matching
                 // float-over-parent z-order, while batched/wide/emoji text stays cell-faithful.
-                skewPending.Add((txt, (float)colLeft[c], yOwn, fgi));
+                // To keep the ink from EATING real text (e.g. a 'O' right after the symbol), the
+                // bleed is clipped at the first following cell whose content is actual text (letters
+                // and such) — only blank/space/box-drawing/fold cells may be covered by the bleed.
+                float clipX = float.MaxValue;
+                for (int c2 = c + 1; c2 < cols && c2 <= c + 8; c2++)
+                {
+                    if (!CoverableNeighbor(cells[r * cols + c2].Text)) { clipX = (float)colLeft[c2]; break; }
+                }
+                skewPending.Add((txt, (float)colLeft[c], yOwn, fgi, clipX));
                 c++;
                 continue;
             }
@@ -735,9 +755,21 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
 
     // Pass 2b: deferred overwide glyphs. Drawn AFTER every batched/wide/emoji glyph so their
     // ~2-cell ink bleed is never painted over by whatever lives in the next cell (e.g. a
-    // parent-window fillchar at a floating window's boundary).
+    // parent-window fillchar at a floating window's boundary). Each glyph's ink is clipped at
+    // the first following TEXT cell so the bleed can widen over blank/border cells but never
+    // cuts into a following letter.
     foreach (var g in skewPending)
-        ds.DrawText(g.Text, g.X, g.Y, GetW2dBrush(rc, UnpackPacked(g.Fg)), _tfNarrow!);
+    {
+        if (g.ClipX < float.MaxValue && g.ClipX > g.X)
+        {
+            using (ds.CreateLayer(1.0f, new Windows.Foundation.Rect(0, 0, g.ClipX, 20000)))
+                ds.DrawText(g.Text, g.X, g.Y, GetW2dBrush(rc, UnpackPacked(g.Fg)), _tfNarrow!);
+        }
+        else
+        {
+            ds.DrawText(g.Text, g.X, g.Y, GetW2dBrush(rc, UnpackPacked(g.Fg)), _tfNarrow!);
+        }
+    }
 
     double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
     _renderMsTotal += ms; int rcc = Interlocked.Increment(ref _renderCount);
@@ -807,6 +839,20 @@ private static bool IsWideGlyph(string s)
         ? ((int)s[0] - 0xD800) * 0x400 + (int)s[1] - 0xDC00 + 0x10000
         : s[0];
     return IsWideCodePoint(cp);
+}
+
+// An overwide glyph's ink may bleed over the NEXT cell only while that cell holds nothing the
+// user reads as text: covered tails (""), whitespace, box-drawing borders/fillchars, and the
+// "…" fold filler. Real letters must never be painted over — the bleed is clipped at the first
+// such cell.
+private static bool CoverableNeighbor(string t)
+{
+    if (t.Length == 0) return true;
+    if (string.IsNullOrWhiteSpace(t)) return true;
+    char ch = t[0];
+    if (ch == '\u2026') return true;                 // … (folded-line fill char)
+    if (ch >= '\u2500' && ch <= '\u257F') return true; // box-drawing (borders, nvim fillchars)
+    return false;
 }
 
 // ---- Color emoji path ---------------------------------------------------------------
