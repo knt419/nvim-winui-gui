@@ -625,6 +625,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     // Pass 2: text. A "run" is consecutive cells sharing the same foreground color and narrow
     // font — drawn as ONE DrawText call (the big win over per-cell XAML). Wide glyphs break the
     // run and are drawn individually with the wide format; covered tails ("") add no ink.
+    var skewPending = new System.Collections.Generic.List<(string Text, float X, float Y, int Fg)>();
     for (int r = 0; r < rows; r++)
     {
         double rh = rowTop[r + 1] - rowTop[r]; // this row's pixel height (device-px snapped)
@@ -691,7 +692,13 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 if (_diagEnabled && _skewDiagAdded.Add(cpS))
                     LogStartup($"SKEW-CELL row={r} col={c} txt='{txt}' cp=U+{cpS:X4} advCells={GlyphAdvCells(txt):F2} liftN={GlyphLiftN(txt):F2} (drawn at own cell origin)");
                 float yOwn = (float)(rowTop[r] + rh / 2 - GlyphLiftN(txt));
-                ds.DrawText(txt, (float)colLeft[c], yOwn, GetW2dBrush(rc, fg), _tfNarrow!);
+                // DEFER to a late pass: this glyph draws ~1.5-2.5 cells of INK from a 1-cell slot, so
+                // its bleed reaches into the NEXT cell. Drawn in row order, any later glyph there (a
+                // filler char — e.g. the parent window's fillchars under/next to a floating window)
+                // paints OVER the bleed and shears the symbol's second half. Flushing the deferred
+                // list after every batched glyph makes the symbol's ink win the overlap, matching
+                // float-over-parent z-order, while batched/wide/emoji text stays cell-faithful.
+                skewPending.Add((txt, (float)colLeft[c], yOwn, fgi));
                 c++;
                 continue;
             }
@@ -715,6 +722,12 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
             ds.DrawText(sb.ToString(), (float)colLeft[start], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
         }
     }
+
+    // Pass 2b: deferred overwide glyphs. Drawn AFTER every batched/wide/emoji glyph so their
+    // ~2-cell ink bleed is never painted over by whatever lives in the next cell (e.g. a
+    // parent-window fillchar at a floating window's boundary).
+    foreach (var g in skewPending)
+        ds.DrawText(g.Text, g.X, g.Y, GetW2dBrush(rc, UnpackPacked(g.Fg)), _tfNarrow!);
 
     double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
     _renderMsTotal += ms; int rcc = Interlocked.Increment(ref _renderCount);
