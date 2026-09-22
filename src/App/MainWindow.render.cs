@@ -540,12 +540,12 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
             foreach (var sc in new[] { "✅", "✔", "⚠", "⚠️", "⭐", "★", "❤", "😀", "❌" })
             {
                 int cp = FirstCodePoint(sc);
-                using var lN = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, sc, _tfNarrow!, 0, 0);
-                double bleedCells = Math.Round(lN.LayoutBounds.Width / _cellW * 100) / 100.0;
                 bool wide = IsWideGlyph(sc);
                 float rhD = (float)(_cellH > 0 ? (rowTop.Length > 1 ? rowTop[1] - rowTop[0] : _cellH) : _cellH);
-                float size = EmojiSlotSize(sc, rhD);
-                LogStartup($"EMOJI-DIAG '{sc}' U+{cp:X4} emoji={IsEmojiPresentation(sc)} wide={wide} oldNarrowCells={bleedCells:F2} -> 2-cell slot fits {size:F2}px");
+                float sizeN = EmojiNaturalSize(sc, rhD);
+                float advN = EmojiAdvance(sc, sizeN);
+                int occN = Math.Max(1, (int)Math.Ceiling(advN / _cellW));
+                LogStartup($"EMOJI-DIAG '{sc}' U+{cp:X4} emoji={IsEmojiPresentation(sc)} wide={wide} inkW={advN:F2}px @size={sizeN:F2}R rowH={rhD:F2} -> occupies {occN} cells, rest blank");
             }
         }
         catch (Exception ex) { LogStartup("EMOJI-DIAG probe failed: " + ex.Message); }
@@ -569,7 +569,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 {
                     bool w = IsWideGlyph(sc);
                     bool em = IsEmojiPresentation(sc);
-                    float size = em ? EmojiSlotSize(sc, (float)rhS) : (float)Math.Min(w ? 2 * _cellW : _cellW, rhS);
+                    float size = em ? EmojiNaturalSize(sc, (float)rhS) : (float)Math.Min(w ? 2 * _cellW : _cellW, rhS);
                     float lift = em ? EmojiLift(sc, size) : (w ? (float)_liftWide : (float)GlyphLiftN(sc));
                     float y = (float)(rhS / 2 - lift) + 12;
                     // Use the STRING DrawText overload (exactly what the live path does) — the
@@ -655,18 +655,20 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
 
             if (IsEmojiPresentation(txt))
             {
-                // Color-emoji cell. Emoji-presentation glyphs never fit the half-width slot (their
-                // natural ink spans ~2 cells), and shrinking them to 8.8px makes them look tiny —
-                // so every emoji claims the FULL 2-cell span: size is fitted so the ink fills
-                // exactly two cells (EmojiSlotSize), and the trailing cell is reserved blank (nvim
-                // already emits a covered tail "" for emoji-presentation chars; a real char there is
-                // hidden by design so the glyph never collides with the following text). Ink is
-                // optically centered like the Latin reference via the lift-based alignment.
-                float size = EmojiSlotSize(txt, (float)rh);
+                // Color-emoji cell. Never shrink or cell-fit the glyph: draw it at its NATURAL
+                // display size (ink fitted to the ROW HEIGHT — no width squeezing), then reserve
+                // whatever horizontal span the ink covers as blank (occupiedCells = ceil(inkW /
+                // cellW)). The glyph keeps its original look and anything in its trailing span
+                // renders as space, so no collision with the following text.
+                float size = EmojiNaturalSize(txt, (float)rh);
+                float adv = EmojiAdvance(txt, size);
+                int occ = (int)Math.Ceiling(adv / _cellW);
+                if (occ < 1) occ = 1;
+                if (occ > cols - c) occ = cols - c;
                 float yEm = (float)(rowTop[r] + rh / 2 - EmojiLift(txt, size));
-                if (_diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} size={size:F2}R yEm={yEm:F2} (2-cell slot, spacer after)");
+                if (_diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} inkW={adv:F2}px size={size:F2}R cells={occ} yEm={yEm:F2} (natural size, rest blank)");
                 ds.DrawText(txt, (float)colLeft[c], yEm, GetW2dBrush(rc, fg), EmojiTf(size));
-                c += 2; // this cell + the reserved trailing spacer
+                c += occ; // this cell + the reserved blank span
                 continue;
             }
 
@@ -891,22 +893,34 @@ private float EmojiLift(string s, float size)
     return lift;
 }
 
-// Emoji slot size: the glyph ink should fill a full 2-cell span (narrow emoji get a reserved
-// spacer after them, wide ones span their own 2 cells) and cap at the row height. Start from
-// the natural-ish 2-cell size and, if the emoji's advance still exceeds the span, rescale
-// linearly so it always fits — big emoji, not half-width shrunk ones.
-private float EmojiSlotSize(string s, float rh)
+// Emoji NATURAL display size: scale the emoji so its ink FITS THE ROW HEIGHT (fills the line box
+// exactly, no width-based squeezing) and no more. Do not fit the width to any cell span — the
+// horizontal overflow is instead absorbed by reserving blank cells (see EmojiAdvance callers).
+private float EmojiNaturalSize(string s, float rh)
 {
-    float target = (float)(2 * _cellW);
-    float size = Math.Min(target, rh);
     try
     {
-        using var l = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(GlyphCanvas, s, EmojiTf(size), 5000, 0);
-        double adv = l.LayoutBounds.Width;
-        if (adv > target + 0.01) size = (float)(size * target / adv);
+        using (var l = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(GlyphCanvas, s, EmojiTf(rh), 5000, 0))
+        {
+            float h = (float)l.LayoutBounds.Height;
+            if (h > rh + 0.01) return rh * rh / h; // color glyph box exceeds the em; scale height to the row
+        }
     }
-    catch { } // measurement failure -> keep the natural 2-cell size
-    return Math.Min(size, rh);
+    catch { }
+    return rh;
+}
+
+// Emoji ink width at a given size (the full color-glyph advance — the horizontal span of cells
+// the emoji's ink covers). The trailing cells of that span are reserved as blank.
+private float EmojiAdvance(string s, float size)
+{
+    try
+    {
+        using (var l = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(GlyphCanvas, s, EmojiTf(size), 5000, 0))
+            return (float)l.LayoutBounds.Width;
+    }
+    catch { }
+    return 0.0f; // measurement failure -> fall back to a single cell
 }
 
 // DIAG only: asynchronously save an offscreen render target to a PNG (Win2D has no synchronous
