@@ -563,7 +563,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
         try
         {
             double rhS = rowTop.Length > 1 ? rowTop[1] - rowTop[0] : _cellH;
-            var rt = new Microsoft.Graphics.Canvas.CanvasRenderTarget(rc, 240, 90, 96);
+            var rt = new Microsoft.Graphics.Canvas.CanvasRenderTarget(rc, 240, 130, 96);
             using (var ds2 = rt.CreateDrawingSession())
             {
                 ds2.Clear(Windows.UI.Color.FromArgb(255, 60, 60, 60));
@@ -592,6 +592,20 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 float clipX = 12 + (float)_cellW;
                 using (ds2.CreateLayer(1.0f, new Windows.Foundation.Rect(0, 0, clipX, 20000)))
                     ds2.DrawText("★", 12, yB, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), _tfNarrow!);
+                // Repro band C (width-2 allocation): emoji cell + tail + blank + "OK" at cell3.
+                // Emoji has ~3 cells of room -> natural size, O must appear at 12+3*cellW.
+                float yC = (float)(rhS / 2 - EmojiLift("✅", EmojiNaturalSize("✅", (float)rhS))) + 86;
+                float yCn = (float)(rhS / 2 - _liftNarrow) + 86;
+                ds2.DrawText("✅", 12, yC, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), EmojiTf(EmojiNaturalSize("✅", (float)rhS)));
+                ds2.DrawText("OK", 12 + 3 * (float)_cellW, yCn, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), _tfNarrow!);
+                // Repro band D (width-1 tight allocation): " " at cell1, "O" at cell2 (17.6px).
+                // No room for the natural ink -> the emoji shrinks to fit 2 cells, O stays visible.
+                float availD = 2 * (float)_cellW;
+                float sizeD = Math.Max(3f, EmojiNaturalSize("✅", (float)rhS) * availD / EmojiAdvance("✅", EmojiNaturalSize("✅", (float)rhS)));
+                float yD = (float)(rhS / 2 - EmojiLift("✅", sizeD)) + 108;
+                float yDn = (float)(rhS / 2 - _liftNarrow) + 108;
+                ds2.DrawText("✅", 12, yD, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), EmojiTf(sizeD));
+                ds2.DrawText("OK", 12 + availD, yDn, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), _tfNarrow!);
             }
             string shotPath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvimWinUIGui", "emojid.png");
             _ = SaveRtAsync(rt, shotPath);
@@ -669,21 +683,38 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
 
             if (IsEmojiPresentation(txt))
             {
-                // Color-emoji cell. Never shrink or cell-fit the glyph: draw it at its NATURAL
-                // display size (ink fitted to the ROW HEIGHT — no width squeezing). The blank is
-                // then sized from the ink's RIGHT EDGE: cells are reserved (rendered as space)
-                // until the NEXT column's left edge clears the ink end by a margin, so whatever
-                // the emoji's horizontal overflow covers becomes blank instead of colliding with
-                // the following text. A real char inside the ink span is hidden by design; the
-                // first cell strictly past inkEnd+margin always shows, so following text is safe.
+                // Color-emoji cell. Never related-fit the glyph first: draw it at its NATURAL display size
+                // (ink fitted to the ROW HEIGHT — no width squeezing) whenever the following text
+                // leaves room. The reserved blank is then sized from the ink's RIGHT EDGE: cells
+                // are reserved (rendered as space) until the next column's left edge clears the ink
+                // end by a margin. If a REAL (non-blank) character already sits inside the ink's
+                // reach — nvim tight-packed the emoji, e.g. a 1-cell allocation — the emoji is
+                // SHRUNK to fit up to that character instead, so the following text always stays
+                // visible (no swallowed 'O'). The first visible cell past the ink always shows.
                 float size = EmojiNaturalSize(txt, (float)rh);
                 float adv = EmojiAdvance(txt, size);
+                int realCol = -1;
+                for (int c2 = c + 1; c2 < cols && c2 <= c + 8; c2++)
+                {
+                    string t2 = cells[r * cols + c2].Text;
+                    if (t2.Length == 0 || string.IsNullOrWhiteSpace(t2)) continue; // tail / blank — no ink
+                    realCol = c2;
+                    break;
+                }
+                if (realCol >= 0)
+                {
+                    float avail = (float)(colLeft[realCol] - colLeft[c]);
+                    if (avail > 0 && adv > avail)
+                        size = Math.Max(3f, size * avail / adv); // tight layout: fit the emoji to the room
+                    adv = EmojiAdvance(txt, size);
+                }
                 float inkEnd = (float)colLeft[c] + adv;
                 const float blankMargin = 1.0f;
                 int occ = 1;
                 while (occ < cols - c && colLeft[c + occ] < inkEnd + blankMargin) occ++;
+                if (realCol >= 0 && occ > realCol - c) occ = realCol - c; // never swallow real text
                 float yEm = (float)(rowTop[r] + rh / 2 - EmojiLift(txt, size));
-                if (_diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} inkW={adv:F2}px size={size:F2}R inkEnd={inkEnd:F2}px cells={occ} yEm={yEm:F2} (natural size, blank to inkEnd+1px)");
+                if (_diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} inkW={adv:F2}px size={size:F2}R realCol={realCol} inkEnd={inkEnd:F2}px cells={occ} yEm={yEm:F2}");
                 ds.DrawText(txt, (float)colLeft[c], yEm, GetW2dBrush(rc, fg), EmojiTf(size));
                 c += occ; // this cell + the reserved blank span
                 continue;
