@@ -137,6 +137,20 @@ public partial class MainWindow
                     else
                         testBufNum = (int)testBuf!;
 
+                    // nvim_create_buf replies with an EXT handle; decode it to an int buffer id.
+                    static int BufHandle(object? o) => o switch
+                    {
+                        MsgpackStreamDecoder.MsgpackExt ext => ext.Data.Length switch
+                        {
+                            1 => ext.Data[0],
+                            2 => (int)(ext.Data[0] << 8 | ext.Data[1]),
+                            4 => (int)System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(ext.Data.AsSpan()),
+                            8 => (int)System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(ext.Data.AsSpan()),
+                            _ => throw new InvalidOperationException("Unexpected buffer handle data length")
+                        },
+                        _ => (int)o!
+                    };
+
                     LogStartup($"STEP got test buffer #{testBufNum}");
                     // Switch to the test buffer so typing goes there
                     await _client.CallAsync("nvim_set_current_buf", testBufNum).ConfigureAwait(false);
@@ -167,14 +181,20 @@ public partial class MainWindow
                     // win_float_pos, not win_pos). Transparency comes from the per-window 'winblend'
                     // option (0..100), which nvim reflects as a `blend` attr in the float's highlights.
                     var fopts = new Dictionary<string, object?> { ["relative"] = "editor", ["width"] = 20, ["height"] = 8, ["row"] = 11, ["col"] = 30 };
-                    object? fwin = await _client.CallAsync("nvim_open_win", testBufNum, true, fopts);
-                    LogStartup("FLOAT opened (20x8 @ row=11 col=30 relative editor)");
+                    // Floats get their OWN buffer with mostly blank lines so most cells are empty and
+                    // the COMPOSITE must preserve + DIM the parent glyph underneath -> layer separation.
+                    int fbuf1 = BufHandle(await _client.CallAsync("nvim_create_buf", true, false));
+                    await _client.CallAsync("nvim_buf_set_lines", fbuf1, 0, -1, false, new[] { "FLOAT-A", "", "", "", "", "", "", "" });
+                    object? fwin = await _client.CallAsync("nvim_open_win", fbuf1, true, fopts);
+                    LogStartup("FLOAT opened (20x8 FLOAT-A @ row=11 col=30 relative editor)");
                     if (fwin != null) await _client.CallAsync("nvim_win_set_option", fwin, "winblend", 30);
                     // Second float: winblend=100 -> fully translucent. Its cells carry blend=100,
                     // so every cell reduces to the parent's exact color (parent must show through).
                     var foptsT = new Dictionary<string, object?> { ["relative"] = "editor", ["width"] = 20, ["height"] = 4, ["row"] = 19, ["col"] = 30 };
-                    object? fwin2 = await _client.CallAsync("nvim_open_win", testBufNum, true, foptsT);
-                    LogStartup("FLOAT-TRANSPARENT opened (20x4 @ row=19 col=30 winblend=100)");
+                    int fbuf2 = BufHandle(await _client.CallAsync("nvim_create_buf", true, false));
+                    await _client.CallAsync("nvim_buf_set_lines", fbuf2, 0, -1, false, new[] { "FLOAT-B", "", "", "" });
+                    object? fwin2 = await _client.CallAsync("nvim_open_win", fbuf2, true, foptsT);
+                    LogStartup("FLOAT-TRANSPARENT opened (20x4 FLOAT-B @ row=19 col=30 winblend=100)");
                     if (fwin2 != null) await _client.CallAsync("nvim_win_set_option", fwin2, "winblend", 100);
                     // nvim holds the redraw batch until the next input event; force a flush so the
                     // win_float_pos/grid events arrive while we are not typing.
@@ -186,19 +206,17 @@ public partial class MainWindow
                     var comp = BuildRenderCells();
                     if (comp != null)
                     {
-                        // 1) float content must appear inside the expected region rows[11..18] cols[30..49]
-                        int fRow = -1, fCol = -1;
-                        for (int r = 11; r <= 18 && comp.Length >= _cols * (r + 1); r++)
-                            for (int c = 30; c + 5 < _cols; c++)
-                            {
-                                var t = new System.Text.StringBuilder();
-                                for (int k = 0; k < 5; k++) t.Append(comp[r * _cols + c + k].Text);
-                                if (t.ToString().Contains("hello")) { fRow = r; fCol = c; break; }
-                            }
-                        // 2) main window content must still be visible at row 0 (not covered/darkened)
+                        // 1) float content must appear inside the expected regions: float1 rows[11..18], cols[30..49].
+                        //    float2 (winblend=100) is EXPECTED invisible-by-design: its own text is dimmed
+                        //    to the parent color, so only the preserved parent glyphs are readable there.
+                        var (fRow1, fCol1) = FindText(comp, _cols, "FLOAT-A", 11, 18, 30);
+                        var (fRow2, fCol2) = FindText(comp, _cols, "FLOAT-B", 19, 22, 30);
+                        // 2) main window content (grid2 starts at frame row 1 in multigrid) must still be
+                        //    visible, not covered/darkened by the floats
                         var m0 = new System.Text.StringBuilder();
-                        for (int k = 0; k < Math.Min(5, _cols); k++) m0.Append(comp[k].Text);
-                        LogStartup($"FLOAT-CHECK float 'hello' at row={fRow} col={fCol} EXPECT row in [11..18] col in [30..49]; main row0=[{m0}] EXPECT contains hello");
+                        for (int k = 0; k < Math.Min(5, _cols); k++) m0.Append(comp[1 * _cols + k].Text);
+                        LogStartup($"FLOAT-CHECK float1 'FLOAT-A' at row={fRow1} col={fCol1} EXPECT row in [11..18] col in [30..49]; " +
+                                   $"float2 'FLOAT-B' text visible={fRow2 != -1} (winblend=100 -> invisible is CORRECT); main row1=[{m0}]");
                         // Dump the composite region around the expected float for visual verification.
                         var sb = new System.Text.StringBuilder();
                         for (int r = 9; r <= 20 && comp.Length >= _cols * (r + 1); r++)
@@ -232,6 +250,23 @@ public partial class MainWindow
                                 sb2.AppendLine();
                             }
                         LogStartup("COMPOSITE-COLOR\n" + sb2.ToString());
+                        // 4) DIM-CHECK: where a float cell is blank the compositor must keep the parent
+                        //    glyph but drawn FAINTER than the float's own text, scaled by the float's
+                        //    blend (keepPct=blend) so the layers read separately. Probe a blank cell of
+                        //    the winblend=30 float: DIAG shows (14,38) as blank-over-parent-'i'.
+                        var dimOk = false;
+                        if (comp.Length >= _cols * 15)
+                        {
+                            var dcell = comp[14 * _cols + 38];
+                            var dfg = ResolveCellFgColor(dcell);
+                            var cbg = CellBg(14, 38, -1);
+                            // keepPct=30 over parent bg must sit strictly between defFg and parent bg
+                            dimOk = dcell.Text.Length > 0 && dcell.Text != " " &&
+                                    PackColor(dfg) > PackColor(cbg) && PackColor(dfg) < PackColor(ResolveCellFgColor(comp[14 * _cols + 25]));
+                            LogStartup($"DIM-CHECK (14,38) '{dcell.Text}' fg=0x{PackColor(dfg):X8} bg=0x{PackColor(cbg):X8} " +
+                                       $"parentFg(ref) EXPECT parentFg(bright)>fg>bg && text is parent glyph (dimmed to blend rate): {dimOk}");
+                        }
+                        LogStartup("SELFTEST FLOAT RESULT: " + (dimOk ? "PASS" : "FAIL"));
                     }
                 }
                 catch (Exception ex) { LogStartup("SELFTEST FAILED: " + ex.Message); }
@@ -242,6 +277,20 @@ public partial class MainWindow
             LogCritical($"\nSTARTUP FAILED: {ex}");
             SetStatus($"STARTUP FAILED: {ex.Message}");
         }
+    }
+
+    // Self-test helper: scan the composited cells for `needle` on a single row, within col>=minCol,
+    // rows in [rowLo..rowHi]. Returns (row, col) of the first hit or (-1, -1).
+    private static (int, int) FindText(Cell[] comp, int cols, string needle, int rowLo, int rowHi, int minCol)
+    {
+        for (int r = rowLo; r <= rowHi && comp.Length >= cols * (r + 1); r++)
+            for (int c = minCol; c + needle.Length - 1 < cols; c++)
+            {
+                var t = new System.Text.StringBuilder();
+                for (int k = 0; k < needle.Length; k++) t.Append(comp[r * cols + c + k].Text);
+                if (t.ToString().Contains(needle)) return (r, c);
+            }
+        return (-1, -1);
     }
 
     // Read guifont/guifontwide from nvim, parse them into the font fields, and re-render only if

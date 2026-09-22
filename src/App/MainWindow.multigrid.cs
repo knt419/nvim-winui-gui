@@ -232,7 +232,7 @@ public partial class MainWindow
     //             transparent floats reveal the parent window (neovide behavior) while keeping
     //             their text visible.
     private int _nextBlendHlId = 2_000_000_000; // well above any real nvim hl id
-    private readonly Dictionary<(int topHl, int basePacked, int fgPacked), int> _blendCache = new();
+    private readonly Dictionary<(int topHl, int basePacked, int fgPacked, bool parentGlyph), int> _blendCache = new();
 
     // Effective bg color of a cell for compositing: its highlight bg if opaque-ish, else the
     // swap-chain clear color (what a transparent region ultimately shows).
@@ -290,20 +290,22 @@ public partial class MainWindow
 
     // Return the hl id to store in a scratch cell for `top` composited over base color `baseBg`.
     // `rawFg` is the foreground of the glyph actually drawn (the float's own, or — for a blank float
-    // cell that lets the parent show through — the base cell's). `dimFg` dims that fg at the float's
-    // blend rate; preserved parent glyphs pass false so they stay full-bright through the float.
-    private int GetBlendHlId(Cell top, Color? rawTopBg, Color baseBg, Color rawFg, bool dimFg)
+    // cell that lets the parent show through — the base cell's). Layer separation: the float's own
+    // glyphs keep (100-blend)% of their color (strong, they're on top), while preserved parent
+    // glyphs keep only blend% — they fade in exactly as the float becomes more transparent, so the
+    // two windows never render at the same weight/readability.
+    private int GetBlendHlId(Cell top, Color? rawTopBg, Color baseBg, Color rawFg, bool parentGlyph)
     {
-        var key = (top.Hl, PackColor(baseBg), PackColor(rawFg));
+        var key = (top.Hl, PackColor(baseBg), PackColor(rawFg), parentGlyph);
         if (_blendCache.TryGetValue(key, out var id)) return id;
         id = _nextBlendHlId++;
-        // Alpha from the float's own blend (already applied by GetRawHlBg for the bg). Fg is mixed
-        // at the SAME rate over the parent so the text also recedes with the window (TUI behavior).
+        // Alpha from the float's own blend (already applied by GetRawHlBg for the bg).
         int blend = _hlDefs.TryGetValue(top.Hl, out var th) ? th.Blend : 0;
         Color blendedFg;
-        if (dimFg && blend > 0 && rawFg.A > 0)
+        if (blend > 0 && rawFg.A > 0)
         {
-            byte a = (byte)(255 * (100 - blend) / 100);
+            int keepPct = parentGlyph ? blend : 100 - blend; // client-server chain: preserves layer contrast
+            byte a = (byte)(255 * keepPct / 100);
             blendedFg = AlphaBlend(Color.FromArgb(a, rawFg.R, rawFg.G, rawFg.B), baseBg);
         }
         else blendedFg = rawFg;
@@ -363,7 +365,7 @@ public partial class MainWindow
                         bool parentGlyph = top.Text.Trim().Length == 0;
                         string outText = parentGlyph ? baseCell.Text : top.Text;
                         Color rawFg = parentGlyph ? ResolveCellFgColor(baseCell) : ResolveCellFgColor(top);
-                        _renderScratch[idx] = new Cell { Text = outText, Hl = GetBlendHlId(top, rawBg, baseBg, rawFg, !parentGlyph) };
+                        _renderScratch[idx] = new Cell { Text = outText, Hl = GetBlendHlId(top, rawBg, baseBg, rawFg, parentGlyph) };
                     }
                 }
             }
