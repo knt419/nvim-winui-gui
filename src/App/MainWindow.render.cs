@@ -449,20 +449,22 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
         _advDiagLogged = true;
         try
         {
-            string[] sample = { "0", "A", "a", "W", " ", "・", "…", "─", "│", "┌", "┐", "└", "┘", "→", "←", "↑", "↓", "•", "≈", "±", "°", "★", "✔", "✘", "◆", "日", "あ", "ア", "中", "ㅎ", "─", "”", "’", "‑" };
+            string[] sample = { "0", "A", "a", "W", " ", "・", "…", "─", "│", "┌", "┐", "└", "┘", "→", "←", "↑", "↓", "↲", "•", "≈", "±", "°", "★", "✔", "✘", "◆", "日", "あ", "ア", "中", "ㅎ", "─", "”", "’", "‑", ".", ",", "!", "?", "%", "&", "(", ")", "[", "]", "{", "}", "-", "_", "+", "=", "<", ">", "/", "\\", "\"", "'", ":", ";", "#", "@", "$" };
             foreach (var ch in sample)
             {
                 using var lN = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, ch, _tfNarrow!, 0, 0);
                 using var lW = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, ch, _tfWide!, 0, 0);
-                double an = Math.Round(lN.LayoutBounds.Width * 1000) / 1000.0;
+                var bN = lN.LayoutBounds;
+                double an = Math.Round(bN.Width * 1000) / 1000.0;
                 double aw = Math.Round(lW.LayoutBounds.Width * 1000) / 1000.0;
+                double liftN = bN.Y + bN.Height / 2;
                 bool wide = IsWideGlyph(ch);
                 bool ok = wide
                     ? Math.Abs(aw - 2 * _cellW) < _cellW * 0.1
                     : Math.Abs(an - _cellW) < _cellW * 0.1;
                 LogStartup($"GLYPH-ADV '{ch}' U+{char.ConvertToUtf32(ch, 0):X4} class={(wide ? "WIDE" : "narrow")} " +
                            $"narrowAdv={an:F3} wideAdv={aw:F3} cellW={_cellW:F2} " +
-                           $"narrowCells={an / _cellW:F2} {(ok ? "OK" : ">> MISALIGNED <<")}");
+                           $"narrowCells={an / _cellW:F2} liftN={liftN:F2} {(ok ? "OK" : ">> MISALIGNED <<")}");
             }
             // Vertical: this block reported the OLD line-box centering misalignment and is now moot —
             // yNarrow/yWide compensate via _liftNarrow/_liftWide (INK-LIFT logs the actual centers).
@@ -549,14 +551,19 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
             // ~1.5-2.5 cells wide by the font). Draw it at ITS OWN cell origin instead of inside the
             // run: a run would accumulate the extra advance and shift every later column of the row
             // (the "width differs between rows" effect). Individually placed, ink may still bleed a
-            // couple px into the neighbor but column positions stay locked to the grid.
-            if (!IsGridAlignedNarrow(txt))
+            // couple px into the neighbor but column positions stay locked to the grid. Vertically
+            // deviant glyphs (same symbol family, INK center outside the Latin reference) are split
+            // out of runs too, and every individually-drawn glyph is placed at ITS OWN ink lift so
+            // it optically centers on the cell like the surrounding text (a lone ↲ under the cursor
+            // row otherwise sits ~1px low and looks like the cursor row moved).
+            if (!IsGridAlignedNarrow(txt) || VertDeviantNarrow(txt))
             {
                 int cpS = txt.Length > 0 && char.IsHighSurrogate(txt[0]) && txt.Length > 1 && char.IsLowSurrogate(txt[1])
                     ? char.ConvertToUtf32(txt, 0) : (txt.Length > 0 ? txt[0] : 0);
                 if (_diagEnabled && _skewDiagAdded.Add(cpS))
-                    LogStartup($"SKEW-CELL row={r} col={c} txt='{txt}' cp=U+{cpS:X4} advCells={GlyphAdvCells(txt):F2} (drawn at own cell origin)");
-                ds.DrawText(txt, (float)colLeft[c], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
+                    LogStartup($"SKEW-CELL row={r} col={c} txt='{txt}' cp=U+{cpS:X4} advCells={GlyphAdvCells(txt):F2} liftN={GlyphLiftN(txt):F2} (drawn at own cell origin)");
+                float yOwn = (float)(rowTop[r] + rh / 2 - GlyphLiftN(txt));
+                ds.DrawText(txt, (float)colLeft[c], yOwn, GetW2dBrush(rc, fg), _tfNarrow!);
                 c++;
                 continue;
             }
@@ -573,7 +580,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 if (isCur2) fg2 = _defBg;
                 else if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = h2.Fg;
                 else fg2 = _defFg;
-                if (PackColor(fg2) != fgi || IsWideGlyph(t2) || !IsGridAlignedNarrow(t2)) break; // run boundary
+                if (PackColor(fg2) != fgi || IsWideGlyph(t2) || !IsGridAlignedNarrow(t2) || VertDeviantNarrow(t2)) break; // run boundary
                 sb.Append(t2);
                 c++;
             }
@@ -694,6 +701,42 @@ private float MeasureGlyphAdv(int cp, string s)
     catch { a = (float)_cellW; } // measurement failure -> assume aligned (conservative: stays in runs)
     _glyphAdv[cp] = a;
     return a;
+}
+
+// ---- Vertical-alignment guard ---------------------------------------------------------------
+// Ink-center offset of a glyph inside its line box (LayoutBounds.Y + H/2), cached per code point
+// (narrow font). Measure once per code point with the SAME direct-write + fallback path the run
+// would use. All Latin/digits/punctuation come out at the reference 9.60, but symbol glyphs draw
+// ~0.6-1.0px LOWER-INSIDE their box (arrows ★ ◆ ✔ ↲ ⏎ ... = the same EAW-Ambiguous set that
+// also skews horizontally). Drawn at the Latin reference y such a glyph sits visibly below the
+// row's text — on an empty line under the cursor it reads as the cursor row being shifted. So
+// individually-drawn glyphs are placed at THEIR OWN lift (ink center lands on the cell center),
+// and run batching refuses to swallow a glyph whose lift strays from the reference.
+private readonly Dictionary<int, float> _glyphLiftN = new();
+
+private float GlyphLiftN(string s)
+{
+    if (s.Length == 0) return (float)_liftNarrow;
+    int cp = char.IsHighSurrogate(s[0]) && s.Length > 1 && char.IsLowSurrogate(s[1])
+        ? ((int)s[0] - 0xD800) * 0x400 + (int)s[1] - 0xDC00 + 0x10000
+        : s[0];
+    if (_glyphLiftN.TryGetValue(cp, out var cached)) return cached;
+    float lift;
+    try
+    {
+        using var l = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(GlyphCanvas, s, _tfNarrow!, 0, 0);
+        var b = l.LayoutBounds;
+        lift = (float)(b.Y + b.Height / 2);
+    }
+    catch { lift = (float)_liftNarrow; } // measurement failure -> Latin reference (safest)
+    _glyphLiftN[cp] = lift;
+    return lift;
+}
+
+private bool VertDeviantNarrow(string s)
+{
+    if (s.Length == 0 || s[0] == ' ') return false; // space has no ink; "" is a covered tail
+    return Math.Abs(GlyphLiftN(s) - (float)_liftNarrow) > 0.4f; // symbols hoist/lower in-box
 }
 
 private static int ToInt(object? v) => v switch
