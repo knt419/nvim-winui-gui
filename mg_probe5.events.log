@@ -1,0 +1,16 @@
+
+===== ATTACH (initial) : 8 messages =====
+RAW [2, b'redraw', [[b'option_set', [b'ambiwidth', b'single'], [b'arabicshape', True], [b'emoji', True], [b'guifont', b'OperatorMono Nerd Font:h16'], [b'guifontwide', b'HackGen Console NF:h15'], [b'linespace', 0], [b'mousefocus', False], [b'mousehide', True], [b'mousemoveevent', False], [b'pumblend', 10
+RAW [2, b'redraw', [[b'hl_attr_define', [77, {b'foreground': 6517131}, {}, []], [78, {b'foreground': 6517131, b'background': 10991574}, {}, []], [79, {b'foreground': 15130552}, {b'foreground': 14}, []], [80, {b'italic': True, b'foreground': 15130552}, {b'italic': True, b'foreground': 14}, []], [81, {b'f
+RAW [2, b'redraw', [[b'hl_attr_define', [168, {b'foreground': 11656100, b'background': 2105386}, {b'foreground': 0, b'background': 10}, []], [169, {b'bold': True, b'foreground': 15448505}, {b'bold': True, b'foreground': 9}, []], [170, {b'bold': True, b'foreground': 15448505, b'background': 2105386}, {b'
+RAW [2, b'redraw', [[b'hl_attr_define', [273, {b'foreground': 5057547}, {b'foreground': 52}, []], [274, {b'foreground': 15527148}, {b'foreground': 255}, []], [275, {b'foreground': 5319636}, {b'foreground': 56}, []], [276, {b'foreground': 12303291}, {b'foreground': 250}, []], [277, {b'foreground': 36551}
+RAW [2, b'redraw', [[b'hl_attr_define', [382, {b'foreground': 3634392}, {b'foreground': 33}, []], [383, {b'foreground': 4213330}, {b'foreground': 238}, []], [384, {b'foreground': 39168}, {b'foreground': 28}, []], [385, {b'foreground': 5562111}, {b'foreground': 45}, []], [386, {b'foreground': 15365632}, 
+RAW [2, b'redraw', [[b'hl_attr_define', [489, {b'foreground': 9035857, b'background': 2105386}, {b'foreground': 113}, []], [490, {b'foreground': 13491193, b'background': 2105386}, {b'foreground': 14}, []], [491, {b'bold': True, b'foreground': 14738154, b'background': 15385025}, {b'bold': True}, []]], [b
+RAW [1, 999, None, None]
+RAW [2, b'redraw', [[b'mode_info_set', [True, [{b'name': b'normal', b'short_name': b'n', b'mouse_shape': 0, b'cursor_shape': b'block', b'cell_percentage': 0, b'blinkwait': 0, b'blinkon': 0, b'blinkoff': 0, b'hl_id': 0, b'id_lm': 0, b'attr_id': 0, b'attr_id_lm': 0}, {b'name': b'visual', b'short_name': b'
+
+===== AFTER :split : 1 messages =====
+RAW [2, b'redraw', [[b'win_viewport_margins', [6, ExtType(code=1, data=b'\xcd\x03\xeb'), 0, 0, 0, 0], [6, ExtType(code=1, data=b'\xcd\x03\xeb'), 0, 0, 0, 0], [5, ExtType(code=1, data=b'\xcd\x03\xea'), 0, 0, 0, 0], [6, ExtType(code=1, data=b'\xcd\x03\xeb'), 0, 0, 0, 0], [6, ExtType(code=1, data=b'\xcd\x0
+
+===== AFTER :vsplit : 1 messages =====
+RAW [2, b'redraw', [[b'win_viewport_margins', [7, ExtType(code=1, data=b'\xcd\x03\xec'), 0, 0, 0, 0], [7, ExtType(code=1, data=b'\xcd\x03\xec'), 0, 0, 0, 0], [6, ExtType(code=1, data=b'\xcd\x03\xeb'), 0, 0, 0, 0], [7, ExtType(code=1, data=b'\xcd\x03\xec'), 0, 0, 0, 0], [6, ExtType(code=1, data=b'\xcd\x0

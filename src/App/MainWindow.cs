@@ -65,8 +65,18 @@ public partial class MainWindow : Window
     private readonly Dictionary<int, Hl> _hlDefs = new();
     private Color _defFg = Color.FromArgb(0xFF, 0xDC, 0xDC, 0xDC);
     private Color _defBg = Color.FromArgb(0xFF, 0x1E, 0x1E, 0x1E);
+
+    // Effective opaque background: nvim may report a transparent default bg (A=0). Clearing the
+    // swap chain / painting the root with that would expose the black window base. Fall back to a
+    // fixed dark color so the surface is always fully covered.
+    private Color EffBg() => _defBg.A == 0 ? Color.FromArgb(0xFF, 0x1E, 0x1E, 0x1E) : _defBg;
     private int _curRow = -1;
     private int _curCol = -1;
+    // Multigrid: cursor is reported per-grid as [grid_id, row, col]; keep the grid + local coords
+    // and resolve to outer-frame coordinates at render time (robust to win_pos arrival order).
+    private int _curGridId = 1;
+    private int _curLocalRow = -1;
+    private int _curLocalCol = -1;
 
     // Font fallback chains. The first family is the user's guifont; the rest are system fonts that
     // supply glyphs the primary lacks, so wide/CJK/emoji/symbol code points don't render as tofu:
@@ -131,10 +141,17 @@ public partial class MainWindow : Window
         // composite reliably under WinUI3's ScrollViewer, which left the canvas invisible). The
         // window is always sized to exactly fit the grid (UpdateWindowSize), so no scrolling is
         // needed; the canvas is centered in row 0 as a safety net for sub-pixel drift.
+        // Opaque background matching the theme: the Win2D swap chain composites ON TOP of this XAML
+        // background. When a floating window triggers grid_resize -> UpdateWindowSize, the swap chain
+        // is recreated and for one or more frames (plus sub-pixel rounding margins) the GPU content does
+        // not yet cover the full control area; with a null/transparent background the black window base
+        // shows through as pure-black bands around the edges. An opaque _defBg fills those gaps with the
+        // theme color instead of black. Kept in sync by the default_colors_set handler (notify.cs).
         GlyphCanvas = new Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl
         {
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
+            Background = new SolidColorBrush(_defBg),
         };
         GlyphCanvas.Draw += OnGlyphCanvasDraw; // the GPU render (see MainWindow.render.cs)
         StatusText = new TextBlock

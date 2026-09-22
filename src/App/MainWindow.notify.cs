@@ -91,7 +91,10 @@ public partial class MainWindow
             // response, so CallAsync would hang forever waiting for one that never arrives.
             // Use NotifyAsync instead: fire-and-forget, then rely on redraw notifications to
             // confirm the UI was attached (same pattern as tools/rpc-test/Program.cs line 153).
-            await _client.NotifyAsync("nvim_ui_attach", _cols, _rows, new Dictionary<string, object?> { ["rgb"] = true, ["ext_linegrid"] = true }).ConfigureAwait(false);
+            // ext_multigrid: nvim splits the screen into per-window grids positioned via win_pos
+            // (implies ext_linegrid). Grid 1 is the outer frame; window/message grids are routed
+            // to their own buffers in DispatchRedrawEvent and drawn on top in RenderCore.
+            await _client.NotifyAsync("nvim_ui_attach", _cols, _rows, new Dictionary<string, object?> { ["rgb"] = true, ["ext_linegrid"] = true, ["ext_multigrid"] = true }).ConfigureAwait(false);
             LogStartup("ATTACH-POST ui_attach sent (no response expected; watching for redraw)");
             EnsureScreen(_rows, _cols);
             ScheduleRender();
@@ -158,6 +161,72 @@ public partial class MainWindow
                     for (int c2 = 0; c2 < Math.Min(_cols, 80); c2++) row0 += _cells[c2].Text;
                     LogStartup($"SELFTEST line1=\"{line1}\" cells_total={_cells.Length} nonblank_cells={populated} " +
                                 $"row0=[{row0}] EXPECT line1=hello from nvim-winui-gui, nonblank>25");
+
+                    // Self-test part 2: open a centered FLOATING window over the test buffer and verify
+                    // win_float_pos placement in the composite (nvim 0.12 sends win_float_pos, not win_pos).
+                    var fopts = new Dictionary<string, object?> { ["relative"] = "editor", ["width"] = 20, ["height"] = 8, ["row"] = 11, ["col"] = 30 };
+                    await _client.CallAsync("nvim_open_win", testBufNum, true, fopts);
+                    LogStartup("FLOAT opened (20x8 @ row=11 col=30 relative editor)");
+                    // Second float with bg=0: nvim then uses the Normal highlight for its cells ->
+                    // transparent background. This exercises the alpha-compositing path (parent must show through).
+                    var foptsT = new Dictionary<string, object?> { ["relative"] = "editor", ["width"] = 20, ["height"] = 4, ["row"] = 19, ["col"] = 30, ["bg"] = 0 };
+                    await _client.CallAsync("nvim_open_win", testBufNum, true, foptsT);
+                    LogStartup("FLOAT-TRANSPARENT opened (20x4 @ row=19 col=30 bg=0)");
+                    // nvim holds the redraw batch until the next input event; force a flush so the
+                    // win_float_pos/grid events arrive while we are not typing.
+                    await _client.CallAsync("nvim_command", "redraw!");
+                    // Re-arm the one-shot color DIAG so the NEXT frame logs resolved colors in the
+                    // post-float state (the bug only appears after a float is opened).
+                    _colorDiagLogged = false;
+                    await Task.Delay(600).ConfigureAwait(false);
+                    var comp = BuildRenderCells();
+                    if (comp != null)
+                    {
+                        // 1) float content must appear inside the expected region rows[11..18] cols[30..49]
+                        int fRow = -1, fCol = -1;
+                        for (int r = 11; r <= 18 && comp.Length >= _cols * (r + 1); r++)
+                            for (int c = 30; c + 5 < _cols; c++)
+                            {
+                                var t = new System.Text.StringBuilder();
+                                for (int k = 0; k < 5; k++) t.Append(comp[r * _cols + c + k].Text);
+                                if (t.ToString().Contains("hello")) { fRow = r; fCol = c; break; }
+                            }
+                        // 2) main window content must still be visible at row 0 (not covered/darkened)
+                        var m0 = new System.Text.StringBuilder();
+                        for (int k = 0; k < Math.Min(5, _cols); k++) m0.Append(comp[k].Text);
+                        LogStartup($"FLOAT-CHECK float 'hello' at row={fRow} col={fCol} EXPECT row in [11..18] col in [30..49]; main row0=[{m0}] EXPECT contains hello");
+                        // Dump the composite region around the expected float for visual verification.
+                        var sb = new System.Text.StringBuilder();
+                        for (int r = 9; r <= 20 && comp.Length >= _cols * (r + 1); r++)
+                        {
+                            sb.Append($"r{r,3}:|");
+                            for (int c = 25; c < 56; c++) sb.Append(comp[r * _cols + c].Text == " " ? "." : comp[r * _cols + c].Text);
+                            sb.AppendLine("|");
+                        }
+                        LogStartup("FLOAT-MAP\n" + sb.ToString());
+                        // 3) COMPOSITE-COLOR DIAG: log the RESOLVED bg/fg of composited cells inside and
+                        //    outside the float region. Transparent float cells (hl bg A=0) must resolve to
+                        //    the PARENT's bg color, not _defBg — that is what makes the parent show through.
+                        var sb2 = new System.Text.StringBuilder();
+                        _activeRenderCells = comp; // make CellBg() resolve against THIS composite, not the last frame's
+                        int[] probeRows = { 13, 14, 20 }; // 13/14 inside opaque float (rows 12-19), 20 inside transparent float (rows 20-23)
+                        foreach (var pr in probeRows)
+                            if (comp.Length >= _cols * (pr + 1))
+                            {
+                                sb2.Append($"r{pr}: ");
+                                // parent cell left of the float (col 25), then float cells cols 30..49 step 4
+                                int[] probeCols = { 25, 30, 34, 38, 42, 46 };
+                                foreach (var pc in probeCols)
+                                    if (pc < _cols)
+                                    {
+                                        var cc = comp[pr * _cols + pc];
+                                        Color cbg = CellBg(pr, pc, -1);
+                                        sb2.Append($"[{pc}]hl={cc.Hl},bg=0x{PackColor(cbg):X8} '{cc.Text}' ");
+                                    }
+                                sb2.AppendLine();
+                            }
+                        LogStartup("COMPOSITE-COLOR\n" + sb2.ToString());
+                    }
                 }
                 catch (Exception ex) { LogStartup("SELFTEST FAILED: " + ex.Message); }
             }
@@ -324,8 +393,11 @@ public partial class MainWindow
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 3) continue;
-                    _cols = ToInt(t[1]); _rows = ToInt(t[2]);
-                    EnsureScreen(_rows, _cols);
+                    int gId = ToInt(t[0]);
+                    if (gId != 1)
+                        MGridResize(gId, ToInt(t[1]), ToInt(t[2])); // per-window/message grid buffer
+                    else
+                    { _cols = ToInt(t[1]); _rows = ToInt(t[2]); EnsureScreen(_rows, _cols); }
                     ScheduleRender();
                 }
                 break;
@@ -340,6 +412,13 @@ public partial class MainWindow
                     int rowIdx = ToInt(t[1]);
                     int colStart = ToInt(t[2]);
                     var cellArray = t[3] as object?[] ?? Array.Empty<object?>();
+
+                    if (gridId != 1)
+                    {
+                        MGridLine(gridId, rowIdx, colStart, cellArray); // per-window/message grid buffer
+                        ScheduleRender();
+                        continue;
+                    }
 
                     if (rowIdx < 0 || rowIdx >= _rows) continue;
                     int col = colStart;
@@ -406,7 +485,11 @@ public partial class MainWindow
                 break;
             }
             case "grid_clear":
-                for (int i = 0; i < _cells.Length; i++) { _cells[i].Text = " "; _cells[i].Hl = -1; }
+                // linegrid: no args (clear outer frame). multigrid: [grid_id] clears one window/message grid.
+                if (a.Length >= 1 && ToInt(a[0]) != 1)
+                    MGridClear(ToInt(a[0]));
+                else
+                    for (int i = 0; i < _cells.Length; i++) { _cells[i].Text = " "; _cells[i].Hl = -1; }
                 ScheduleRender();
                 break;
             case "grid_scroll":
@@ -417,12 +500,16 @@ public partial class MainWindow
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 7) continue;
+                    int sGridId = ToInt(t[0]);
                     int top   = ToInt(t[1]);
                     int bot   = ToInt(t[2]);
                     int left  = ToInt(t[3]);
                     int right = ToInt(t[4]);
                     int rows  = ToInt(t[5]); // signed: + up, - down
                     if (rows == 0) continue;
+
+                    if (sGridId != 1)
+                    { MGridScroll(sGridId, top, bot, left, right, rows); ScheduleRender(); continue; }
 
                     top   = Math.Max(0, Math.Min(top, _rows));
                     bot   = Math.Max(0, Math.Min(bot, _rows));
@@ -465,18 +552,20 @@ public partial class MainWindow
             }
             case "cursor_position":
             case "grid_cursor_goto":
-                // Each tuple: [grid_id, row, col]
+                // Each tuple: [grid_id, row, col] — store grid + local coords; resolve to outer-frame at render.
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 3) continue;
-                    int cGridId = ToInt(t[0]);
-                    _curRow = ToInt(t[1]); _curCol = ToInt(t[2]);
+                    _curGridId = ToInt(t[0]);
+                    _curLocalRow = ToInt(t[1]); _curLocalCol = ToInt(t[2]);
                     ScheduleRender();
                 }
                 break;
             case "hl_attr_define":
             {
-                // Each tuple: [id, rgb_attr, cterm_attr, info?] — id is a plain int
+                // Each tuple: [id, rgb_attr, cterm_attr, info?] — id is a plain int.
+                // A (re)definition batch may change colors our synthetic blends captured -> drop them.
+                InvalidateBlendCache();
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 3) continue;
@@ -490,8 +579,50 @@ public partial class MainWindow
                 {
                     if (tuple is not object?[] t || t.Length < 2) continue;
                     _defFg = HintColor(1, ToInt(t[0])); _defBg = HintColor(2, ToInt(t[1]));
+                    InvalidateBlendCache(); // base color for blends changed
+                    LogStartup($"COLORS fg=0x{PackColor(_defFg):X8} bg=0x{PackColor(_defBg):X8}");
+                    var bgBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(_defBg);
+                    _root.Background = bgBrush;
+                    // Keep the canvas's opaque XAML background in sync so any swap-chain gap after a
+                    // resize (floating window) shows the theme color, not the black window base.
+                    GlyphCanvas.Background = bgBrush;
                     ScheduleRender();
                 }
+                break;
+            case "win_pos":
+                // [grid_id, win_handle, start_row, start_col, width, height] — place a window grid.
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 6) continue;
+                    MWinPos(ToInt(t[0]), ToInt(t[1]), ToInt(t[2]), ToInt(t[3]), ToInt(t[4]), ToInt(t[5]));
+                    ScheduleRender();
+                }
+                break;
+            case "msg_set_pos":
+                // [grid_id, row, scrolled, sep_char, zindex, compindex] — place the message grid.
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 2) continue;
+                    MMsgSetPos(ToInt(t[0]), ToInt(t[1]), t.Length > 4 ? ToInt(t[4]) : 0);
+                    ScheduleRender();
+                }
+                break;
+            case "win_float_pos":
+                // [grid_id, win_handle, anchor, anchor_grid, anchor_row, anchor_col, mouse_enabled, zindex, compindex, screen_row, screen_col]
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 11) continue;
+                    MWinFloatPos(ToInt(t[0]), ToInt(t[1]), t[2], ToInt(t[3]),
+                        ToDouble(t[4]), ToDouble(t[5]), ToBool(t[6]), ToInt(t[7]), ToInt(t[8]),
+                        ToDouble(t[9]), ToDouble(t[10]));
+                    ScheduleRender();
+                }
+                break;
+            case "win_hide":
+                foreach (var tuple in a) { if (tuple is not object?[] t || t.Length < 1) continue; MWinHide(ToInt(t[0])); ScheduleRender(); }
+                break;
+            case "win_close":
+                foreach (var tuple in a) { if (tuple is not object?[] t || t.Length < 1) continue; MWinClose(ToInt(t[0])); ScheduleRender(); }
                 break;
         }
     }

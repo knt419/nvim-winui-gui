@@ -91,7 +91,6 @@ private string _tfKeyNarrow = "", _tfKeyWide = "";
 private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _tfNarrow, _tfWide;
 private double _natLineHNarrow = -1, _natLineHWide = -1; // natural line heights (for vertical centering)
 private int _invalidateCount; // DIAG: count Invalidate() calls (verify Draw keeps firing)
-private bool _snapDone;       // DIAG: one-shot snapshot flag
 private double _dpiScale = 0; // device px per DIP, measured once from the window handle (0 = not yet)
 private int _rowLogCount;     // DIAG: throttle ROWTOP logging
 
@@ -345,7 +344,35 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     if (_dpiScale < 1.0) { try { IntPtr dh = FindWindow(null, Title); uint d = GetDpiForWindow(dh); if (d > 0) _dpiScale = d / 96.0; } catch { } }
     ds.Clear(_defBg);
 
-    int curRow = _curRow, curCol = _curCol;
+    // One-shot resolved-color DIAG: log the EXACT packed ARGB that is about to be drawn, so we can
+    // tell whether "pure black" comes from _defBg/_defFg themselves or from compositing/canvas bg.
+    if (_diagEnabled && !_colorDiagLogged)
+    {
+        _colorDiagLogged = true;
+        var sbrC = new System.Text.StringBuilder();
+        sbrC.Append($"COLORDIAG defBg=0x{PackColor(_defBg):X8} defFg=0x{PackColor(_defFg):X8} " +
+                    $"multigrid={_multigridActive} hlDefs={_hlDefs.Count} rows={rows} cols={cols}\n");
+        // Sample a handful of cells across the buffer: their Hl id and resolved bg/fg.
+        var buf0 = BuildRenderCells();
+        int[] sampleIdx = { 0, cols / 2, (rows / 2) * cols + cols / 2, rows * cols - 1 };
+        foreach (var si in sampleIdx)
+            if (si >= 0 && si < buf0.Length)
+            {
+                var cc = buf0[si];
+                int sr = si / cols, sc = si % cols;
+                Color cbg = CellBg(sr, sc, -1); // curIdx=-1: never the cursor block
+                sbrC.Append($"  cell[{sr},{sc}] hl={cc.Hl} bg=0x{PackColor(cbg):X8}\n");
+            }
+        LogStartup(sbrC.ToString());
+    }
+
+    // Multigrid: composite outer frame (grid 1) + window grids into the draw buffer, and resolve
+    // the per-grid cursor to outer-frame coordinates. In linegrid mode this is a no-op passthrough.
+    var cells = BuildRenderCells();
+    _activeRenderCells = cells;
+
+    int curRow = _curLocalRow, curCol = _curLocalCol;
+    if (_multigridActive) MGridResolveCursor(_curGridId, _curLocalRow, _curLocalCol, out curRow, out curCol);
     // Clamp: a stale cursor row beyond the current grid (e.g. after a shrink before nvim's next
     // cursor_position) would make curIdx land outside _cells and the block silently vanish.
     int curIdx = (curRow >= 0 && curRow < rows) ? curRow * cols + Math.Clamp(curCol, 0, cols - 1) : -1;
@@ -430,13 +457,13 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
         {
             var sbd = new System.Text.StringBuilder();
             for (int cc = 0; cc < Math.Min(8, cols); cc++)
-                sbd.Append($"[{cc}:'{_cells[r * cols + cc].Text}'{(IsWideGlyph(_cells[r * cols + cc].Text) ? "W" : "")}]");
+                sbd.Append($"[{cc}:'{cells[r * cols + cc].Text}'{(IsWideGlyph(cells[r * cols + cc].Text) ? "W" : "")}]");
             LogStartup($"CURROW-CELLS row={r} {sbd} yNarrow={yNarrow:F2} yWide={yWide:F2} rh={rh:F2}");
         }
         int c = 0;
         while (c < cols)
         {
-            var cell = _cells[r * cols + c];
+            var cell = cells[r * cols + c];
             string txt = cell.Text;
             if (txt.Length == 0) { c++; continue; } // covered tail of a wide glyph
 
@@ -459,7 +486,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
             var sb = new System.Text.StringBuilder();
             while (c < cols)
             {
-                var cc2 = _cells[r * cols + c];
+                var cc2 = cells[r * cols + c];
                 string t2 = cc2.Text;
                 if (t2.Length == 0) { c++; continue; } // covered tail: no ink, run continues
                 bool isCur2 = r * cols + c == curIdx && curIdx >= 0;
@@ -501,10 +528,13 @@ private Microsoft.Graphics.Canvas.Brushes.ICanvasBrush GetW2dBrush(Microsoft.Gra
 // Inverse of PackColor (for the background-run flush path).
 private static Color UnpackPacked(int p) => Color.FromArgb((byte)(p >> 24), (byte)(p >> 16), (byte)(p >> 8), (byte)p);
 // Background color of one cell for Pass 1: inverted cursor block, highlight bg, or transparent.
+private Cell[]? _activeRenderCells; // set by RenderCore each frame (composited multigrid buffer)
+private bool _colorDiagLogged;      // one-shot resolved-color DIAG guard
 private Color CellBg(int r, int c, int curIdx)
 {
     if (r * _screenCols + c == curIdx && curIdx >= 0) return _defFg; // inverted cursor: default fg as block
-    var cell = _cells[r * _screenCols + c];
+    var buf = _activeRenderCells ?? _cells;
+    var cell = buf[r * _screenCols + c];
     if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) return h.Bg;
     return TransparentColor;
 }
@@ -549,6 +579,14 @@ private static int ToInt(object? v) => v switch
         double d => (int)d,
         _ => -1
     };
+private static double ToDouble(object? v) => v switch
+    {
+        null => 0.0,
+        byte b => b, short s2 => s2, int i => i, long l => l,
+        float f => f, double d => d,
+        _ => 0.0
+    };
+private static bool ToBool(object? v) => v is bool b && b;
 private static Hl ParseHl(object? v)
     {
         if (v is Dictionary<string, object?> m)
