@@ -544,8 +544,10 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
                 float rhD = (float)(_cellH > 0 ? (rowTop.Length > 1 ? rowTop[1] - rowTop[0] : _cellH) : _cellH);
                 float sizeN = EmojiNaturalSize(sc, rhD);
                 float advN = EmojiAdvance(sc, sizeN);
-                int occN = Math.Max(1, (int)Math.Ceiling(advN / _cellW));
-                LogStartup($"EMOJI-DIAG '{sc}' U+{cp:X4} emoji={IsEmojiPresentation(sc)} wide={wide} inkW={advN:F2}px @size={sizeN:F2}R rowH={rhD:F2} -> occupies {occN} cells, rest blank");
+                const float blankMarginD = 1.0f;
+                int occN = 1;
+                while (occN < cols && occN < 40 && colLeft[occN] < advN + blankMarginD) occN++;
+                LogStartup($"EMOJI-DIAG '{sc}' U+{cp:X4} emoji={IsEmojiPresentation(sc)} wide={wide} inkW={advN:F2}px @size={sizeN:F2}R -> blank to inkEnd+1px = {occN} cells reserved");
             }
         }
         catch (Exception ex) { LogStartup("EMOJI-DIAG probe failed: " + ex.Message); }
@@ -656,17 +658,20 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
             if (IsEmojiPresentation(txt))
             {
                 // Color-emoji cell. Never shrink or cell-fit the glyph: draw it at its NATURAL
-                // display size (ink fitted to the ROW HEIGHT — no width squeezing), then reserve
-                // whatever horizontal span the ink covers as blank (occupiedCells = ceil(inkW /
-                // cellW)). The glyph keeps its original look and anything in its trailing span
-                // renders as space, so no collision with the following text.
+                // display size (ink fitted to the ROW HEIGHT — no width squeezing). The blank is
+                // then sized from the ink's RIGHT EDGE: cells are reserved (rendered as space)
+                // until the NEXT column's left edge clears the ink end by a margin, so whatever
+                // the emoji's horizontal overflow covers becomes blank instead of colliding with
+                // the following text. A real char inside the ink span is hidden by design; the
+                // first cell strictly past inkEnd+margin always shows, so following text is safe.
                 float size = EmojiNaturalSize(txt, (float)rh);
                 float adv = EmojiAdvance(txt, size);
-                int occ = (int)Math.Ceiling(adv / _cellW);
-                if (occ < 1) occ = 1;
-                if (occ > cols - c) occ = cols - c;
+                float inkEnd = (float)colLeft[c] + adv;
+                const float blankMargin = 1.0f;
+                int occ = 1;
+                while (occ < cols - c && colLeft[c + occ] < inkEnd + blankMargin) occ++;
                 float yEm = (float)(rowTop[r] + rh / 2 - EmojiLift(txt, size));
-                if (_diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} inkW={adv:F2}px size={size:F2}R cells={occ} yEm={yEm:F2} (natural size, rest blank)");
+                if (_diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} inkW={adv:F2}px size={size:F2}R inkEnd={inkEnd:F2}px cells={occ} yEm={yEm:F2} (natural size, blank to inkEnd+1px)");
                 ds.DrawText(txt, (float)colLeft[c], yEm, GetW2dBrush(rc, fg), EmojiTf(size));
                 c += occ; // this cell + the reserved blank span
                 continue;
