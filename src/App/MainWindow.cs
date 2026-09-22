@@ -204,7 +204,7 @@ public partial class MainWindow : Window
 
     // Win2D renders the whole grid every frame (GPU), so no per-cell last-rendered cache is needed.
     private sealed class Cell { public string Text = " "; public int Hl = -1; }
-    private readonly record struct Hl(Color Fg, Color Bg);
+    private readonly record struct Hl(Color Fg, Color Bg, int Blend);
 
     private async void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {

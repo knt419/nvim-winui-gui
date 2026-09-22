@@ -591,7 +591,8 @@ private static Hl ParseHl(object? v)
     {
         if (v is Dictionary<string, object?> m)
             return new Hl(HintColor(1, ToInt(m.TryGetValue("foreground", out var f) ? f : null)),
-                          HintColor(2, ToInt(m.TryGetValue("background", out var b) ? b : null)));
+                          HintColor(2, ToInt(m.TryGetValue("background", out var b) ? b : null)),
+                          ToInt(m.TryGetValue("blend", out var bl) ? bl : null));
         return default;
     }
 private static Color HintColor(int slot, int value)

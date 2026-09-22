@@ -232,7 +232,7 @@ public partial class MainWindow
     //             transparent floats reveal the parent window (neovide behavior) while keeping
     //             their text visible.
     private int _nextBlendHlId = 2_000_000_000; // well above any real nvim hl id
-    private readonly Dictionary<(int topHl, int basePacked), int> _blendCache = new();
+    private readonly Dictionary<(int topHl, int basePacked, int fgPacked), int> _blendCache = new();
 
     // Effective bg color of a cell for compositing: its highlight bg if opaque-ish, else the
     // swap-chain clear color (what a transparent region ultimately shows).
@@ -273,21 +273,43 @@ public partial class MainWindow
     // hl (treated as a fully transparent surface). This is what tells us whether a float cell is
     // opaque / semi-transparent / transparent — ResolveCellBgColor can't, because it falls back
     // to _defBg for transparent cells and would mask them as opaque.
+    // A non-zero `blend` attribute (winblend/pumblend) modulates the alpha: blend=0 -> opaque
+    // (A=255), blend=100 -> fully transparent (A=0, the parent shows exactly). The stored hl color
+    // is left untouched so the same attr id keeps rendering correctly on non-floating surfaces.
     private Color? GetRawHlBg(Cell cell)
     {
-        if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) return h.Bg;
+        if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h))
+        {
+            var b = h.Bg;
+            if (h.Blend > 0 && b.A > 0)
+                b.A = (byte)(255 * (100 - h.Blend) / 100);
+            return b;
+        }
         return null;
     }
 
     // Return the hl id to store in a scratch cell for `top` composited over base color `baseBg`.
-    private int GetBlendHlId(Cell top, Color? rawTopBg, Color baseBg)
+    // `rawFg` is the foreground of the glyph actually drawn (the float's own, or — for a blank float
+    // cell that lets the parent show through — the base cell's). `dimFg` dims that fg at the float's
+    // blend rate; preserved parent glyphs pass false so they stay full-bright through the float.
+    private int GetBlendHlId(Cell top, Color? rawTopBg, Color baseBg, Color rawFg, bool dimFg)
     {
-        var key = (top.Hl, PackColor(baseBg));
+        var key = (top.Hl, PackColor(baseBg), PackColor(rawFg));
         if (_blendCache.TryGetValue(key, out var id)) return id;
         id = _nextBlendHlId++;
+        // Alpha from the float's own blend (already applied by GetRawHlBg for the bg). Fg is mixed
+        // at the SAME rate over the parent so the text also recedes with the window (TUI behavior).
+        int blend = _hlDefs.TryGetValue(top.Hl, out var th) ? th.Blend : 0;
+        Color blendedFg;
+        if (dimFg && blend > 0 && rawFg.A > 0)
+        {
+            byte a = (byte)(255 * (100 - blend) / 100);
+            blendedFg = AlphaBlend(Color.FromArgb(a, rawFg.R, rawFg.G, rawFg.B), baseBg);
+        }
+        else blendedFg = rawFg;
         // Blend the float's own bg over the parent. A=0 / no hl -> fully transparent: parent shows.
         Color blended = (rawTopBg is null || rawTopBg.Value.A == 0) ? baseBg : AlphaBlend(rawTopBg.Value, baseBg);
-        _hlDefs[id] = new Hl(ResolveCellFgColor(top), blended);
+        _hlDefs[id] = new Hl(blendedFg, blended, 0);
         _blendCache[key] = id;
         return id;
     }
@@ -332,9 +354,16 @@ public partial class MainWindow
                     {
                         // Semi/transparent: blend over whatever is already composited below.
                         // A=0 / no hl keeps the base bg and just overlays the float's fg (text stays visible).
+                        // Where the float cell is BLANK we keep the base cell's glyph, so the parent
+                        // window's content stays readable through a translucent float (neovide behavior);
+                        // the preserved glyph is dimmed with the float's own blend rate, not left full-bright.
                         int idx = tr * cols + tc;
-                        var baseBg = ResolveCellBgColor(_renderScratch[idx]);
-                        _renderScratch[idx] = new Cell { Text = top.Text, Hl = GetBlendHlId(top, rawBg, baseBg) };
+                        var baseCell = _renderScratch[idx];
+                        var baseBg = ResolveCellBgColor(baseCell);
+                        bool parentGlyph = top.Text.Trim().Length == 0;
+                        string outText = parentGlyph ? baseCell.Text : top.Text;
+                        Color rawFg = parentGlyph ? ResolveCellFgColor(baseCell) : ResolveCellFgColor(top);
+                        _renderScratch[idx] = new Cell { Text = outText, Hl = GetBlendHlId(top, rawBg, baseBg, rawFg, !parentGlyph) };
                     }
                 }
             }

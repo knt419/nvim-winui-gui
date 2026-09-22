@@ -162,16 +162,20 @@ public partial class MainWindow
                     LogStartup($"SELFTEST line1=\"{line1}\" cells_total={_cells.Length} nonblank_cells={populated} " +
                                 $"row0=[{row0}] EXPECT line1=hello from nvim-winui-gui, nonblank>25");
 
-                    // Self-test part 2: open a centered FLOATING window over the test buffer and verify
-                    // win_float_pos placement in the composite (nvim 0.12 sends win_float_pos, not win_pos).
+                    // Self-test part 2: open floating windows over the test buffer and verify
+                    // win_float_pos placement + alpha compositing in the composite (nvim 0.12 sends
+                    // win_float_pos, not win_pos). Transparency comes from the per-window 'winblend'
+                    // option (0..100), which nvim reflects as a `blend` attr in the float's highlights.
                     var fopts = new Dictionary<string, object?> { ["relative"] = "editor", ["width"] = 20, ["height"] = 8, ["row"] = 11, ["col"] = 30 };
-                    await _client.CallAsync("nvim_open_win", testBufNum, true, fopts);
+                    object? fwin = await _client.CallAsync("nvim_open_win", testBufNum, true, fopts);
                     LogStartup("FLOAT opened (20x8 @ row=11 col=30 relative editor)");
-                    // Second float with bg=0: nvim then uses the Normal highlight for its cells ->
-                    // transparent background. This exercises the alpha-compositing path (parent must show through).
-                    var foptsT = new Dictionary<string, object?> { ["relative"] = "editor", ["width"] = 20, ["height"] = 4, ["row"] = 19, ["col"] = 30, ["bg"] = 0 };
-                    await _client.CallAsync("nvim_open_win", testBufNum, true, foptsT);
-                    LogStartup("FLOAT-TRANSPARENT opened (20x4 @ row=19 col=30 bg=0)");
+                    if (fwin != null) await _client.CallAsync("nvim_win_set_option", fwin, "winblend", 30);
+                    // Second float: winblend=100 -> fully translucent. Its cells carry blend=100,
+                    // so every cell reduces to the parent's exact color (parent must show through).
+                    var foptsT = new Dictionary<string, object?> { ["relative"] = "editor", ["width"] = 20, ["height"] = 4, ["row"] = 19, ["col"] = 30 };
+                    object? fwin2 = await _client.CallAsync("nvim_open_win", testBufNum, true, foptsT);
+                    LogStartup("FLOAT-TRANSPARENT opened (20x4 @ row=19 col=30 winblend=100)");
+                    if (fwin2 != null) await _client.CallAsync("nvim_win_set_option", fwin2, "winblend", 100);
                     // nvim holds the redraw batch until the next input event; force a flush so the
                     // win_float_pos/grid events arrive while we are not typing.
                     await _client.CallAsync("nvim_command", "redraw!");
@@ -205,11 +209,12 @@ public partial class MainWindow
                         }
                         LogStartup("FLOAT-MAP\n" + sb.ToString());
                         // 3) COMPOSITE-COLOR DIAG: log the RESOLVED bg/fg of composited cells inside and
-                        //    outside the float region. Transparent float cells (hl bg A=0) must resolve to
-                        //    the PARENT's bg color, not _defBg — that is what makes the parent show through.
+                        //    outside the float region. A winblend float must resolve to the PARENT's bg
+                        //    color mixed at (100-blend)%, not _defBg — that is what makes the parent show
+                        //    through. winblend=100 must equal the parent color EXACTLY.
                         var sb2 = new System.Text.StringBuilder();
                         _activeRenderCells = comp; // make CellBg() resolve against THIS composite, not the last frame's
-                        int[] probeRows = { 13, 14, 20 }; // 13/14 inside opaque float (rows 12-19), 20 inside transparent float (rows 20-23)
+                        int[] probeRows = { 13, 14, 20 }; // 13/14 inside winblend=30 float (rows 11-18), 20 inside winblend=100 float (rows 19-22)
                         foreach (var pr in probeRows)
                             if (comp.Length >= _cols * (pr + 1))
                             {
@@ -221,7 +226,8 @@ public partial class MainWindow
                                     {
                                         var cc = comp[pr * _cols + pc];
                                         Color cbg = CellBg(pr, pc, -1);
-                                        sb2.Append($"[{pc}]hl={cc.Hl},bg=0x{PackColor(cbg):X8} '{cc.Text}' ");
+                                        Color cfg = ResolveCellFgColor(cc);
+                                        sb2.Append($"[{pc}]hl={cc.Hl},bg=0x{PackColor(cbg):X8},fg=0x{PackColor(cfg):X8} '{cc.Text}' ");
                                     }
                                 sb2.AppendLine();
                             }
