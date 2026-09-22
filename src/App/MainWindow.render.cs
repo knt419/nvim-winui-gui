@@ -37,6 +37,16 @@ public partial class MainWindow
     // by real measurement once the font is known.
     private double _refCellW = 9, _refCellH = 18;
 
+    // Vertical pitch reduction (px) applied to the cell height so consecutive text rows pack tightly —
+    // the XAML line box (~1.25em) leaves a visible horizontal gap between glyph rows. Read from
+    // NVIM_WINUI_LINESPACE (default 1). 0 = keep the box height; the gap-free terminal look is 1.
+    private readonly double _linePitchReduce = ParseLinePitch();
+    private static double ParseLinePitch()
+    {
+        var v = Environment.GetEnvironmentVariable("NVIM_WINUI_LINESPACE");
+        return double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d) && d >= 0 ? d : 1.0;
+    }
+
     // Measure the reference cell from the narrow guifont using an offscreen TextBlock — the SAME
     // DirectWrite layout engine that renders the grid, so the numbers match what's actually drawn
     // (a GDI+ measurement would drift from WinUI and re-introduce clipping). Width = advance of "0"
@@ -54,9 +64,14 @@ public partial class MainWindow
             };
             probe.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
             double w = Math.Ceiling(probe.DesiredSize.Width);
-            double h = Math.Ceiling(probe.DesiredSize.Height);
+            // Height = line box MINUS the linespace trim. The XAML line box (~1.25em) sits taller
+            // than the glyph band, so consecutive rows of text leave a visible gap (the reported
+            // ~1px). Subtracting the trim makes the vertical pitch hug the ink: rows pack tighter,
+            // window and cell height shrink together and the inter-line whitespace disappears.
+            // Tunable via NVIM_WINUI_LINESPACE (px, default 1).
+            double h = Math.Max(1.0, Math.Ceiling(probe.DesiredSize.Height) - _linePitchReduce);
             if (w >= 1 && h >= 1) { _refCellW = w; _refCellH = h; }
-            LogStartup($"CELL-METRICS narrow={_narrowFont}@{_narrowSize} -> refcell {_refCellW}x{_refCellH}");
+            LogStartup($"CELL-METRICS narrow={_narrowFont}@{_narrowSize} -> refcell {_refCellW}x{_refCellH} (linespace-{_linePitchReduce})");
         }
         catch (Exception ex) { LogCritical("MeasureRefCell failed: " + ex.Message); }
     }
