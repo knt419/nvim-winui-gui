@@ -32,10 +32,23 @@ public partial class MainWindow
 
     private IEnumerable<MGrid> MGrids => _mgrid.Values;
 
-    // A grid that renders ON TOP of the window stack (floating window, :messages). Grids with
-    // zindex <= 0 are regular windows / parts of the parent surface. Used both to decide when the
-    // parent layer should be blurred and to split the composite into (blurred base) + (sharp overlay).
-    private static bool MGridIsOverlay(MGrid g) => g.PosRow < int.MaxValue && (g.IsMessageGrid || g.ZIndex > 0);
+    // A grid that renders ON TOP of the window stack and triggers the parent-layer blur. Only
+    // genuine FLOATING windows (zindex > 0, from win_float_pos) qualify — the message grid
+    // (msg_set_pos) is a bottom-row surface, not a popup, and it lingers, so it must NOT keep the
+    // blur on when no float is displayed. Guarded with MGridHasContent so a stale empty float
+    // grid can't hold the blur either.
+    private static bool MGridIsOverlay(MGrid g) => g.PosRow < int.MaxValue && g.ZIndex > 0;
+
+    // True when the grid carries at least one visible glyph (any non-whitespace cell).
+    private static bool MGridHasContent(MGrid g)
+    {
+        for (int i = 0; i < g.Cells.Length; i++)
+        {
+            var t = g.Cells[i].Text;
+            if (t.Length > 0 && !string.IsNullOrWhiteSpace(t)) return true;
+        }
+        return false;
+    }
 
     private void MGridReset()
     {

@@ -368,6 +368,7 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
 // NVIM_WINUI_FLOAT_BLUR, DIP radius). 0 disables.
 private double _floatBlurAmount = ParseFloatBlur();
 private bool _blurDiagLogged;
+private bool _gridInvLogged;
 private static double ParseFloatBlur()
 {
     var v = Environment.GetEnvironmentVariable("NVIM_WINUI_FLOAT_BLUR");
@@ -386,9 +387,20 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
     int rows = _screenRows, cols = _screenCols;
     if (rows <= 0 || cols <= 0) return;
-    // Floating/message grid on top of the window stack → blur the parent layer behind it, then
-    // redraw the float(s) sharp. Anything else renders as one flat composite (previous behavior).
-    if (outer && _multigridActive && _mgrid.Values.Any(MGridIsOverlay))
+    // One-shot inventory of the multigrid state (which grids exist, their z / content), so a
+    // "blur appears with no float" report can be traced: which grid(s) are (wrongly) overlays.
+    if (outer && _diagEnabled && _multigridActive && !_gridInvLogged)
+    {
+        _gridInvLogged = true;
+        var sbi = new System.Text.StringBuilder("GRID-INV ");
+        foreach (var g in _mgrid.Values.OrderBy(g => g.Id))
+            sbi.Append($"g{g.Id}@({g.PosRow},{g.PosCol} {g.Rows}x{g.Cols}) z{g.ZIndex} msg={g.IsMessageGrid} content={MGridHasContent(g)} overlay={MGridIsOverlay(g) && MGridHasContent(g)}; ");
+        LogStartup(sbi.ToString());
+    }
+    // Floating window on top of the grid stack → blur the parent layer behind it, then redraw the
+    // float(s) sharp. Any other state (message grid, normal splits, no overlay at all) renders as
+    // one flat composite (previous behavior): the blur only ever appears WITH a visible float.
+    if (outer && _multigridActive && _mgrid.Values.Any(g => MGridIsOverlay(g) && MGridHasContent(g)))
     {
         RenderBlurredBase(ds, rc);
         return;
@@ -850,7 +862,7 @@ private void RenderBlurredBase(Microsoft.Graphics.Canvas.CanvasDrawingSession ds
     if (_diagEnabled && !_blurDiagLogged)
     {
         _blurDiagLogged = true;
-        LogStartup($"BLUR-ACTIVE overlayGrids={_mgrid.Values.Count(MGridIsOverlay)} blur={_floatBlurAmount:F1}DIP base={w:F0}x{h:F0}");
+        LogStartup($"BLUR-ACTIVE overlayGrids={_mgrid.Values.Count(g => MGridIsOverlay(g) && MGridHasContent(g))} blur={_floatBlurAmount:F1}DIP base={w:F0}x{h:F0}");
     }
     ds.Clear(_defBg);
     try
