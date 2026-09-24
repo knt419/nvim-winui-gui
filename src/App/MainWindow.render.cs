@@ -871,10 +871,11 @@ private void RenderBlurredBase(Microsoft.Graphics.Canvas.CanvasDrawingSession ds
     }
 }
 
-// The sharp foreground: floating/message grids redrawn after the blurred parent. Each float cell's
+// The sharp foreground: floating and message grids redrawn after the blurred parent. Each cell's
 // own background (opaque or blended alpha over the blur) is filled, then its glyph is drawn with
 // the correct wide/emoji/narrow path using the SAME centering math as the main pass, so a float
-// looks pixel-identical to the non-blurred render.
+// looks pixel-identical to the non-blurred render. The message grid is included so the status /
+// cmd line stays sharp instead of being blurred with the parent.
 private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc)
 {
     int rows = _screenRows, cols = _screenCols;
@@ -886,7 +887,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
 
     foreach (var g in _mgrid.Values.OrderBy(g => g.ZIndex))
     {
-        if (!MGridIsOverlay(g)) continue;
+        if (!MGridIsSharpLayer(g)) continue;
         for (int r = 0; r < g.Rows; r++)
         {
             int tr = g.PosRow + r;

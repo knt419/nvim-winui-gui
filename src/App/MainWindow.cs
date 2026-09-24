@@ -77,6 +77,8 @@ public partial class MainWindow : Window
     private int _curGridId = 1;
     private int _curLocalRow = -1;
     private int _curLocalCol = -1;
+    // Current nvim mode name from mode_change (e.g. "normal", "cmdline", "search").
+    private string _modeName = "normal";
 
     // Font fallback chains. The first family is the user's guifont; the rest are system fonts that
     // supply glyphs the primary lacks, so wide/CJK/symbol code points don't render as tofu:

@@ -24,6 +24,7 @@ public partial class MainWindow
         public int PosRow, PosCol;
         public bool IsMessageGrid;
         public int ZIndex;          // draw order: higher = on top (floating windows > normal)
+        public bool Focusable;      // win_float_pos mouse_enabled/focusable — input-capable float
         public int LastHl = -1;   // hl inheritance across grid_line tuples for this grid
     }
 
@@ -32,12 +33,32 @@ public partial class MainWindow
 
     private IEnumerable<MGrid> MGrids => _mgrid.Values;
 
-    // A grid that renders ON TOP of the window stack and triggers the parent-layer blur. Only
-    // genuine FLOATING windows (zindex > 0, from win_float_pos) qualify — the message grid
-    // (msg_set_pos) is a bottom-row surface, not a popup, and it lingers, so it must NOT keep the
-    // blur on when no float is displayed. Guarded with MGridHasContent so a stale empty float
-    // grid can't hold the blur either.
-    private static bool MGridIsOverlay(MGrid g) => !g.IsMessageGrid && g.PosRow < int.MaxValue && g.ZIndex > 0;
+    // A grid that renders ON TOP of the window stack and triggers the parent-layer blur. A float
+    // qualifies when it is a genuine floating window (zindex > 0) AND either:
+    //   1. it currently holds the cursor (interactive float like a picker — grid_cursor_goto moved in), or
+    //   2. nvim is in an input mode (cmdline/search) — covers non-focusable cmdline UIs like
+    //      tiny-cmdline where focusable=false and the cursor stays in the parent window.
+    // The message grid is a bottom-row surface, not a popup. Focusable-but-idle floats in normal
+    // mode (progress notifications like checkhealth) do NOT blur the parent. Guarded with
+    // MGridHasContent so a stale empty float can't hold the blur.
+    private bool MGridIsOverlay(MGrid g)
+    {
+        if (g.IsMessageGrid || g.PosRow >= int.MaxValue || g.ZIndex <= 0) return false;
+        if (g.Id == _curGridId && g.Focusable) return true; // cursor inside an interactive float
+        return MIsInputMode(); // cmdline/search float (may be non-focusable)
+    }
+
+    // Input modes where a floating cmdline/search UI should blur the parent behind it.
+    private bool MIsInputMode() =>
+        _modeName.StartsWith("cmdline", StringComparison.Ordinal) ||
+        _modeName.Equals("search", StringComparison.Ordinal) ||
+        _modeName.Equals("incsearch", StringComparison.Ordinal);
+
+    // Sharp layer drawn AFTER the parent blur: floats (also trigger the blur) and the message
+    // grid. The message grid is never part of the blurred base — blurring the status/cmd line
+    // under a float looks wrong, so it is composited into the base only for the flat path and
+    // redrawn sharp here when the blur fires.
+    private static bool MGridIsSharpLayer(MGrid g) => g.PosRow < int.MaxValue && (g.IsMessageGrid || g.ZIndex > 0);
 
     // True when the grid carries at least one visible glyph (any non-whitespace cell).
     private static bool MGridHasContent(MGrid g)
@@ -198,6 +219,7 @@ public partial class MainWindow
         var g = GetOrCreateMGrid(id);
         g.PosRow = row; g.PosCol = col;
         g.ZIndex = 0;
+        g.Focusable = false;
         if (w > 0 && h > 0 && (g.Cols != w || g.Rows != h)) MGridResize(id, w, h);
     }
 
@@ -211,11 +233,11 @@ public partial class MainWindow
     }
 
     // win_float_pos [grid_id, win_handle, anchor, anchor_grid, anchor_row, anchor_col,
-    //                mouse_enabled, zindex, compindex, screen_row, screen_col]
+    //                mouse_enabled/focusable, zindex, compindex, screen_row, screen_col]
     // nvim 0.12+ positions FLOATING windows with this event (not win_pos). Two modes:
     //   1. nvim-computed: draw directly at (screen_row, screen_col) — preferred when valid.
     //   2. manual anchor: resolve against the anchor grid's own position.
-    private void MWinFloatPos(int id, int handle, object? anchor, int anchorGrid, double aRow, double aCol, bool mouse, int zindex, int compIndex, double sRow, double sCol)
+    private void MWinFloatPos(int id, int handle, object? anchor, int anchorGrid, double aRow, double aCol, bool focusable, int zindex, int compIndex, double sRow, double sCol)
     {
         var g = GetOrCreateMGrid(id);
         if (sRow >= 0 && sCol >= 0)
@@ -231,6 +253,7 @@ public partial class MainWindow
             g.PosRow = (int)aRow; g.PosCol = (int)aCol;
         }
         g.ZIndex = zindex;   // floating windows carry a high zindex (~50) -> drawn on top
+        g.Focusable = focusable;
     }
 
     // win_hide [grid_id] / win_close [grid_id].
@@ -359,7 +382,7 @@ public partial class MainWindow
         foreach (var g in _mgrid.Values.OrderBy(g => g.ZIndex))
         {
             if (g.PosRow >= int.MaxValue) continue; // hidden
-            if (skipOverlayLayers && MGridIsOverlay(g)) continue; // float/message → sharp overlay layer
+            if (skipOverlayLayers && MGridIsSharpLayer(g)) continue; // float/msg → sharp layer after blur
             for (int r = 0; r < g.Rows; r++)
             {
                 int tr = g.PosRow + r;

@@ -642,6 +642,15 @@ public partial class MainWindow
                     ScheduleRender();
                 }
                 break;
+            case "mode_change":
+                // Each tuple: [mode_name, mode_idx] — e.g. ["cmdline", 7].
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 1) continue;
+                    _modeName = t[0]?.ToString() ?? "normal";
+                    ScheduleRender();
+                }
+                break;
             case "hl_attr_define":
             {
                 // Each tuple: [id, rgb_attr, cterm_attr, info?] — id is a plain int.
@@ -693,7 +702,7 @@ public partial class MainWindow
                 }
                 break;
             case "win_float_pos":
-                // [grid_id, win_handle, anchor, anchor_grid, anchor_row, anchor_col, mouse_enabled, zindex, compindex, screen_row, screen_col]
+                // [grid_id, win_handle, anchor, anchor_grid, anchor_row, anchor_col, focusable/mouse_enabled, zindex, compindex, screen_row, screen_col]
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 11) continue;
@@ -701,7 +710,7 @@ public partial class MainWindow
                     MWinFloatPos(gf, ToInt(t[1]), t[2], ToInt(t[3]),
                         ToDouble(t[4]), ToDouble(t[5]), ToBool(t[6]), ToInt(t[7]), ToInt(t[8]),
                         ToDouble(t[9]), ToDouble(t[10]));
-                    LogImportant($"WIN-FLOAT g={gf} anchor={t[2]} z={ToInt(t[7])} screen=({ToDouble(t[9]):F0},{ToDouble(t[10]):F0})");
+                    LogImportant($"WIN-FLOAT g={gf} anchor={t[2]} z={ToInt(t[7])} focus={ToBool(t[6])} screen=({ToDouble(t[9]):F0},{ToDouble(t[10]):F0})");
                     ScheduleRender();
                 }
                 break;
