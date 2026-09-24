@@ -212,7 +212,8 @@ private void UpdateWindowSize(int cols, int rows)
     // ExtendsContentIntoTitleBar=true there's no title bar in the client area, but the frame
     // still eats _chromeW x _chromeH pixels (measured at runtime; 16x9 on this box). Add it
     // back so the content area is exactly grid + status row.
-    int width = (int)(cols * _refCellW) + _chromeW;
+    double cw = _fontAdvance > 0 ? _fontAdvance : _refCellW;
+    int width = (int)Math.Round(cols * cw) + _chromeW;
     int height = (int)(rows * _refCellH + StatusTextHeight) + _chromeH;
     try { AppWindow.Resize(new SizeInt32(width, height)); } catch { /* ignore */ }
     LogStartup($"RESIZE-DBG UpdateWindowSize req={width}x{height} actual={(AppWindow.Size.Width)}x{(AppWindow.Size.Height)}");
@@ -264,7 +265,8 @@ private void SendNvimResize()
     // (smaller) height and shrink nvim by a row every cycle.
     int outerW = AppWindow.Size.Width;
     int outerH = AppWindow.Size.Height;
-    int cols = Math.Clamp((int)((outerW - _chromeW) / _refCellW), 2, MaxGridCols);
+    double cw = _fontAdvance > 0 ? _fontAdvance : _refCellW;
+    int cols = Math.Clamp((int)((outerW - _chromeW) / cw), 2, MaxGridCols);
     // Content height = outer - frame border - fixed status row; that's the grid area.
     int rows = Math.Clamp((int)((outerH - _chromeH - StatusTextHeight) / _refCellH), 1, MaxGridRows);
     LogStartup($"RESIZE-DBG appwin={outerW}x{outerH} chrome={_chromeW}x{_chromeH} -> {cols}x{rows}");
