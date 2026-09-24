@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -382,8 +382,6 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
 // layer gets a Gaussian blur so the float reads as focused foreground (configurable via
 // NVIM_WINUI_FLOAT_BLUR, DIP radius). 0 disables.
 private double _floatBlurAmount = ParseFloatBlur();
-private bool _blurDiagLogged;
-private bool _gridInvLogged;
 private static double ParseFloatBlur()
 {
     var v = Environment.GetEnvironmentVariable("NVIM_WINUI_FLOAT_BLUR");
@@ -402,20 +400,10 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
     int rows = _screenRows, cols = _screenCols;
     if (rows <= 0 || cols <= 0) return;
-    // One-shot inventory of the multigrid state (which grids exist, their z / content), so a
-    // "blur appears with no float" report can be traced: which grid(s) are (wrongly) overlays.
-    if (outer && _diagEnabled && _multigridActive && !_gridInvLogged)
-    {
-        _gridInvLogged = true;
-        var sbi = new System.Text.StringBuilder("GRID-INV ");
-        foreach (var g in _mgrid.Values.OrderBy(g => g.Id))
-            sbi.Append($"g{g.Id}@({g.PosRow},{g.PosCol} {g.Rows}x{g.Cols}) z{g.ZIndex} msg={g.IsMessageGrid} content={MGridHasContent(g)} overlay={MGridIsOverlay(g) && MGridHasContent(g)}; ");
-        LogStartup(sbi.ToString());
-    }
     // Floating window on top of the grid stack → blur the parent layer behind it, then redraw the
     // float(s) sharp. Any other state (message grid, normal splits, no overlay at all) renders as
     // one flat composite (previous behavior): the blur only ever appears WITH a visible float.
-    if (outer && _multigridActive && _mgrid.Values.Any(g => MGridIsOverlay(g) && MGridHasContent(g)))
+    if (outer && _multigridActive && _mgrid.Values.Any(g => MGridIsOverlay(g) && MGridHasContent(g) && g.Cols < _screenCols))
     {
         RenderBlurredBase(ds, rc);
         return;
@@ -423,28 +411,6 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     // Measure the window's DPI scale once — needed to snap cell boundaries to whole DEVICE pixels.
     if (_dpiScale < 1.0) { try { IntPtr dh = FindWindow(null, Title); uint d = GetDpiForWindow(dh); if (d > 0) _dpiScale = d / 96.0; } catch { } }
     ds.Clear(_defBg);
-
-    // One-shot resolved-color DIAG: log the EXACT packed ARGB that is about to be drawn, so we can
-    // tell whether "pure black" comes from _defBg/_defFg themselves or from compositing/canvas bg.
-    if (outer && _diagEnabled && !_colorDiagLogged)
-    {
-        _colorDiagLogged = true;
-        var sbrC = new System.Text.StringBuilder();
-        sbrC.Append($"COLORDIAG defBg=0x{PackColor(_defBg):X8} defFg=0x{PackColor(_defFg):X8} " +
-                    $"multigrid={_multigridActive} hlDefs={_hlDefs.Count} rows={rows} cols={cols}\n");
-        // Sample a handful of cells across the buffer: their Hl id and resolved bg/fg.
-        var buf0 = BuildRenderCells();
-        int[] sampleIdx = { 0, cols / 2, (rows / 2) * cols + cols / 2, rows * cols - 1 };
-        foreach (var si in sampleIdx)
-            if (si >= 0 && si < buf0.Length)
-            {
-                var cc = buf0[si];
-                int sr = si / cols, sc = si % cols;
-                Color cbg = CellBg(sr, sc, -1); // curIdx=-1: never the cursor block
-                sbrC.Append($"  cell[{sr},{sc}] hl={cc.Hl} bg=0x{PackColor(cbg):X8}\n");
-            }
-        LogStartup(sbrC.ToString());
-    }
 
     // Multigrid: composite outer frame (grid 1) + window grids into the draw buffer, and resolve
     // the per-grid cursor to outer-frame coordinates. In linegrid mode this is a no-op passthrough.
@@ -874,11 +840,6 @@ private void RenderBlurredBase(Microsoft.Graphics.Canvas.CanvasDrawingSession ds
     var baseCells = BuildRenderCells(true);
     float w = (float)Math.Round(GlyphCanvas.Width), h = (float)Math.Round(GlyphCanvas.Height);
     if (w <= 0 || h <= 0) return;
-    if (_diagEnabled && !_blurDiagLogged)
-    {
-        _blurDiagLogged = true;
-        LogStartup($"BLUR-ACTIVE overlayGrids={_mgrid.Values.Count(g => MGridIsOverlay(g) && MGridHasContent(g))} blur={_floatBlurAmount:F1}DIP base={w:F0}x{h:F0}");
-    }
     ds.Clear(_defBg);
     try
     {
@@ -888,6 +849,11 @@ private void RenderBlurredBase(Microsoft.Graphics.Canvas.CanvasDrawingSession ds
         {
             using (var dsv = rt.CreateDrawingSession())
                 RenderCore(dsv, rc, baseCells, blurLayerPass: true);
+            // Draw the BLURRED parent over the WHOLE canvas, then redraw the float(s) SHARP on top
+            // (RenderOverlayLayer). This is the user's reference look: the blurred parent stays
+            // visible both in the float's blank interior AND outside its frame — the mask experiment
+            // that hid the blur behind the float made the canvas go pitch-black outside, so it is
+            // removed and the full-canvas blur restored.
             using (var blur = new GaussianBlurEffect
             {
                 Source = rt,
@@ -928,28 +894,104 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
             double rh = rowTop[tr + 1] - rowTop[tr];
             float yNarrow = (float)(rowTop[tr] + rh / 2 - _liftNarrow);
             float yWide   = (float)(rowTop[tr] + rh / 2 - _liftWide);
-            for (int c = 0; c < g.Cols; c++)
+            // Backgrounds: merge SAME-COLOR horizontal runs into ONE rect (the base pass does this too so
+            // a float looks pixel-identical to the flat composite). Per-cell rects of fractional _cellW
+            // width are AA-rasterized independently; two cells sharing a column edge then each blend ~50%
+            // at that edge and the clear/base colour shows through a ~1px vertical seam — exactly the
+            // "縦線が入っている" the user sees. A run also spans the 2nd (covered tail) cell of a wide
+            // glyph because that tail carries the SAME highlight, so the full-width glyph ink never sits
+            // on two differently-painted halves ("左と右で色が違う").
+            for (int c = 0; c < g.Cols; )
             {
                 int tc = g.PosCol + c;
-                if (tc < 0 || tc >= cols) continue;
+                if (tc < 0 || tc >= cols) { c++; continue; }
                 var cell = g.Cells[r * g.Cols + c];
                 var rawBg = GetRawHlBg(cell);
-                if (rawBg is { } rb && rb.A > 0)
-                    ds.FillRectangle(new Windows.Foundation.Rect(colLeft[tc], rowTop[tr], _cellW, rh), GetW2dBrush(rc, rb));
-                string t = cell.Text;
-                if (t.Length == 0) continue;
-                Color fg = _defFg;
-                if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) { if (h.Fg.A > 0) fg = h.Fg; }
-                if (IsEmojiPresentation(t))
+                if (rawBg is not { } rb || rb.A == 0)
                 {
-                    float size = EmojiNaturalSize(t, (float)rh);
-                    float yEm = (float)(rowTop[tr] + rh / 2 - EmojiLift(t, size));
-                    ds.DrawText(t, (float)colLeft[tc], yEm, GetW2dBrush(rc, fg), EmojiTf(size));
+                    // Transparent-bg cell: NO fill — its ink sits sharp over the blurred parent/base (this
+                    // is what makes a float look FLAT, not blurry). The base pass draws ink for EVERY
+                    // cell REGARDLESS of bg, so skipping a transparent cell here erased the float's
+                    // BORDER and the over-blur parent text the instant a blur fired — border cells are
+                    // box-drawing glyphs with A==0 bg, and the parent's own ink never came back, so the
+                    // user saw no frame and an empty parent ("枠が消える・親が見えなくなる").
+                    var ncp = g.Cells[r * g.Cols + c];
+                    string ntp = ncp.Text;
+                    if (ntp.Length > 0)
+                    {
+                        Color nfg = _defFg;
+                        if (ncp.Hl >= 0 && _hlDefs.TryGetValue(ncp.Hl, out var nh)) { if (nh.Fg.A > 0) nfg = nh.Fg; }
+                        float yTn = (float)(rowTop[tr] + rh / 2 - _liftNarrow);
+                        float yTw = (float)(rowTop[tr] + rh / 2 - _liftWide);
+                        if (IsEmojiPresentation(ntp))
+                        {
+                            float nsize = EmojiNaturalSize(ntp, (float)rh);
+                            float nEm = (float)(rowTop[tr] + rh / 2 - EmojiLift(ntp, nsize));
+                            ds.DrawText(ntp, (float)colLeft[tc], nEm, GetW2dBrush(rc, nfg), EmojiTf(nsize));
+                        }
+                        else if (IsWideGlyph(ntp))
+                            ds.DrawText(ntp, (float)colLeft[tc], yTw, GetW2dBrush(rc, nfg), _tfWide!);
+                        else
+                            ds.DrawText(ntp, (float)colLeft[tc], yTn, GetW2dBrush(rc, nfg), _tfNarrow!);
+                    }
+                    c++;
+                    continue;
                 }
-                else if (IsWideGlyph(t))
-                    ds.DrawText(t, (float)colLeft[tc], yWide, GetW2dBrush(rc, fg), _tfWide!);
-                else
-                    ds.DrawText(t, (float)colLeft[tc], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
+                int ts = tc;
+                int cs = c;
+                do
+                {
+                    c++;
+                    if (c >= g.Cols) break;
+                    int tn = g.PosCol + c;
+                    if (tn < 0 || tn >= cols) break;
+                    var ncell = g.Cells[r * g.Cols + c];
+                    var nbg = GetRawHlBg(ncell);
+                    if (nbg is not { } nb || nb.A == 0 || nb != rb) break; // run ends at a colour edge
+                } while (true);
+                // c now points PAST the run (first non-matching cell, or g.Cols).
+                int runEnd = c;
+                int te = g.PosCol + (runEnd - 1);
+                ds.FillRectangle(new Windows.Foundation.Rect(colLeft[ts], rowTop[tr], colLeft[te] - colLeft[ts] + _cellW, rh), GetW2dBrush(rc, rb));
+                // Draw ink for EVERY cell in the run (not just the lead): same-bg runs carry
+                // multi-char text ("hello"), and advancing c by 1 with a fill-per-iteration
+                // used to stack N overlapping alpha fills and crush semi-transparent blacks
+                // (lazy backdrop A=102) into opaque #010101. One fill, then all glyphs.
+                for (int i = cs; i < runEnd; i++)
+                {
+                    int tci = g.PosCol + i;
+                    if (tci < 0 || tci >= cols) continue;
+                    var lead = g.Cells[r * g.Cols + i];
+                    string t = lead.Text;
+                    if (t.Length == 0) continue;
+                    Color fg = _defFg;
+                    if (lead.Hl >= 0 && _hlDefs.TryGetValue(lead.Hl, out var h)) { if (h.Fg.A > 0) fg = h.Fg; }
+                    if (IsEmojiPresentation(t))
+                    {
+                        float fsize = EmojiNaturalSize(t, (float)rh);
+                        float yEm = (float)(rowTop[tr] + rh / 2 - EmojiLift(t, fsize));
+                        ds.DrawText(t, (float)colLeft[tci], yEm, GetW2dBrush(rc, fg), EmojiTf(fsize));
+                    }
+                    else if (IsWideGlyph(t))
+                    {
+                        ds.DrawText(t, (float)colLeft[tci], yWide, GetW2dBrush(rc, fg), _tfWide!);
+                    }
+                    else
+                    {
+                        // Narrow glyph: clip at the first following REAL-TEXT cell (same as base pass).
+                        float clipX = float.MaxValue;
+                        for (int c2 = i + 1; c2 < g.Cols && c2 <= i + 8; c2++)
+                        {
+                            if (!CoverableNeighbor(g.Cells[r * g.Cols + c2].Text)) { clipX = (float)colLeft[g.PosCol + c2]; break; }
+                        }
+                        if (clipX < float.MaxValue && clipX > colLeft[tci])
+                            using (ds.CreateLayer(1.0f, new Windows.Foundation.Rect(0, 0, clipX, 20000)))
+                                ds.DrawText(t, (float)colLeft[tci], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
+                        else
+                            ds.DrawText(t, (float)colLeft[tci], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
+                    }
+                }
+                // c already points past the run — do NOT reset to cs (that re-filled the run).
             }
         }
     }
@@ -972,7 +1014,6 @@ private Microsoft.Graphics.Canvas.Brushes.ICanvasBrush GetW2dBrush(Microsoft.Gra
 private static Color UnpackPacked(int p) => Color.FromArgb((byte)(p >> 24), (byte)(p >> 16), (byte)(p >> 8), (byte)p);
 // Background color of one cell for Pass 1: inverted cursor block, highlight bg, or transparent.
 private Cell[]? _activeRenderCells; // set by RenderCore each frame (composited multigrid buffer)
-private bool _colorDiagLogged;      // one-shot resolved-color DIAG guard
 private Color CellBg(int r, int c, int curIdx)
 {
     if (r * _screenCols + c == curIdx && curIdx >= 0) return _defFg; // inverted cursor: default fg as block

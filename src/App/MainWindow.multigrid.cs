@@ -37,7 +37,7 @@ public partial class MainWindow
     // (msg_set_pos) is a bottom-row surface, not a popup, and it lingers, so it must NOT keep the
     // blur on when no float is displayed. Guarded with MGridHasContent so a stale empty float
     // grid can't hold the blur either.
-    private static bool MGridIsOverlay(MGrid g) => g.PosRow < int.MaxValue && g.ZIndex > 0;
+    private static bool MGridIsOverlay(MGrid g) => !g.IsMessageGrid && g.PosRow < int.MaxValue && g.ZIndex > 0;
 
     // True when the grid carries at least one visible glyph (any non-whitespace cell).
     private static bool MGridHasContent(MGrid g)
@@ -190,10 +190,14 @@ public partial class MainWindow
     }
 
     // win_pos [grid_id, win_handle, start_row, start_col, width, height] — place a window grid.
+    // A grid that previously floated (ZIndex > 0 from win_float_pos) must drop back to a normal
+    // window order when nvim repositions it with win_pos — otherwise MGridIsOverlay stays true
+    // and the blur never turns off after a float closes/reverts.
     private void MWinPos(int id, int handle, int row, int col, int w, int h)
     {
         var g = GetOrCreateMGrid(id);
         g.PosRow = row; g.PosCol = col;
+        g.ZIndex = 0;
         if (w > 0 && h > 0 && (g.Cols != w || g.Rows != h)) MGridResize(id, w, h);
     }
 

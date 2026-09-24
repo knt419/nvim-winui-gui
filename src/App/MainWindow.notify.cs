@@ -199,9 +199,6 @@ public partial class MainWindow
                     // nvim holds the redraw batch until the next input event; force a flush so the
                     // win_float_pos/grid events arrive while we are not typing.
                     await _client.CallAsync("nvim_command", "redraw!");
-                    // Re-arm the one-shot color DIAG so the NEXT frame logs resolved colors in the
-                    // post-float state (the bug only appears after a float is opened).
-                    _colorDiagLogged = false;
                     await Task.Delay(600).ConfigureAwait(false);
                     var comp = BuildRenderCells();
                     if (comp != null)
@@ -373,6 +370,21 @@ public partial class MainWindow
             var dir = System.IO.Path.GetDirectoryName(StartupLogPath)!;
             System.IO.Directory.CreateDirectory(dir);
             System.IO.File.AppendAllText(StartupLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] CRITICAL {s}{System.Environment.NewLine}");
+        }
+        catch { /* best effort */ }
+    }
+
+    // Always-on, rare one-shots (no CRITICAL prefix): grid lifecycle events (COLORS / win_* placement).
+    // Unlike LogStartup this does NOT require NVIM_WINUI_DIAG=1, so a normal user session still
+    // leaves enough state to diagnose placement reports. Frequency stays tiny (one line per
+    // win_pos/msg_set_pos), so IO is fine.
+    private static void LogImportant(string s)
+    {
+        try
+        {
+            var dir = System.IO.Path.GetDirectoryName(StartupLogPath)!;
+            System.IO.Directory.CreateDirectory(dir);
+            System.IO.File.AppendAllText(StartupLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {s}{System.Environment.NewLine}");
         }
         catch { /* best effort */ }
     }
@@ -649,7 +661,7 @@ public partial class MainWindow
                     if (tuple is not object?[] t || t.Length < 2) continue;
                     _defFg = HintColor(1, ToInt(t[0])); _defBg = HintColor(2, ToInt(t[1]));
                     InvalidateBlendCache(); // base color for blends changed
-                    LogStartup($"COLORS fg=0x{PackColor(_defFg):X8} bg=0x{PackColor(_defBg):X8}");
+                    LogImportant($"COLORS fg=0x{PackColor(_defFg):X8} bg=0x{PackColor(_defBg):X8}");
                     var bgBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(_defBg);
                     _root.Background = bgBrush;
                     // Keep the canvas's opaque XAML background in sync so any swap-chain gap after a
@@ -663,7 +675,9 @@ public partial class MainWindow
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 6) continue;
-                    MWinPos(ToInt(t[0]), ToInt(t[1]), ToInt(t[2]), ToInt(t[3]), ToInt(t[4]), ToInt(t[5]));
+                    int g0 = ToInt(t[0]);
+                    MWinPos(g0, ToInt(t[1]), ToInt(t[2]), ToInt(t[3]), ToInt(t[4]), ToInt(t[5]));
+                    LogImportant($"WIN-POS g={g0} row={ToInt(t[2])} col={ToInt(t[3])} {ToInt(t[4])}x{ToInt(t[5])}");
                     ScheduleRender();
                 }
                 break;
@@ -672,7 +686,9 @@ public partial class MainWindow
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 2) continue;
-                    MMsgSetPos(ToInt(t[0]), ToInt(t[1]), t.Length > 4 ? ToInt(t[4]) : 0);
+                    int gm = ToInt(t[0]);
+                    MMsgSetPos(gm, ToInt(t[1]), t.Length > 4 ? ToInt(t[4]) : 0);
+                    LogImportant($"MSG-POS g={gm} row={ToInt(t[1])} z={(t.Length > 4 ? ToInt(t[4]) : 0)}");
                     ScheduleRender();
                 }
                 break;
@@ -681,17 +697,33 @@ public partial class MainWindow
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 11) continue;
-                    MWinFloatPos(ToInt(t[0]), ToInt(t[1]), t[2], ToInt(t[3]),
+                    int gf = ToInt(t[0]);
+                    MWinFloatPos(gf, ToInt(t[1]), t[2], ToInt(t[3]),
                         ToDouble(t[4]), ToDouble(t[5]), ToBool(t[6]), ToInt(t[7]), ToInt(t[8]),
                         ToDouble(t[9]), ToDouble(t[10]));
+                    LogImportant($"WIN-FLOAT g={gf} anchor={t[2]} z={ToInt(t[7])} screen=({ToDouble(t[9]):F0},{ToDouble(t[10]):F0})");
                     ScheduleRender();
                 }
                 break;
             case "win_hide":
-                foreach (var tuple in a) { if (tuple is not object?[] t || t.Length < 1) continue; MWinHide(ToInt(t[0])); ScheduleRender(); }
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 1) continue;
+                    int gh = ToInt(t[0]);
+                    MWinHide(gh);
+                    LogImportant($"WIN-HIDE g={gh}");
+                    ScheduleRender();
+                }
                 break;
             case "win_close":
-                foreach (var tuple in a) { if (tuple is not object?[] t || t.Length < 1) continue; MWinClose(ToInt(t[0])); ScheduleRender(); }
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 1) continue;
+                    int gc = ToInt(t[0]);
+                    MWinClose(gc);
+                    LogImportant($"WIN-CLOSE g={gc}");
+                    ScheduleRender();
+                }
                 break;
         }
     }
