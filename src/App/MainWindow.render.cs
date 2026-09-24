@@ -394,7 +394,7 @@ private static double ParseFloatBlur()
 // cellsOverride: draw this exact buffer (base-only during the blur split) instead of compositing
 // fresh. blurLayerPass: marks the recursive render of the parent layer into the offscreen target
 // (skips DIAG one-shots and the overlay orchestration).
-private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc, Cell[]? cellsOverride = null, bool blurLayerPass = false)
+    private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc, Cell[]? cellsOverride = null, bool blurLayerPass = false, bool suppressCursor = false)
 {
     bool outer = cellsOverride is null && !blurLayerPass;
     try
@@ -424,7 +424,7 @@ private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Micro
     // Clamp: a stale cursor row beyond the current grid (e.g. after a shrink before nvim's next
     // cursor_position) would make curIdx land outside _cells and the block silently vanish.
     int curIdx = (curRow >= 0 && curRow < rows) ? curRow * cols + Math.Clamp(curCol, 0, cols - 1) : -1;
-
+    if (suppressCursor) curIdx = -1;
     // Integer-pixel row/column boundaries: _cellW/_cellH are fractional (avail/cols), so r*_cellH
     // lands on subpixel y values and Direct2D rasterization leaves a 1-2px gap between adjacent
     // rows. Invisible over the clear color, but when a dimmed background highlight is drawn the
@@ -849,8 +849,8 @@ private void RenderBlurredBase(Microsoft.Graphics.Canvas.CanvasDrawingSession ds
                                                                           w, h,
                                                                           ((Microsoft.Graphics.Canvas.ICanvasResourceCreatorWithDpi)rc).Dpi))
         {
-            using (var dsv = rt.CreateDrawingSession())
-                RenderCore(dsv, rc, baseCells, blurLayerPass: true);
+             using (var dsv = rt.CreateDrawingSession())
+                 RenderCore(dsv, rc, baseCells, blurLayerPass: true, suppressCursor: _floatBlurAmount > 0 && CursorIsInSharpLayer());
             // Draw the BLURRED parent over the WHOLE canvas, then redraw the float(s) SHARP on top
             // (RenderOverlayLayer). This is the user's reference look: the blurred parent stays
             // visible both in the float's blank interior AND outside its frame — the mask experiment
@@ -994,7 +994,39 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                             ds.DrawText(t, (float)colLeft[tci], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
                     }
                 }
-                // c already points past the run — do NOT reset to cs (that re-filled the run).
+                 // c already points past the run — do NOT reset to cs (that re-filled the run).
+            }
+        }
+    }
+
+    // Sharp cursor: draw the inverted cursor block on top of the overlay (float / message)
+    // so it is never blurred with the parent. When blur is off the cursor stays in the
+    // base pass; suppressing it there only while a blur is active avoids a missing cursor.
+    if (_floatBlurAmount > 0 && CursorIsInSharpLayer() && _mgrid.TryGetValue(_curGridId, out var cg))
+    {
+        int lr = _curLocalRow, lc = _curLocalCol;
+        if (lr >= 0 && lr < cg.Rows && lc >= 0 && lc < cg.Cols)
+        {
+            int cr = cg.PosRow + lr, cc = cg.PosCol + lc;
+            if (cr >= 0 && cr < rows && cc >= 0 && cc < cols)
+            {
+                double rh = rowTop[cr + 1] - rowTop[cr];
+                ds.FillRectangle(new Windows.Foundation.Rect(colLeft[cc], rowTop[cr], _cellW, rh), GetW2dBrush(rc, _defFg));
+                string t = cg.Cells[lr * cg.Cols + lc].Text;
+                if (t.Length > 0)
+                {
+                    float yNarrow = (float)(rowTop[cr] + rh / 2 - _liftNarrow);
+                    float yWide = (float)(rowTop[cr] + rh / 2 - _liftWide);
+                    if (IsEmojiPresentation(t))
+                    {
+                        float size = EmojiNaturalSize(t, (float)rh);
+                        ds.DrawText(t, (float)colLeft[cc], (float)(rowTop[cr] + rh / 2 - EmojiLift(t, size)), GetW2dBrush(rc, _defBg), EmojiTf(size));
+                    }
+                    else if (IsWideGlyph(t))
+                        ds.DrawText(t, (float)colLeft[cc], yWide, GetW2dBrush(rc, _defBg), _tfWide!);
+                    else
+                        ds.DrawText(t, (float)colLeft[cc], yNarrow, GetW2dBrush(rc, _defBg), _tfNarrow!);
+                }
             }
         }
     }

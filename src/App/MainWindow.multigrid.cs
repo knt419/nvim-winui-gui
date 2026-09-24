@@ -48,6 +48,17 @@ public partial class MainWindow
         return MIsInputMode(); // cmdline/search float (may be non-focusable)
     }
 
+    // True when the cursor currently belongs to a sharp-layer grid (a floating window or the
+    // message surface). Such a cursor must be drawn in the sharp foreground pass, never in the
+    // blurred parent, or it would appear blurred.
+    private bool CursorIsInSharpLayer()
+    {
+        if (!_multigridActive || _curGridId < 0) return false;
+        if (!_mgrid.TryGetValue(_curGridId, out var g)) return false;
+        if (!MGridResolveCursor(_curGridId, _curLocalRow, _curLocalCol, out int r, out int c)) return false;
+        return r >= g.PosRow && r < g.PosRow + g.Rows && c >= g.PosCol && c < g.PosCol + g.Cols && MGridIsSharpLayer(g);
+    }
+
     // Input modes where a floating cmdline/search UI should blur the parent behind it.
     private bool MIsInputMode() =>
         _modeName.StartsWith("cmdline", StringComparison.Ordinal) ||
