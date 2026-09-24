@@ -392,6 +392,19 @@ public partial class MainWindow
                     int tc = g.PosCol + c;
                     if (tc < 0 || tc >= cols) continue;
                     var top = g.Cells[r * g.Cols + c];
+                    // Window grids (zindex <= 0, not the message surface) are opaque independent
+                    // surfaces: their cells — blanks and no-background highlights included — fully
+                    // replace the outer frame beneath them. Only floats / the message grid may
+                    // blend with the base (winblend, transparent floats). Without this gate, a
+                    // window cell whose hl has no background (A<255) fell into the transparent
+                    // path and stale frame content bled through — e.g. an old statusline left in
+                    // _cells at row 22 when a cmdheight toggle moved the statusline up/down,
+                    // showing as a phantom second statusline band above the real one.
+                    if (g.ZIndex <= 0 && !g.IsMessageGrid)
+                    {
+                        _renderScratch[tr * cols + tc] = top;
+                        continue;
+                    }
                     // Fast path: opaque float cell (hl bg A=255) fully covers the base.
                     Color? rawBg = GetRawHlBg(top);
                     if (rawBg is not null && rawBg.Value.A == 0xFF)
