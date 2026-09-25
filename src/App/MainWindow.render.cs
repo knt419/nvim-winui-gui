@@ -719,6 +719,7 @@ private static double ParseFloatBlur()
                 {
                     string t2 = cells[r * cols + c2].Text;
                     if (t2.Length == 0 || string.IsNullOrWhiteSpace(t2)) continue; // tail / blank — no ink
+                    if (IsSelectorOnly(t2)) continue; // VS16/ZWJ-only cell: no ink, absorbed by this emoji
                     realCol = c2;
                     break;
                 }
@@ -736,7 +737,7 @@ private static double ParseFloatBlur()
                 if (realCol >= 0 && occ > realCol - c) occ = realCol - c; // never swallow real text
                 float yEm = (float)(rowTop[r] + rh / 2 - EmojiLift(txt, size));
                 if (outer && _diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} inkW={adv:F2}px size={size:F2}R realCol={realCol} inkEnd={inkEnd:F2}px cells={occ} yEm={yEm:F2}");
-                ds.DrawText(txt, (float)colLeft[c], yEm, GetW2dBrush(rc, fg), EmojiTf(size));
+                ds.DrawText(EmojiDrawText(txt), (float)colLeft[c], yEm, GetW2dBrush(rc, fg), EmojiTf(size));
                 c += occ; // this cell + the reserved blank span
                 continue;
             }
@@ -932,7 +933,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                         {
                             float nsize = EmojiNaturalSize(ntp, (float)rh);
                             float nEm = (float)(rowTop[tr] + rh / 2 - EmojiLift(ntp, nsize));
-                            ds.DrawText(ntp, (float)colLeft[tc], nEm, GetW2dBrush(rc, nfg), EmojiTf(nsize));
+                             ds.DrawText(EmojiDrawText(ntp), (float)colLeft[tc], nEm, GetW2dBrush(rc, nfg), EmojiTf(nsize));
                         }
                         else if (IsWideGlyph(ntp))
                             ds.DrawText(ntp, (float)colLeft[tc], yTw, GetW2dBrush(rc, nfg), _tfWide!);
@@ -975,7 +976,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                     {
                         float fsize = EmojiNaturalSize(t, (float)rh);
                         float yEm = (float)(rowTop[tr] + rh / 2 - EmojiLift(t, fsize));
-                        ds.DrawText(t, (float)colLeft[tci], yEm, GetW2dBrush(rc, fg), EmojiTf(fsize));
+                         ds.DrawText(EmojiDrawText(t), (float)colLeft[tci], yEm, GetW2dBrush(rc, fg), EmojiTf(fsize));
                     }
                     else if (IsWideGlyph(t))
                     {
@@ -1022,7 +1023,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                     if (IsEmojiPresentation(t))
                     {
                         float size = EmojiNaturalSize(t, (float)rh);
-                        ds.DrawText(t, (float)colLeft[cc], (float)(rowTop[cr] + rh / 2 - EmojiLift(t, size)), GetW2dBrush(rc, _defBg), EmojiTf(size));
+                         ds.DrawText(EmojiDrawText(t), (float)colLeft[cc], (float)(rowTop[cr] + rh / 2 - EmojiLift(t, size)), GetW2dBrush(rc, _defBg), EmojiTf(size));
                     }
                     else if (IsWideGlyph(t))
                         ds.DrawText(t, (float)colLeft[cc], yWide, GetW2dBrush(rc, _defBg), _tfWide!);
@@ -1147,6 +1148,19 @@ private static int FirstCodePoint(string s)
         : s[0];
 }
 
+// A cell holding ONLY variation selectors / ZWJ (e.g. the U+FE0F that nvim splits off from ⚠️
+// into its own grid cell) has no visible ink of its own. It must not count as "real text" in the
+// emoji tight-fit scan — treating it as such shrank ⚠ to ~1/3 size (size=6.4R at rh=19) because
+// the fit target was a single cell while the natural ink spans ~3 cells. The preceding emoji cell
+// absorbs it: EmojiDrawText appends VS16, and the reserved blank span covers this cell.
+private static bool IsSelectorOnly(string s)
+{
+    if (s.Length == 0) return false;
+    foreach (var ch in s)
+        if (ch != '\uFE0F' && ch != '\uFE0E' && ch != '\u200D') return false;
+    return true;
+}
+
 private static bool IsEmojiPresentation(string s)
 {
     if (s.Length == 0) return false;
@@ -1201,10 +1215,14 @@ private float EmojiLift(string s, float size)
  // font bearings and vary wildly between mono/color variants of the same codepoint
  // (e.g. U+26A0 alone vs U+26A0+U+FE0F), which causes the glyph to be shrunk to a
  // few pixels. The caller reserves blank cells for horizontal overflow via EmojiAdvance.
- private static float EmojiNaturalSize(string s, float rh)
- {
-     return rh;
- }
+ private static float EmojiNaturalSize(string s, float rh) => rh;
+
+ // Ensure the glyph is rendered as a COLOR emoji (not a monochrome outline).
+ // Without U+FE0F (VS16), fonts like Segoe UI Emoji may pick the text/mono
+ // presentation of a codepoint that also has an emoji presentation, which is
+ // what happened with U+26A0 alone — a tiny black outline instead of the
+ // colored glyph. Appending VS16 forces the color-emoji presentation.
+ private static string EmojiDrawText(string s) => s.EndsWith("\uFE0F") ? s : s + "\uFE0F";
 
 // Emoji ink width at a given size (the full color-glyph advance — the horizontal span of cells
 // the emoji's ink covers). The trailing cells of that span are reserved as blank.
