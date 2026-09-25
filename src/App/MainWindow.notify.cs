@@ -39,7 +39,8 @@ public partial class MainWindow
             int port = FindFreePort();
             // --headless: without it, nvim's console-UI init path hangs startup when all stdio is
             // redirected (no real console) and the --listen socket never opens. Verified empirically 2026-08-24.
-            var psi = new ProcessStartInfo(nvimPath, $"--listen 127.0.0.1:{port} --headless")
+            string extraArgs = Environment.GetEnvironmentVariable("NVIM_WINUI_ARGS") ?? "";
+            var psi = new ProcessStartInfo(nvimPath, $"--listen 127.0.0.1:{port} --headless {extraArgs}")
             {
                 UseShellExecute = false,
                 RedirectStandardInput = true,
