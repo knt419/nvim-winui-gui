@@ -95,33 +95,39 @@ public partial class MainWindow : Window
     // parameters, so the "wide" flag is honored by looking for a matching *Wide* family name
     // via GDI font enumeration (falls back to the base family if none exists).
     private string _narrowFont = NarrowFallback;
-    private double _narrowSize = 14;
+    private double _narrowSize = 14 * PtToDip;
     private string _wideFont = WideFallback;
-    private double _wideSize = 14;
+    private double _wideSize = 14 * PtToDip;
+
+    // nvim's guifont/guifontwide size token (e.g. "h16") is in POINTS (1/72 inch). WinUI and
+    // DirectWrite FontSize are in DIPs (1/96 inch), so convert at parse time: dip = pt * 96/72.
+    private const double PtToDip = 96.0 / 72.0;
 
     // Parse an nvim guifont/guifontwide setting into family and size. The canonical form is
     // "FontName:Style:Size" (e.g. "Cascadia Mono:hregular:12"), but the Style field may be omitted,
     // giving just "FontName:Size" (e.g. "OperatorMono Nerd Font:h16"). Size tokens are written with
     // an 'h' prefix ("h16") and we accept them in either position; a bare number is also accepted.
-    // Style/weight itself is ignored (WinUI FontFamily has no weight parameter). If no size is
-    // found, default to 14. Empty/null setting -> defaults. The parsed family is always followed by
-    // `fallback` so CJK/emoji/symbol code points the primary font lacks still render (no tofu).
+    // The token value is POINTS — converted to DIPs here so every downstream consumer (TextBlock,
+    // CanvasTextFormat) gets the unit it expects. Style/weight itself is ignored (WinUI FontFamily
+    // has no weight parameter). If no size is found, default to 14pt. Empty/null setting -> defaults.
+    // The parsed family is always followed by `fallback` so CJK/emoji/symbol code points the primary
+    // font lacks still render (no tofu).
     private static void ParseNvimFont(string? setting, string fallback, out string family, out double size)
     {
         if (string.IsNullOrEmpty(setting))
         {
             family = fallback; // full chain as-is (no duplication); matches field defaults -> no spurious re-render
-            size = 14;
+            size = 14 * PtToDip;
             return;
         }
         var parts = setting.Split(':', StringSplitOptions.RemoveEmptyEntries);
         family = parts[0].Trim();
-        size = 14;
+        size = 14 * PtToDip;
         for (int i = 1; i < parts.Length; i++)
         {
             string t = parts[i].Trim().ToLowerInvariant();
-            if (t.StartsWith("h") && int.TryParse(t.Substring(1), out int hsz)) { size = hsz; break; } // "h16"
-            if (int.TryParse(t, out int sz)) { size = sz; break; }                                   // bare "16"
+            if (t.StartsWith("h") && int.TryParse(t.Substring(1), out int hsz)) { size = hsz * PtToDip; break; } // "h16" -> 16pt
+            if (int.TryParse(t, out int sz)) { size = sz * PtToDip; break; }                                   // bare "16" -> 16pt
         }
         // Append the fallback chain so CJK/emoji/symbol code points the primary font lacks
         // still render (no tofu). FontFamily ignores repeated family names.

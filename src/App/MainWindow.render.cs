@@ -369,7 +369,7 @@ private static Microsoft.Graphics.Canvas.Text.CanvasTextFormat MakeTf(string key
     int at = key.IndexOf('@');
     string fam = (at >= 0 ? key.Substring(0, at) : key).Split(',')[0].Trim();
     if (!string.IsNullOrEmpty(fam)) tf.FontFamily = fam;
-    double size = 14;
+    double size = 14 * PtToDip; // fallback only — the key always carries a parsed (pt->dip) size
     if (at >= 0 && double.TryParse(key.Substring(at + 1), out var s)) size = s;
     tf.FontSize = (float)size;
     return tf;
