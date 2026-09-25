@@ -7,8 +7,8 @@ the grid with a Win2D/Direct2D GPU canvas — no terminal emulator in between.
 ## Layout
 - `src/NvimCore/` — msgpack-rpc codec (`MsgPackEncoder`, `MsgpackStreamDecoder`) and `NvimClient` (spawn nvim, handshake, request/response correlation, notifications).
 - `src/App/` — WinUI 3 host (pure C#, no XAML markup):
-  - `MainWindow.cs` — core state: grid buffers, the `Hl` record (`Fg`, `Bg`, `Blend`, `Reverse`, `FgSet`, `BgSet`), guifont/guifontwide parsing.
-  - `MainWindow.render.cs` — Win2D rendering: cell backgrounds/text, highlight resolution (explicit colors, `reverse`, blend), wide CJK glyph fallback to guifontwide, color-emoji path (Segoe UI Emoji + `EnableColorFont`, sized to fit the cell).
+  - `MainWindow.cs` — core state: grid buffers, the `Hl` record (`Fg`, `Bg`, `Blend`, `Reverse`, `FgSet`, `BgSet`, `Italic`, `Bold`), guifont/guifontwide parsing.
+  - `MainWindow.render.cs` — Win2D rendering: cell backgrounds/text, highlight resolution (explicit colors, `reverse`, blend), wide CJK glyph fallback to guifontwide, color-emoji path (Segoe UI Emoji + `EnableColorFont`, sized to fit the cell). Text style (`italic`/`bold`) is resolved per hl and drawn through a lazily-built `CanvasTextFormat` cache (normal reuses the base narrow/wide formats; italic/bold/bold-italic are synthesized by DirectWrite, so they work with any guifont — same as neovide's simulated oblique).
   - `MainWindow.multigrid.cs` — `ext_multigrid`: per-window grid buffers composited onto the shared canvas; floating windows (`win_float_pos`) with z-order and focusable/mouse flags; message grid. Float/message cells get **synthesized hl ids** whose colors are pre-blended over the parent cell and marked fully resolved (`FgSet`/`BgSet=true`) so they never fall back to defaults.
   - `MainWindow.mouse.cs` — pointer events → `nvim_input_mouse` (press/release/drag, wheel), same scheme as neovide's mouse manager; fire-and-forget requests ordered by the client write semaphore.
   - `MainWindow.notify.cs` — RPC notification handling, nvim spawn (`--headless --listen`), guifont load at startup + re-read after ~1 s (lazy-loaded plugins), self-test.
@@ -49,7 +49,9 @@ Cell colors resolve through two helpers (`HlFg`/`HlBg`) that mirror neovide's se
 - **Explicit** fg/bg from the protocol are used as sent; `blend` alpha-composites the hl background over the parent cell's background (non-reversed path only).
 - **`reverse`**: nvim sends `{reverse: true}` for groups like `healthSectionDelim`; the fill is an opaque swap of Normal's fg/bg (e.g. a full-width band in Normal-fg color), never blended.
 - **No explicit value** → null, and the caller falls back to its default (`_defFg`/`_defBg`). This is why synthesized float/message hl ids must carry `FgSet`/`BgSet=true`: their colors are already fully resolved by blending over the parent cell, and marking them unresolved makes every glyph fall back to Normal fg (a uniform grey block).
+- **Text style**: the protocol's per-hl `italic`/`bold` flags are parsed into the `Hl` record and applied at draw time. A text run breaks on a style change as well as a color/font change, so mixed-style lines render correctly; italic uses DirectWrite oblique synthesis (true italic face when the family has one), bold maps to weight 700.
 
 ## Verification status
 - Decoder covers the full msgpack spec used by nvim: fixints, ints/uints all widths, str/bin 8/16/32, ext 8/16/32, float32/64 (big-endian), arrays/maps. Live capture of a full session replays through the C# decoder with 0 pending bytes.
 - `:checkhealth blink.cmp` rendering matches neovide pixel-for-pixel on the reference case: row 1 explicit bg band (`0x44495E`) and row 2 `reverse` band (Normal fg `#63718B`), verified by protocol capture + screenshot pixel sampling (2026-09-26).
+- Italic/bold/bold-italic rendering verified on a live session: whole-line and mixed-span highlight groups render with the correct slant/weight per span, confirmed by full-canvas snapshot inspection (2026-09-26).

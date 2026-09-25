@@ -127,6 +127,7 @@ public partial class MainWindow
 // (~8ms for 1920 cells, measured in a spike) and the GPU rasterizes. This replaces the old
 // 1920-element XAML cell grid whose per-cell layout pass was the real latency bottleneck.
 private readonly Dictionary<int, Microsoft.Graphics.Canvas.Brushes.ICanvasBrush> _w2dBrushCache = new();
+private readonly Dictionary<string, Microsoft.Graphics.Canvas.Text.CanvasTextFormat> _tfStyleCache = new(); // italic/bold variants (normal uses _tfNarrow/_tfWide)
 private string _tfKeyNarrow = "", _tfKeyWide = "";
 private Microsoft.Graphics.Canvas.Text.CanvasTextFormat? _tfNarrow, _tfWide;
 private double _natLineHNarrow = -1, _natLineHWide = -1; // natural line heights (for vertical centering)
@@ -356,12 +357,32 @@ private void RenderNow()
 private void EnsureTextFormats()
 {
     string nk = _narrowFont + "@" + _narrowSize;
-    if (nk != _tfKeyNarrow) { _tfNarrow = MakeTf(nk); _tfKeyNarrow = nk; _natLineHNarrow = -1; _liftNarrow = -1; _fontAdvance = -1; LogStartup($"TF narrow={_narrowFont.Split(',')[0]}@{_narrowSize}"); }
+    if (nk != _tfKeyNarrow) { _tfNarrow = MakeTf(nk, false, false); _tfKeyNarrow = nk; _natLineHNarrow = -1; _liftNarrow = -1; _fontAdvance = -1; _tfStyleCache.Clear(); LogStartup($"TF narrow={_narrowFont.Split(',')[0]}@{_narrowSize}"); }
     string wk = _wideFont + "@" + _wideSize;
-    if (wk != _tfKeyWide) { _tfWide = MakeTf(wk); _tfKeyWide = wk; _natLineHWide = -1; _liftWide = -1; LogStartup($"TF wide={_wideFont.Split(',')[0]}@{_wideSize}"); }
+    if (wk != _tfKeyWide) { _tfWide = MakeTf(wk, false, false); _tfKeyWide = wk; _natLineHWide = -1; _liftWide = -1; LogStartup($"TF wide={_wideFont.Split(',')[0]}@{_wideSize}"); }
 }
 
-private static Microsoft.Graphics.Canvas.Text.CanvasTextFormat MakeTf(string key)
+// Style index for the format cache: bit0=italic, bit1=bold (0 = normal).
+private static int StyleIdx(bool italic, bool bold) => (italic ? 1 : 0) | (bold ? 2 : 0);
+
+// Text format for a cell's style. Normal reuses the cached _tfNarrow/_tfWide; italic/bold/
+// bold-italic are built once per font+size and cached by key — most sessions never touch them,
+// so they stay lazy. DirectWrite synthesizes oblique when the family has no true italic face,
+// so this works with any guifont (neovide does the same via DWRITE_FONT_SIMULATED_ITALIC).
+private Microsoft.Graphics.Canvas.Text.CanvasTextFormat Tf(bool wide, bool italic, bool bold)
+{
+    int si = StyleIdx(italic, bold);
+    if (si == 0) return wide ? _tfWide! : _tfNarrow!;
+    string key = (wide ? "W:" + _wideFont + "@" + _wideSize : "N:" + _narrowFont + "@" + _narrowSize) + "|" + si;
+    if (!_tfStyleCache.TryGetValue(key, out var tf))
+    {
+        tf = MakeTf(wide ? _wideFont + "@" + _wideSize : _narrowFont + "@" + _narrowSize, italic, bold);
+        _tfStyleCache[key] = tf;
+    }
+    return tf;
+}
+
+private static Microsoft.Graphics.Canvas.Text.CanvasTextFormat MakeTf(string key, bool italic, bool bold)
 {
     var tf = new Microsoft.Graphics.Canvas.Text.CanvasTextFormat();
     // DirectWrite takes a single family name (no comma lists); its automatic font fallback covers
@@ -372,7 +393,17 @@ private static Microsoft.Graphics.Canvas.Text.CanvasTextFormat MakeTf(string key
     double size = 14 * PtToDip; // fallback only — the key always carries a parsed (pt->dip) size
     if (at >= 0 && double.TryParse(key.Substring(at + 1), out var s)) size = s;
     tf.FontSize = (float)size;
+    tf.FontStyle = italic ? Windows.UI.Text.FontStyle.Oblique : Windows.UI.Text.FontStyle.Normal;
+    // WinRT's FontWeight has no Bold/Normal statics — use the numeric weights (400 normal, 700 bold).
+    tf.FontWeight = new Windows.UI.Text.FontWeight((ushort)(bold ? 700 : 400));
     return tf;
+}
+
+// Resolve a cell's text style from its highlight (no-op when the cell has no hl).
+private void HlStyle(int hlId, out bool italic, out bool bold)
+{
+    italic = false; bold = false;
+    if (_hlDefs.TryGetValue(hlId, out var h)) { italic = h.Italic; bold = h.Bold; }
 }
 
 // The GPU render: clear, then one pass for backgrounds (merged rects) and one for text
@@ -676,7 +707,7 @@ private static double ParseFloatBlur()
     // Pass 2: text. A "run" is consecutive cells sharing the same foreground color and narrow
     // font — drawn as ONE DrawText call (the big win over per-cell XAML). Wide glyphs break the
     // run and are drawn individually with the wide format; covered tails ("") add no ink.
-    var skewPending = new System.Collections.Generic.List<(string Text, float X, float Y, int Fg, float ClipX)>();
+    var skewPending = new System.Collections.Generic.List<(string Text, float X, float Y, int Fg, float ClipX, bool Italic, bool Bold)>();
     for (int r = 0; r < rows; r++)
     {
         double rh = rowTop[r + 1] - rowTop[r]; // this row's pixel height (device-px snapped)
@@ -745,8 +776,9 @@ private static double ParseFloatBlur()
 
             if (IsWideGlyph(txt))
             {
+                HlStyle(cell.Hl, out var wIt, out var wBd);
                 if (_diagEnabled && r == curRow) LogStartup($"WIDE-CELL row={r} col={c} txt='{txt}' cp={(int)txt[0]:X4} yWide={yWide:F2} yNarrow={yNarrow:F2}");
-                ds.DrawText(txt, (float)colLeft[c], yWide, GetW2dBrush(rc, fg), _tfWide!);
+                ds.DrawText(txt, (float)colLeft[c], yWide, GetW2dBrush(rc, fg), Tf(true, wIt, wBd));
                 c++; // the tail cell is "" and gets skipped by the loop above
                 continue;
             }
@@ -782,12 +814,14 @@ private static double ParseFloatBlur()
                 {
                     if (!CoverableNeighbor(cells[r * cols + c2].Text)) { clipX = (float)colLeft[c2]; break; }
                 }
-                skewPending.Add((txt, (float)colLeft[c], yOwn, fgi, clipX));
+                HlStyle(cell.Hl, out var sIt, out var sBd);
+                skewPending.Add((txt, (float)colLeft[c], yOwn, fgi, clipX, sIt, sBd));
                 c++;
                 continue;
             }
 
             int start = c;
+            HlStyle(cell.Hl, out var runIt, out var runBd); // style of the run's lead cell
             var sb = new System.Text.StringBuilder();
             while (c < cols)
             {
@@ -799,11 +833,14 @@ private static double ParseFloatBlur()
                 if (isCur2) fg2 = _defBg;
                 else if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = HlFg(h2) ?? _defFg;
                 else fg2 = _defFg;
-                if (PackColor(fg2) != fgi || IsEmojiPresentation(t2) || IsWideGlyph(t2) || !IsGridAlignedNarrow(t2) || VertDeviantNarrow(t2)) break; // run boundary
+                // A style change (italic/bold on/off) breaks the run too: one DrawText call can only
+                // carry a single text format, so mixed-style spans must split.
+                HlStyle(cc2.Hl, out var it2, out var bd2);
+                if (PackColor(fg2) != fgi || IsEmojiPresentation(t2) || IsWideGlyph(t2) || !IsGridAlignedNarrow(t2) || VertDeviantNarrow(t2) || (it2, bd2) != (runIt, runBd)) break; // run boundary
                 sb.Append(t2);
                 c++;
             }
-            ds.DrawText(sb.ToString(), (float)colLeft[start], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
+            ds.DrawText(sb.ToString(), (float)colLeft[start], yNarrow, GetW2dBrush(rc, fg), Tf(false, runIt, runBd));
         }
     }
 
@@ -817,11 +854,11 @@ private static double ParseFloatBlur()
         if (g.ClipX < float.MaxValue && g.ClipX > g.X)
         {
             using (ds.CreateLayer(1.0f, new Windows.Foundation.Rect(0, 0, g.ClipX, 20000)))
-                ds.DrawText(g.Text, g.X, g.Y, GetW2dBrush(rc, UnpackPacked(g.Fg)), _tfNarrow!);
+                ds.DrawText(g.Text, g.X, g.Y, GetW2dBrush(rc, UnpackPacked(g.Fg)), Tf(false, g.Italic, g.Bold));
         }
         else
         {
-            ds.DrawText(g.Text, g.X, g.Y, GetW2dBrush(rc, UnpackPacked(g.Fg)), _tfNarrow!);
+            ds.DrawText(g.Text, g.X, g.Y, GetW2dBrush(rc, UnpackPacked(g.Fg)), Tf(false, g.Italic, g.Bold));
         }
     }
 
@@ -949,6 +986,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                         if (ncp.Hl >= 0 && _hlDefs.TryGetValue(ncp.Hl, out var nh)) nfg = HlFg(nh) ?? _defFg;
                         float yTn = (float)(rowTop[tr] + rh / 2 - _liftNarrow);
                         float yTw = (float)(rowTop[tr] + rh / 2 - _liftWide);
+                        HlStyle(ncp.Hl, out var nIt, out var nBd);
                         if (IsEmojiPresentation(ntp))
                         {
                             float nsize = EmojiNaturalSize(ntp, (float)rh);
@@ -956,9 +994,9 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                              ds.DrawText(EmojiDrawText(ntp), (float)colLeft[tc], nEm, GetW2dBrush(rc, nfg), EmojiTf(nsize));
                         }
                         else if (IsWideGlyph(ntp))
-                            ds.DrawText(ntp, (float)colLeft[tc], yTw, GetW2dBrush(rc, nfg), _tfWide!);
+                            ds.DrawText(ntp, (float)colLeft[tc], yTw, GetW2dBrush(rc, nfg), Tf(true, nIt, nBd));
                         else
-                            ds.DrawText(ntp, (float)colLeft[tc], yTn, GetW2dBrush(rc, nfg), _tfNarrow!);
+                            ds.DrawText(ntp, (float)colLeft[tc], yTn, GetW2dBrush(rc, nfg), Tf(false, nIt, nBd));
                     }
                     c++;
                     continue;
@@ -992,6 +1030,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                     if (t.Length == 0) continue;
                     Color fg = _defFg;
                     if (lead.Hl >= 0 && _hlDefs.TryGetValue(lead.Hl, out var h)) { var lf = HlFg(h); if (lf is not null) fg = lf.Value; }
+                    HlStyle(lead.Hl, out var fIt, out var fBd);
                     if (IsEmojiPresentation(t))
                     {
                         float fsize = EmojiNaturalSize(t, (float)rh);
@@ -1000,7 +1039,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                     }
                     else if (IsWideGlyph(t))
                     {
-                        ds.DrawText(t, (float)colLeft[tci], yWide, GetW2dBrush(rc, fg), _tfWide!);
+                        ds.DrawText(t, (float)colLeft[tci], yWide, GetW2dBrush(rc, fg), Tf(true, fIt, fBd));
                     }
                     else
                     {
@@ -1012,9 +1051,9 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                         }
                         if (clipX < float.MaxValue && clipX > colLeft[tci])
                             using (ds.CreateLayer(1.0f, new Windows.Foundation.Rect(0, 0, clipX, 20000)))
-                                ds.DrawText(t, (float)colLeft[tci], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
+                                ds.DrawText(t, (float)colLeft[tci], yNarrow, GetW2dBrush(rc, fg), Tf(false, fIt, fBd));
                         else
-                            ds.DrawText(t, (float)colLeft[tci], yNarrow, GetW2dBrush(rc, fg), _tfNarrow!);
+                            ds.DrawText(t, (float)colLeft[tci], yNarrow, GetW2dBrush(rc, fg), Tf(false, fIt, fBd));
                     }
                 }
                  // c already points past the run — do NOT reset to cs (that re-filled the run).
@@ -1040,15 +1079,16 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                 {
                     float yNarrow = (float)(rowTop[cr] + rh / 2 - _liftNarrow);
                     float yWide = (float)(rowTop[cr] + rh / 2 - _liftWide);
+                    HlStyle(cg.Cells[lr * cg.Cols + lc].Hl, out var cIt, out var cBd);
                     if (IsEmojiPresentation(t))
                     {
                         float size = EmojiNaturalSize(t, (float)rh);
                          ds.DrawText(EmojiDrawText(t), (float)colLeft[cc], (float)(rowTop[cr] + rh / 2 - EmojiLift(t, size)), GetW2dBrush(rc, _defBg), EmojiTf(size));
                     }
                     else if (IsWideGlyph(t))
-                        ds.DrawText(t, (float)colLeft[cc], yWide, GetW2dBrush(rc, _defBg), _tfWide!);
+                        ds.DrawText(t, (float)colLeft[cc], yWide, GetW2dBrush(rc, _defBg), Tf(true, cIt, cBd));
                     else
-                        ds.DrawText(t, (float)colLeft[cc], yNarrow, GetW2dBrush(rc, _defBg), _tfNarrow!);
+                        ds.DrawText(t, (float)colLeft[cc], yNarrow, GetW2dBrush(rc, _defBg), Tf(false, cIt, cBd));
                 }
             }
         }
@@ -1401,7 +1441,9 @@ private static Hl ParseHl(object? v)
             return new Hl(HintColor(1, fg), HintColor(2, bg),
                           ToInt(m.TryGetValue("blend", out var bl) ? bl : null),
                           m.TryGetValue("reverse", out var rv) && rv is bool rb && rb,
-                          fg >= 0, bg >= 0);
+                          fg >= 0, bg >= 0,
+                          m.TryGetValue("italic", out var it) && it is bool ib && ib,
+                          m.TryGetValue("bold", out var bd) && bd is bool bb && bb);
         }
         return default;
     }

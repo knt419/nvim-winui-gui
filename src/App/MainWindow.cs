@@ -222,7 +222,7 @@ public partial class MainWindow : Window
     // that has no explicit value — the standard terminal semantics neovide implements.
     // FgSet/BgSet record whether nvim sent an EXPLICIT color for that slot (HintColor forces an
     // opaque default for a missing foreground, so alpha alone can't tell "unset" from "set").
-    private readonly record struct Hl(Color Fg, Color Bg, int Blend, bool Reverse = false, bool FgSet = false, bool BgSet = false);
+    private readonly record struct Hl(Color Fg, Color Bg, int Blend, bool Reverse = false, bool FgSet = false, bool BgSet = false, bool Italic = false, bool Bold = false);
 
     private async void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
