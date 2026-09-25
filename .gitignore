@@ -8,3 +8,5 @@ tmp-test/
 nvimhome-*/
 *.hex
 __pycache__/
+tools/
+mg_probe*
