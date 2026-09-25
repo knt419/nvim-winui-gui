@@ -166,14 +166,16 @@ public partial class MainWindow : Window
             Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0x9A, 0xA0, 0xA6))
         };
 
-        _root = new Grid { Background = new SolidColorBrush(_defBg) };
-        _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        // Fixed height for the status row so it matches exactly what UpdateWindowSize calculates.
-        _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(25, GridUnitType.Pixel) });
-        Grid.SetRow(GlyphCanvas, 0);
-        Grid.SetRow(StatusText, 1);
-        _root.Children.Add(GlyphCanvas);
-        _root.Children.Add(StatusText);
+         _root = new Grid { Background = new SolidColorBrush(_defBg) };
+         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+         // Fixed height for the status row so it matches exactly what UpdateWindowSize calculates.
+         // Hidden by default (NVIM_WINUI_STATUSBAR=1 to show).
+         _root.RowDefinitions.Add(new RowDefinition { Height = StatusBarVisible ? new GridLength(25, GridUnitType.Pixel) : new GridLength(0) });
+         Grid.SetRow(GlyphCanvas, 0);
+         Grid.SetRow(StatusText, 1);
+         StatusText.Visibility = StatusBarVisible ? Visibility.Visible : Visibility.Collapsed;
+         _root.Children.Add(GlyphCanvas);
+         _root.Children.Add(StatusText);
 
         Content = _root;
         _root.KeyDown += OnKeyDown;

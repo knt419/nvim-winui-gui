@@ -12,12 +12,13 @@ namespace NvimWinUIGui;
 
 public partial class MainWindow
 {
-    private void SetStatus(string s)
-    {
-        // May be called from the IO thread (notification error path); StatusText is XAML, so
-        // marshal to the UI thread. UiPostAsync runs inline when already on the UI thread.
-        try { UiPostAsync(() => StatusText.Text = s); } catch { /* XAML already torn down (shutdown path); ignore */ }
-    }
+     private void SetStatus(string s)
+     {
+         // May be called from the IO thread (notification error path); StatusText is XAML, so
+         // marshal to the UI thread. UiPostAsync runs inline when already on the UI thread.
+         // Hidden by default (NVIM_WINUI_STATUSBAR=1 to show).
+         try { UiPostAsync(() => { StatusText.Text = s; StatusText.Visibility = StatusBarVisible ? Visibility.Visible : Visibility.Collapsed; }); } catch { /* XAML already torn down (shutdown path); ignore */ }
+     }
 
     private static string StartupLogPath => System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvimWinUIGui", "startup.log");

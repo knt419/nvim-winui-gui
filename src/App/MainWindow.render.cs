@@ -112,9 +112,11 @@ public partial class MainWindow
         }
         catch { return _cellW; }
     }
-    // Fixed height of the status row under the grid (see MainWindow.cs visual tree). Must match
-    // the XAML so window<->grid conversions are exact.
-    private const double StatusTextHeight = 25.0;
+    // The application status line under the grid (see MainWindow.cs visual tree). Hidden
+    // by default; set NVIM_WINUI_STATUSBAR=1 to show it. Must match the XAML row height
+    // so window<->grid conversions are exact.
+    private static bool StatusBarVisible => Environment.GetEnvironmentVariable("NVIM_WINUI_STATUSBAR") == "1";
+    private static double StatusTextHeight => StatusBarVisible ? 25.0 : 0.0;
     // Sanity caps for drag-resize (a maximized ultrawide would otherwise request hundreds of cols).
     private const int MaxGridCols = 1000;
     private const int MaxGridRows = 400;
@@ -1194,22 +1196,15 @@ private float EmojiLift(string s, float size)
     return lift;
 }
 
-// Emoji NATURAL display size: scale the emoji so its ink FITS THE ROW HEIGHT (fills the line box
-// exactly, no width-based squeezing) and no more. Do not fit the width to any cell span — the
-// horizontal overflow is instead absorbed by reserving blank cells (see EmojiAdvance callers).
-private float EmojiNaturalSize(string s, float rh)
-{
-    try
-    {
-        using (var l = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(GlyphCanvas, s, EmojiTf(rh), 5000, 0))
-        {
-            float h = (float)l.LayoutBounds.Height;
-            if (h > rh + 0.01) return rh * rh / h; // color glyph box exceeds the em; scale height to the row
-        }
-    }
-    catch { }
-    return rh;
-}
+ // Emoji display size: the color glyph is drawn at the ROW HEIGHT (fills the em box
+ // exactly). Never scale down based on DrawBounds/LayoutBounds height — those include
+ // font bearings and vary wildly between mono/color variants of the same codepoint
+ // (e.g. U+26A0 alone vs U+26A0+U+FE0F), which causes the glyph to be shrunk to a
+ // few pixels. The caller reserves blank cells for horizontal overflow via EmojiAdvance.
+ private static float EmojiNaturalSize(string s, float rh)
+ {
+     return rh;
+ }
 
 // Emoji ink width at a given size (the full color-glyph advance — the horizontal span of cells
 // the emoji's ink covers). The trailing cells of that span are reserved as blank.
