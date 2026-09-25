@@ -138,6 +138,7 @@ private int _rowLogCount;     // DIAG: throttle ROWTOP logging
 private bool _advDiagLogged;  // DIAG: one-shot per-glyph advance probe (column-alignment analysis)
     private bool _emojiDiagLogged; // DIAG: one-shot color-emoji path probe
     private bool _emojiShotLogged0;// DIAG: one-shot offscreen color-emoji snapshot
+    private bool _fullShotLogged0; // DIAG: one-shot full-canvas live-composite snapshot
 
 private static string? MapKey(VirtualKey vk) => vk switch
     {
@@ -826,6 +827,25 @@ private static double ParseFloatBlur()
 
     double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
     _renderMsTotal += ms; int rcc = Interlocked.Increment(ref _renderCount);
+
+    // DIAG: full-canvas snapshot of the LIVE composite (backgrounds + text) so the actual rendered
+    // pixels can be inspected without a screen capture. With NVIM_WINUI_SHOT=1 it saves every 30th
+    // render (so it lands on whatever is on screen at that moment); otherwise one-shot.
+    if (outer && _diagEnabled && (!_fullShotLogged0 || (Environment.GetEnvironmentVariable("NVIM_WINUI_SHOT") == "1" && rcc % 30 == 0)))
+    {
+        if (_fullShotLogged0) { /* keep shooting while NVIM_WINUI_SHOT=1 */ } else _fullShotLogged0 = true;
+        try
+        {
+            float wS = (float)Math.Round(GlyphCanvas.Width), hS = (float)Math.Round(GlyphCanvas.Height);
+            var rtS = new Microsoft.Graphics.Canvas.CanvasRenderTarget((Microsoft.Graphics.Canvas.ICanvasResourceCreatorWithDpi)rc, wS, hS, ((Microsoft.Graphics.Canvas.ICanvasResourceCreatorWithDpi)rc).Dpi);
+            using (var dsS = rtS.CreateDrawingSession()) RenderCore(dsS, rc, cells, blurLayerPass: true, suppressCursor: false);
+            string pS = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvimWinUIGui", "fullshot.png");
+            _ = SaveRtAsync(rtS, pS);
+            LogStartup("FULL-SHOT queued -> " + pS);
+        }
+        catch (Exception ex) { LogStartup("FULL-SHOT failed: " + ex.Message); }
+    }
+
     if (_diagEnabled && (rcc % 25 == 0 || ms > 8)) LogStartup($"RENDER #{rcc} {ms:F1}ms avg={_renderMsTotal/rcc:F1}ms cells={rows*cols}");
     }
     catch (Exception ex)
