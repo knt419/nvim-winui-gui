@@ -211,7 +211,12 @@ public partial class MainWindow : Window
 
     // Win2D renders the whole grid every frame (GPU), so no per-cell last-rendered cache is needed.
     private sealed class Cell { public string Text = " "; public int Hl = -1; }
-    private readonly record struct Hl(Color Fg, Color Bg, int Blend);
+    // Reverse = nvim's `reverse` attribute (e.g. checkhealth.vim's healthSectionDelim sends
+    // {reverse:true} with NO colors): swap fg/bg, falling back to Normal's color on any side
+    // that has no explicit value — the standard terminal semantics neovide implements.
+    // FgSet/BgSet record whether nvim sent an EXPLICIT color for that slot (HintColor forces an
+    // opaque default for a missing foreground, so alpha alone can't tell "unset" from "set").
+    private readonly record struct Hl(Color Fg, Color Bg, int Blend, bool Reverse = false, bool FgSet = false, bool BgSet = false);
 
     private async void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {

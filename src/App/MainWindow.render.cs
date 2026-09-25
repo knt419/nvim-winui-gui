@@ -698,7 +698,7 @@ private static double ParseFloatBlur()
             bool isCur = r * cols + c == curIdx && curIdx >= 0;
             Color fg;
             if (isCur) fg = _defBg; // inverted cursor: default bg as glyph color
-            else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) fg = h.Fg;
+            else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) fg = HlFg(h) ?? _defFg;
             else fg = _defFg;
             int fgi = PackColor(fg);
 
@@ -796,7 +796,7 @@ private static double ParseFloatBlur()
                 bool isCur2 = r * cols + c == curIdx && curIdx >= 0;
                 Color fg2;
                 if (isCur2) fg2 = _defBg;
-                else if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = h2.Fg;
+                else if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = HlFg(h2) ?? _defFg;
                 else fg2 = _defFg;
                 if (PackColor(fg2) != fgi || IsEmojiPresentation(t2) || IsWideGlyph(t2) || !IsGridAlignedNarrow(t2) || VertDeviantNarrow(t2)) break; // run boundary
                 sb.Append(t2);
@@ -926,7 +926,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                     if (ntp.Length > 0)
                     {
                         Color nfg = _defFg;
-                        if (ncp.Hl >= 0 && _hlDefs.TryGetValue(ncp.Hl, out var nh)) { if (nh.Fg.A > 0) nfg = nh.Fg; }
+                        if (ncp.Hl >= 0 && _hlDefs.TryGetValue(ncp.Hl, out var nh)) nfg = HlFg(nh) ?? _defFg;
                         float yTn = (float)(rowTop[tr] + rh / 2 - _liftNarrow);
                         float yTw = (float)(rowTop[tr] + rh / 2 - _liftWide);
                         if (IsEmojiPresentation(ntp))
@@ -971,7 +971,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                     string t = lead.Text;
                     if (t.Length == 0) continue;
                     Color fg = _defFg;
-                    if (lead.Hl >= 0 && _hlDefs.TryGetValue(lead.Hl, out var h)) { if (h.Fg.A > 0) fg = h.Fg; }
+                    if (lead.Hl >= 0 && _hlDefs.TryGetValue(lead.Hl, out var h)) { var lf = HlFg(h); if (lf is not null) fg = lf.Value; }
                     if (IsEmojiPresentation(t))
                     {
                         float fsize = EmojiNaturalSize(t, (float)rh);
@@ -1057,9 +1057,36 @@ private Color CellBg(int r, int c, int curIdx)
     if (r * _screenCols + c == curIdx && curIdx >= 0) return _defFg; // inverted cursor: default fg as block
     var buf = _activeRenderCells ?? _cells;
     var cell = buf[r * _screenCols + c];
-    if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) return h.Bg;
+    if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) { var cb = HlBg(h); if (cb is not null) return cb.Value; }
     return TransparentColor;
 }
+// nvim's `blend` attribute on a highlight: the percentage of the WINDOW background color to mix
+// into this group's background. blend=0 -> pure hl bg (opaque), blend=100 -> pure window bg. A real
+// terminal blends them, so without this step blended groups (e.g. blink.cmp / checkhealth status
+// colors) render fully opaque and look brighter than in the terminal. Float windows are already
+// composited by multigrid into synthetic hl ids whose Blend is 0, so they never reach here twice.
+private Color BlendHlBg(Hl h)
+{
+    var b = h.Bg;
+    if (b.A == 0 || h.Blend <= 0) return b;
+    int pct = Math.Clamp(h.Blend, 0, 100);
+    if (pct >= 100) return EffBg();
+    Color baseC = EffBg();
+    byte r = (byte)((b.R * (100 - pct) + baseC.R * pct) / 100);
+    byte g = (byte)((b.G * (100 - pct) + baseC.G * pct) / 100);
+    byte bl = (byte)((b.B * (100 - pct) + baseC.B * pct) / 100);
+    return Color.FromArgb(0xFF, r, g, bl);
+}
+// Reverse-aware foreground of a highlight, or null when nvim sent no explicit fg (caller falls
+// back to its default). Terminal `reverse` swaps effective fg/bg: the GLYPH takes the background
+// side (explicit bg, else Normal's bg) and the FILL takes the foreground side (explicit fg, else
+// Normal's fg). A pure {reverse:true} group (checkhealth.vim's healthSectionDelim) therefore draws
+// dark glyphs on a Normal.fg fill — exactly what neovide renders.
+private Color? HlFg(Hl h) => !h.Reverse ? (h.FgSet ? h.Fg : null) : (h.BgSet ? h.Bg : _defBg);
+// Reverse-aware background of a highlight, or null when nvim sent no explicit bg and the group is
+// not reversed (caller falls back to its default). Blend applies to the non-reversed path only —
+// a reverse group's fill is an opaque swap color; blending it would wash out the inversion.
+private Color? HlBg(Hl h) => !h.Reverse ? (h.BgSet ? BlendHlBg(h) : null) : (h.FgSet ? h.Fg : _defFg);
 // WinAppSDK 2.x's Windows.UI.Color has no PackedValue property, so pack ARGB from the
 // component fields ourselves for brush-cache keys.
 private static int PackColor(Color c) => (c.A << 24) | (c.R << 16) | (c.G << 8) | c.B;
@@ -1348,9 +1375,14 @@ private static bool ToBool(object? v) => v is bool b && b;
 private static Hl ParseHl(object? v)
     {
         if (v is Dictionary<string, object?> m)
-            return new Hl(HintColor(1, ToInt(m.TryGetValue("foreground", out var f) ? f : null)),
-                          HintColor(2, ToInt(m.TryGetValue("background", out var b) ? b : null)),
-                          ToInt(m.TryGetValue("blend", out var bl) ? bl : null));
+        {
+            int fg = ToInt(m.TryGetValue("foreground", out var f) ? f : null);
+            int bg = ToInt(m.TryGetValue("background", out var b) ? b : null);
+            return new Hl(HintColor(1, fg), HintColor(2, bg),
+                          ToInt(m.TryGetValue("blend", out var bl) ? bl : null),
+                          m.TryGetValue("reverse", out var rv) && rv is bool rb && rb,
+                          fg >= 0, bg >= 0);
+        }
         return default;
     }
 private static Color HintColor(int slot, int value)
