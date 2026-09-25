@@ -296,8 +296,8 @@ public partial class MainWindow
     {
         if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h))
         {
-            var b = h.Bg;
-            if (b.A > 0) return b;
+            var b = HlBg(h);
+            if (b is not null && b.Value.A > 0) return b.Value;
         }
         return _defBg;
     }
@@ -306,8 +306,8 @@ public partial class MainWindow
     {
         if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h))
         {
-            var f = h.Fg;
-            if (f.A > 0) return f;
+            var f = HlFg(h);
+            if (f is not null && f.Value.A > 0) return f.Value;
         }
         return _defFg;
     }
@@ -336,9 +336,10 @@ public partial class MainWindow
     {
         if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h))
         {
-            var b = h.Bg;
-            if (h.Blend > 0 && b.A > 0)
-                b.A = (byte)(255 * (100 - h.Blend) / 100);
+            var b = HlBg(h);
+            if (b is null) return null; // no explicit bg and not reversed -> transparent surface
+            if (h.Blend > 0 && !h.Reverse && b.Value.A > 0)
+                b = Color.FromArgb((byte)(255 * (100 - h.Blend) / 100), b.Value.R, b.Value.G, b.Value.B);
             return b;
         }
         return null;
@@ -367,7 +368,10 @@ public partial class MainWindow
         else blendedFg = rawFg;
         // Blend the float's own bg over the parent. A=0 / no hl -> fully transparent: parent shows.
         Color blended = (rawTopBg is null || rawTopBg.Value.A == 0) ? baseBg : AlphaBlend(rawTopBg.Value, baseBg);
-        _hlDefs[id] = new Hl(blendedFg, blended, 0);
+        // Both colors are already fully resolved here (opaque fg over the composited bg), so mark
+        // them explicit: HlFg/HlBg treat FgSet/BgSet=false as "nvim sent no color" and return null,
+        // which would make every float glyph fall back to _defFg — a uniform gray box.
+        _hlDefs[id] = new Hl(blendedFg, blended, 0, false, true, true);
         _blendCache[key] = id;
         return id;
     }
