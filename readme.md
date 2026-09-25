@@ -6,8 +6,6 @@ the grid with a Win2D/Direct2D GPU canvas — no terminal emulator in between.
 
 ## Layout
 - `src/NvimCore/` — msgpack-rpc codec (`MsgPackEncoder`, `MsgpackStreamDecoder`) and `NvimClient` (spawn nvim, handshake, request/response correlation, notifications).
-- `tools/rpc-test/` — console harness that proves the core against a **real** nvim: handshake + `nvim_get_api_info`, `nvim_eval`, `nvim_ui_attach` with redraw notification capture. Byte logging for stream forensics (`NVIM_LOG_BYTES=1`).
-- `tools/hl-probe/` — highlight probe: attaches to a live session, captures `grid_line` events and reports per-row hl spans (colStart..lastCol, trailing-blank bg ids) to decide whether full-width bands come from nvim or need GUI-side extension.
 - `src/App/` — WinUI 3 host (pure C#, no XAML markup):
   - `MainWindow.cs` — core state: grid buffers, the `Hl` record (`Fg`, `Bg`, `Blend`, `Reverse`, `FgSet`, `BgSet`), guifont/guifontwide parsing.
   - `MainWindow.render.cs` — Win2D rendering: cell backgrounds/text, highlight resolution (explicit colors, `reverse`, blend), wide CJK glyph fallback to guifontwide, color-emoji path (Segoe UI Emoji + `EnableColorFont`, sized to fit the cell).
@@ -20,16 +18,17 @@ Requires the .NET 8 SDK and Neovim v0.12.x. On this machine the SDK is at `%USER
 
 ```sh
 export PATH="$HOME/.dotnet-sdk-zip:$PATH"   # Git Bash; adjust to your SDK location
-dotnet build NvimWinUISolution.sln --nologo  # builds core + app + harness (0 errors expected)
+dotnet build src/App/NvimWinUIGui.csproj --nologo  # builds core + app (0 errors expected)
 ./src/App/bin/x64/Debug/net8.0-windows10.0.22621.0/win-x64/NvimWinUIGui.exe
 ```
 
-The console harness alone:
-```sh
-dotnet build tools/rpc-test/RpcTest.csproj  # core + harness (0 errors expected)
-dotnet tools/rpc-test/bin/Debug/net8.0/rpctest.dll
-```
-Expected output: `TEST1`/`TEST2` PASS, redraw batches from `nvim_ui_attach`, `[rpc-test] DONE: SUCCESS`.
+`NvimWinUISolution.sln` additionally references the local-only `tools/rpc-test` harness (see below); on a fresh clone build the csproj directly, or restore `tools/` first.
+
+## Local-only tools (`tools/`, git-ignored)
+Diagnostic helpers kept out of version control; they live in this working copy only and are not needed to run the app:
+- `rpc-test/` — console harness that proves NvimCore against a **real** nvim: handshake + `nvim_get_api_info`, `nvim_eval`, `nvim_ui_attach` with redraw notification capture. Byte logging for stream forensics (`NVIM_LOG_BYTES=1`). Expected output: `TEST1`/`TEST2` PASS, redraw batches from `nvim_ui_attach`, `[rpc-test] DONE: SUCCESS`.
+- `hl-probe/` — highlight probe: attaches to a live session, captures `grid_line` events and reports per-row hl spans (colStart..lastCol, trailing-blank bg ids) to decide whether full-width bands come from nvim or need GUI-side extension.
+- `CheckExeTimestamp.ps1` — one-off check that the built exe is newer than the sources it was compiled from (stale-exe diagnosis).
 
 ## Environment variables
 | Variable | Default | Effect |
