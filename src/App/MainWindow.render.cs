@@ -393,7 +393,9 @@ private static Microsoft.Graphics.Canvas.Text.CanvasTextFormat MakeTf(string key
     double size = 14 * PtToDip; // fallback only — the key always carries a parsed (pt->dip) size
     if (at >= 0 && double.TryParse(key.Substring(at + 1), out var s)) size = s;
     tf.FontSize = (float)size;
-    tf.FontStyle = italic ? Windows.UI.Text.FontStyle.Oblique : Windows.UI.Text.FontStyle.Normal;
+    // Request Italic (not Oblique): Maple Mono's italic file is registered with subfamily "Italic",
+    // so an Oblique request misses the real face and DirectWrite falls back to a synthetic slant.
+    tf.FontStyle = italic ? Windows.UI.Text.FontStyle.Italic : Windows.UI.Text.FontStyle.Normal;
     // WinRT's FontWeight has no Bold/Normal statics — use the numeric weights (400 normal, 700 bold).
     tf.FontWeight = new Windows.UI.Text.FontWeight((ushort)(bold ? 700 : 400));
     return tf;
