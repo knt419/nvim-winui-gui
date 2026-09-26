@@ -665,26 +665,34 @@ public partial class MainWindow
                 }
                 break;
             case "mode_info_set":
-                // Each tuple: [info[], mode_idx] — info entries are dicts with cursor_shape,
-                // cell_percentage, blinkwait/blinkon/blinkoff (ms), blinkstart. Store for the
-                // current idx and re-apply if it matches the active mode.
+                // nvim sends ONE tuple: [bool, [{name,cursor_shape,...}, ...]]. The dict list is
+                // element [1] of that tuple and its index IS the mode_idx (verified against live
+                // nvim 0.12 redraw raw data: a = [[true, [normal, visual, insert, ...]]], 18 dicts).
+                // Rebuild the whole table; entries without cursor_shape default to block/100%.
                 foreach (var tuple in a)
                 {
-                    if (tuple is not object?[] t || t.Length < 2) continue;
-                    int mi = ToInt(t[1]);
-                    string shape = "block"; int pct = 100, bw = 0, bon = 0, boff = 0; bool bstart = false;
-                    if (t[0] is object?[] infos && infos.Length > 0 && infos[0] is Dictionary<string, object?> d)
+                    if (tuple is not object?[] t2 || t2.Length < 2) continue;
+                    var infos = t2[1] as object?[]; // the dict list (skip leading bool at [0])
+                    if (infos == null) continue;
+                    _modeInfos.Clear();
+                    for (int i = 0; i < infos.Length; i++)
                     {
-                        shape = d.TryGetValue("cursor_shape", out var cs) ? cs?.ToString() ?? "block" : "block";
-                        pct = ToInt(d.TryGetValue("cell_percentage", out var cp) ? cp : null);
-                        bw = ToInt(d.TryGetValue("blinkwait", out var bwt) ? bwt : null);
-                        bon = ToInt(d.TryGetValue("blinkon", out var bo) ? bo : null);
-                        boff = ToInt(d.TryGetValue("blinkoff", out var bf) ? bf : null);
-                        bstart = d.TryGetValue("blinkstart", out var bs) && bs is bool bsb && bsb;
+                        string shape = "block"; int pct = 100, bw = 0, bon = 0, boff = 0; bool bstart = false;
+                        if (infos[i] is Dictionary<string, object?> d)
+                        {
+                            shape = d.TryGetValue("cursor_shape", out var cs) ? cs?.ToString() ?? "block" : "block";
+                            pct = ToInt(d.TryGetValue("cell_percentage", out var cp) ? cp : null);
+                            bw = ToInt(d.TryGetValue("blinkwait", out var bwt) ? bwt : null);
+                            bon = ToInt(d.TryGetValue("blinkon", out var bo) ? bo : null);
+                            boff = ToInt(d.TryGetValue("blinkoff", out var bf) ? bf : null);
+                            bstart = d.TryGetValue("blinkstart", out var bs) && bs is bool bsb && bsb;
+                        }
+                        _modeInfos.Add((shape, pct, bw, bon, boff, bstart));
                     }
-                    while (_modeInfos.Count <= mi) _modeInfos.Add(("block", 100, 0, 0, 0, false));
-                    _modeInfos[mi] = (shape, pct, bw, bon, boff, bstart);
-                    if (mi == CurrentModeIdx()) ApplyCursorBlink(mi); // active mode redefined: refresh shape/blink
+                    string insShape = _modeInfos.Count > 2 ? _modeInfos[2].Shape : "?";
+                    int insPct = _modeInfos.Count > 2 ? _modeInfos[2].Pct : 0;
+                    LogImportant($"MODEINFO entries={_modeInfos.Count} normal={_modeInfos[0].Shape}/{_modeInfos[0].Pct}% insert={insShape}/{insPct}%");
+                    if (_curModeIdx >= 0 && _curModeIdx < _modeInfos.Count) ApplyCursorBlink(_curModeIdx); // active mode: refresh shape/blink
                     ScheduleRender();
                 }
                 break;
