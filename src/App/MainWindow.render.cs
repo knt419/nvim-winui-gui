@@ -217,7 +217,11 @@ private void UpdateWindowSize(int cols, int rows)
     // still eats _chromeW x _chromeH pixels (measured at runtime; 16x9 on this box). Add it
     // back so the content area is exactly grid + status row.
     double cw = _fontAdvance > 0 ? _fontAdvance : _refCellW;
-    int width = (int)Math.Round(cols * cw) + _chromeW;
+    // CEIL, not round: the width must round-trip through SendNvimResize's floor((W-chrome)/cw).
+    // With round(), a cols*cw that rounds DOWN makes the snapped window read back as cols-1, and
+    // each nvim grid_resize reply shrank the window by one more cell (visible shrink after drag).
+    // Ceil keeps (width-chrome)/cw in [cols, cols+1) so floor returns exactly cols — idempotent.
+    int width = (int)Math.Ceiling(cols * cw) + _chromeW;
     int height = (int)(rows * _refCellH + StatusTextHeight) + _chromeH;
     try { AppWindow.Resize(new SizeInt32(width, height)); } catch { /* ignore */ }
     LogStartup($"RESIZE-DBG UpdateWindowSize req={width}x{height} actual={(AppWindow.Size.Width)}x{(AppWindow.Size.Height)}");
