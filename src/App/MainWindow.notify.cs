@@ -645,13 +645,17 @@ public partial class MainWindow
                 }
                 break;
             case "mode_change":
-                // Each tuple: [mode_name, mode_idx] — e.g. ["cmdline", 7]. Resolve the cursor
-                // shape + blink params from the stored mode_info_set entry for this idx.
-                foreach (var tuple in a)
+            {
+                // nvim sends ["mode_change", [name, idx]] — after dispatch strips the name,
+                // a = [[name, idx]] (length 1; a[0] is the [name, idx] array). Verified against
+                // live nvim raw data. Tolerate a flat [name, idx] too in case framing changes.
+                object?[] t = null;
+                if (a.Length == 1 && a[0] is object?[] mcInner) t = mcInner;   // wrapped form (actual nvim)
+                else if (a.Length >= 2) t = a;                              // flat fallback
+                if (t != null && t.Length >= 2)
                 {
-                    if (tuple is not object?[] t || t.Length < 1) continue;
                     _modeName = t[0]?.ToString() ?? "normal";
-                    int mi = t.Length > 1 ? ToInt(t[1]) : -1;
+                    int mi = ToInt(t[1]);
                     _curModeIdx = mi;
                     if (mi >= 0 && mi < _modeInfos.Count)
                     {
@@ -660,20 +664,18 @@ public partial class MainWindow
                         _cursorCellPct = info.Pct > 0 ? Math.Clamp(info.Pct, 1, 100) : 100;
                     }
                     else { _cursorShape = "block"; _cursorCellPct = 100; } // no info yet: default block
+                    LogImportant($"MODECHANGE name={_modeName} idx={mi} shape={_cursorShape}/{_cursorCellPct}%");
                     ApplyCursorBlink(mi);
                     ScheduleRender();
                 }
                 break;
+            }
             case "mode_info_set":
-                // nvim sends ONE tuple: [bool, [{name,cursor_shape,...}, ...]]. The dict list is
-                // element [1] of that tuple and its index IS the mode_idx (verified against live
-                // nvim 0.12 redraw raw data: a = [[true, [normal, visual, insert, ...]]], 18 dicts).
-                // Rebuild the whole table; entries without cursor_shape default to block/100%.
-                foreach (var tuple in a)
+                // nvim sends ["mode_info_set", [enabled, [{...}, ...]]] — params wrapped in ONE array.
+                // After dispatch strips the name: a = [[true, [...]]] (length 1). Unwrap it.
+                var miParams = (a.Length == 1 && a[0] is object?[] inner) ? inner : a;
+                if (miParams.Length >= 2 && miParams[1] is object?[] infos)
                 {
-                    if (tuple is not object?[] t2 || t2.Length < 2) continue;
-                    var infos = t2[1] as object?[]; // the dict list (skip leading bool at [0])
-                    if (infos == null) continue;
                     _modeInfos.Clear();
                     for (int i = 0; i < infos.Length; i++)
                     {
