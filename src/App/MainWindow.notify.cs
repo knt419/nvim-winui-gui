@@ -677,9 +677,10 @@ public partial class MainWindow
                     _modeInfos.Clear();
                     for (int i = 0; i < infos.Length; i++)
                     {
-                        string shape = "block"; int pct = 100, bw = 0, bon = 0, boff = 0; bool bstart = false;
+                        string mname = "", shape = "block"; int pct = 100, bw = 0, bon = 0, boff = 0; bool bstart = false;
                         if (infos[i] is Dictionary<string, object?> d)
                         {
+                            mname = d.TryGetValue("name", out var nm) ? nm?.ToString() ?? "" : "";
                             shape = d.TryGetValue("cursor_shape", out var cs) ? cs?.ToString() ?? "block" : "block";
                             pct = ToInt(d.TryGetValue("cell_percentage", out var cp) ? cp : null);
                             bw = ToInt(d.TryGetValue("blinkwait", out var bwt) ? bwt : null);
@@ -687,7 +688,7 @@ public partial class MainWindow
                             boff = ToInt(d.TryGetValue("blinkoff", out var bf) ? bf : null);
                             bstart = d.TryGetValue("blinkstart", out var bs) && bs is bool bsb && bsb;
                         }
-                        _modeInfos.Add((shape, pct, bw, bon, boff, bstart));
+                        _modeInfos.Add((mname, shape, pct, bw, bon, boff, bstart));
                     }
                     string insShape = _modeInfos.Count > 2 ? _modeInfos[2].Shape : "?";
                     int insPct = _modeInfos.Count > 2 ? _modeInfos[2].Pct : 0;

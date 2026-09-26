@@ -84,7 +84,8 @@ public partial class MainWindow : Window
 
     // Cursor shape per mode, from mode_info_set: "block" / "horizontal" / "vertical".
     // cell_percentage scales the bar/underline thickness (% of the cell dimension).
-    private readonly System.Collections.Generic.List<(string Shape, int Pct, int BlinkWait, int BlinkOn, int BlinkOff, bool BlinkStart)> _modeInfos = new();
+    // Name is the nvim mode name (e.g. "terminal") — used to keep blink only for terminal.
+    private readonly System.Collections.Generic.List<(string Name, string Shape, int Pct, int BlinkWait, int BlinkOn, int BlinkOff, bool BlinkStart)> _modeInfos = new();
     private string _cursorShape = "block";
     private int _cursorCellPct = 100;
     // Blink state: off (BlinkOff=0) means steady. Toggled by a timer on the thread pool;

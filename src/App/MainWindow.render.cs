@@ -1573,18 +1573,20 @@ private static Color HintColor(int slot, int value)
     byte b = (byte)(value & 0xFF);
     return Color.FromArgb(a, r, g, b);
 }
-// Cursor blink control for the active mode (mode_info_set params). Steady when blinkoff==0;
-// otherwise a thread-pool timer toggles _cursorVisible and posts a repaint. The timer fires on a
-// pool thread — only the bool flip + ScheduleRender happen there, both safe off-UI-thread.
+// Cursor blink: steady (always on) for every mode EXCEPT "terminal", which keeps its native
+// blink (blinkon/blinkoff from mode_info_set). A thread-pool timer toggles _cursorVisible and
+// posts a repaint; it fires off-UI-thread, so only the bool flip + ScheduleRender run there.
 private int CurrentModeIdx() => _curModeIdx;
 private void ApplyCursorBlink(int mi)
 {
     _blinkTimer?.Dispose(); _blinkTimer = null;
     if (mi < 0 || mi >= _modeInfos.Count) { _cursorVisible = true; return; }
     var info = _modeInfos[mi];
+    // Only terminal mode blinks; all other modes are steady.
+    if (!info.Name.Equals("terminal", StringComparison.OrdinalIgnoreCase)) { _cursorVisible = true; return; }
     int wait = Math.Max(0, info.BlinkWait), on = Math.Max(1, info.BlinkOn), off = Math.Max(1, info.BlinkOff);
-    if (off == 0) { _cursorVisible = true; return; } // no blink for this mode
-    _cursorVisible = info.BlinkStart; // blinkstart: begin in the "on" phase
+    if (off == 0) { _cursorVisible = true; return; } // no blink params: steady
+    _cursorVisible = info.BlinkStart; // begin in the "on" phase
     var t = new System.Threading.Timer(_ =>
     {
         lock (_blinkTimerLock)
