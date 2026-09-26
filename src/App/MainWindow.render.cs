@@ -406,10 +406,54 @@ private static Microsoft.Graphics.Canvas.Text.CanvasTextFormat MakeTf(string key
 }
 
 // Resolve a cell's text style from its highlight (no-op when the cell has no hl).
-private void HlStyle(int hlId, out bool italic, out bool bold)
+private void HlStyle(int hlId, out bool italic, out bool bold, out bool underline, out bool undercurl, out bool underdouble, out bool strike, out bool dim)
 {
-    italic = false; bold = false;
-    if (_hlDefs.TryGetValue(hlId, out var h)) { italic = h.Italic; bold = h.Bold; }
+    italic = false; bold = false; underline = false; undercurl = false; underdouble = false; strike = false; dim = false;
+    if (_hlDefs.TryGetValue(hlId, out var h)) { italic = h.Italic; bold = h.Bold; underline = h.Underline; undercurl = h.UnderCurl; underdouble = h.UnderDouble; strike = h.StrikeThrough; dim = h.Dim; }
+}
+
+// 'dim' terminal semantics: blend the foreground 50% toward the background.
+private static Color DimToward(Color fg, Color bg) => Color.FromArgb(0xFF, (byte)((fg.R + bg.R) / 2), (byte)((fg.G + bg.G) / 2), (byte)((fg.B + bg.B) / 2));
+
+// Underline / undercurl / underdouble / strikethrough for one text run [x, x+w] in a row at rowTopY with height rh.
+private void DrawDecorations(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc, bool underline, bool undercurl, bool underdouble, bool strike, float x, float w, double rowTopY, double rh, Color fg)
+{
+    if (!underline && !undercurl && !underdouble && !strike) return;
+    var brush = GetW2dBrush(rc, fg);
+    const float th = 1.0f; // device-independent px line thickness (snaps to ~1 device px at 96dpi)
+    if (underline || undercurl || underdouble)
+    {
+        float y = (float)(rowTopY + rh * 0.84); // just above the cell bottom, like neovide's underline slot
+        if (undercurl)
+        {
+            // Sine wave: ~6 DIP period, ±0.75 DIP amplitude — reads as a "wavy" underline at any run width.
+            var pb = new Microsoft.Graphics.Canvas.Geometry.CanvasPathBuilder(rc);
+            pb.BeginFigure(new System.Numerics.Vector2(x, y));
+            float px = x;
+            while (px < x + w - 1)
+            {
+                float nx = Math.Min(px + 2f, x + w);
+                pb.AddLine(new System.Numerics.Vector2(nx, y + (float)(Math.Sin((nx - x) / 6.0 * 2 * Math.PI) * 0.75)));
+                px = nx;
+            }
+            pb.EndFigure(Microsoft.Graphics.Canvas.Geometry.CanvasFigureLoop.Open);
+            using var geo = Microsoft.Graphics.Canvas.Geometry.CanvasGeometry.CreatePath(pb);
+            ds.DrawGeometry(geo, 0f, 0f, brush, th);
+        }
+        else if (underdouble)
+        {
+            // Two parallel lines ~2.5 DIP apart (neovide-style double underline).
+            ds.DrawLine(x, y - 1.5f, x + w, y - 1.5f, brush, th);
+            ds.DrawLine(x, y + 1.0f, x + w, y + 1.0f, brush, th);
+        }
+        else
+            ds.DrawLine(x, y, x + w, y, brush, th);
+    }
+    if (strike)
+    {
+        float y = (float)(rowTopY + rh * 0.52); // mid-x-height band
+        ds.DrawLine(x, y, x + w, y, brush, th);
+    }
 }
 
 // The GPU render: clear, then one pass for backgrounds (merged rects) and one for text
@@ -713,7 +757,7 @@ private static double ParseFloatBlur()
     // Pass 2: text. A "run" is consecutive cells sharing the same foreground color and narrow
     // font — drawn as ONE DrawText call (the big win over per-cell XAML). Wide glyphs break the
     // run and are drawn individually with the wide format; covered tails ("") add no ink.
-    var skewPending = new System.Collections.Generic.List<(string Text, float X, float Y, int Fg, float ClipX, bool Italic, bool Bold)>();
+    var skewPending = new System.Collections.Generic.List<(string Text, float X, float Y, int Fg, float ClipX, bool Italic, bool Bold, bool Ul, bool Uc, bool Ud, bool St, double RowTop, double Rh)>();
     for (int r = 0; r < rows; r++)
     {
         double rh = rowTop[r + 1] - rowTop[r]; // this row's pixel height (device-px snapped)
@@ -734,10 +778,12 @@ private static double ParseFloatBlur()
             if (txt.Length == 0) { c++; continue; } // covered tail of a wide glyph
 
             bool isCur = r * cols + c == curIdx && curIdx >= 0;
+            HlStyle(cell.Hl, out var runIt, out var runBd, out var runUl, out var runUc, out var runUd, out var runSt, out var runDim); // style of the lead cell
             Color fg;
             if (isCur) fg = _defBg; // inverted cursor: default bg as glyph color
             else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) fg = HlFg(h) ?? _defFg;
             else fg = _defFg;
+            if (!isCur && runDim) fg = DimToward(fg, CellBg(r, c, curIdx)); // dim: blend toward the cell's bg
             int fgi = PackColor(fg);
 
             if (IsEmojiPresentation(txt))
@@ -782,9 +828,11 @@ private static double ParseFloatBlur()
 
             if (IsWideGlyph(txt))
             {
-                HlStyle(cell.Hl, out var wIt, out var wBd);
+                HlStyle(cell.Hl, out var wIt, out var wBd, out var wUl, out var wUc, out var wUd, out var wSt, out _);
                 if (_diagEnabled && r == curRow) LogStartup($"WIDE-CELL row={r} col={c} txt='{txt}' cp={(int)txt[0]:X4} yWide={yWide:F2} yNarrow={yNarrow:F2}");
                 ds.DrawText(txt, (float)colLeft[c], yWide, GetW2dBrush(rc, fg), Tf(true, wIt, wBd));
+                float wEnd = c + 1 < cols ? (float)colLeft[c + 1] : (float)(colLeft[c] + _cellW); // wide glyph spans two cells
+                DrawDecorations(ds, rc, wUl, wUc, wUd, wSt, (float)colLeft[c], (float)(wEnd - colLeft[c]), rowTop[r], rh, fg);
                 c++; // the tail cell is "" and gets skipped by the loop above
                 continue;
             }
@@ -820,14 +868,13 @@ private static double ParseFloatBlur()
                 {
                     if (!CoverableNeighbor(cells[r * cols + c2].Text)) { clipX = (float)colLeft[c2]; break; }
                 }
-                HlStyle(cell.Hl, out var sIt, out var sBd);
-                skewPending.Add((txt, (float)colLeft[c], yOwn, fgi, clipX, sIt, sBd));
+                HlStyle(cell.Hl, out var sIt, out var sBd, out var sUl, out var sUc, out var sUd, out var sSt, out _);
+                skewPending.Add((txt, (float)colLeft[c], yOwn, fgi, clipX, sIt, sBd, sUl, sUc, sUd, sSt, rowTop[r], rh));
                 c++;
                 continue;
             }
 
             int start = c;
-            HlStyle(cell.Hl, out var runIt, out var runBd); // style of the run's lead cell
             var sb = new System.Text.StringBuilder();
             while (c < cols)
             {
@@ -839,14 +886,20 @@ private static double ParseFloatBlur()
                 if (isCur2) fg2 = _defBg;
                 else if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = HlFg(h2) ?? _defFg;
                 else fg2 = _defFg;
-                // A style change (italic/bold on/off) breaks the run too: one DrawText call can only
-                // carry a single text format, so mixed-style spans must split.
-                HlStyle(cc2.Hl, out var it2, out var bd2);
-                if (PackColor(fg2) != fgi || IsEmojiPresentation(t2) || IsWideGlyph(t2) || !IsGridAlignedNarrow(t2) || VertDeviantNarrow(t2) || (it2, bd2) != (runIt, runBd)) break; // run boundary
+                // A style change (italic/bold/decoration on/off) breaks the run too: one DrawText call can only
+                // carry a single text format, and decorations are drawn per-run. Dim must be applied to fg2
+                // EXACTLY like it was to the lead cell's fg — otherwise PackColor(fg2) != fgi for every dim
+                // cell, the run breaks at its FIRST character, sb stays empty and c never advances (spin).
+                HlStyle(cc2.Hl, out var it2, out var bd2, out var ul2, out var uc2, out var ud2, out var st2, out var dm2);
+                if (!isCur2 && dm2) fg2 = DimToward(fg2, CellBg(r, c, curIdx));
+                if (PackColor(fg2) != fgi || IsEmojiPresentation(t2) || IsWideGlyph(t2) || !IsGridAlignedNarrow(t2) || VertDeviantNarrow(t2) || (it2, bd2, ul2, uc2, ud2, st2) != (runIt, runBd, runUl, runUc, runUd, runSt)) break; // run boundary
                 sb.Append(t2);
                 c++;
             }
+            if (sb.Length == 0) { sb.Append(cells[r * cols + c].Text); c++; } // invariant: a run always consumes its lead cell — never spin on a style mismatch at the boundary
             ds.DrawText(sb.ToString(), (float)colLeft[start], yNarrow, GetW2dBrush(rc, fg), Tf(false, runIt, runBd));
+            float runEndX = c < cols ? (float)colLeft[c] : (float)(colLeft[cols - 1] + _cellW); // right edge of the last cell in the run
+            DrawDecorations(ds, rc, runUl, runUc, runUd, runSt, (float)colLeft[start], (float)(runEndX - colLeft[start]), rowTop[r], rh, fg);
         }
     }
 
@@ -866,6 +919,9 @@ private static double ParseFloatBlur()
         {
             ds.DrawText(g.Text, g.X, g.Y, GetW2dBrush(rc, UnpackPacked(g.Fg)), Tf(false, g.Italic, g.Bold));
         }
+        // Decorations follow the glyph's INK extent (clipped like its bleed), not the 1-cell slot.
+        float decEnd = Math.Min(g.ClipX < float.MaxValue ? g.ClipX : (float)(g.X + _cellW * 3), (float)(g.X + _cellW * 3));
+        DrawDecorations(ds, rc, g.Ul, g.Uc, g.Ud, g.St, g.X, (float)(decEnd - g.X), g.RowTop, g.Rh, UnpackPacked(g.Fg));
     }
 
     double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
@@ -992,7 +1048,8 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                         if (ncp.Hl >= 0 && _hlDefs.TryGetValue(ncp.Hl, out var nh)) nfg = HlFg(nh) ?? _defFg;
                         float yTn = (float)(rowTop[tr] + rh / 2 - _liftNarrow);
                         float yTw = (float)(rowTop[tr] + rh / 2 - _liftWide);
-                        HlStyle(ncp.Hl, out var nIt, out var nBd);
+                        HlStyle(ncp.Hl, out var nIt, out var nBd, out var nUl, out var nUc, out var nUd, out var nSt, out var nDim);
+                        if (nDim) nfg = DimToward(nfg, _defBg); // float cell over the base bg
                         if (IsEmojiPresentation(ntp))
                         {
                             float nsize = EmojiNaturalSize(ntp, (float)rh);
@@ -1003,6 +1060,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                             ds.DrawText(ntp, (float)colLeft[tc], yTw, GetW2dBrush(rc, nfg), Tf(true, nIt, nBd));
                         else
                             ds.DrawText(ntp, (float)colLeft[tc], yTn, GetW2dBrush(rc, nfg), Tf(false, nIt, nBd));
+                        DrawDecorations(ds, rc, nUl, nUc, nUd, nSt, (float)colLeft[tc], (float)(IsWideGlyph(ntp) ? _cellW * 2 : _cellW), rowTop[tr], rh, nfg);
                     }
                     c++;
                     continue;
@@ -1036,7 +1094,8 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                     if (t.Length == 0) continue;
                     Color fg = _defFg;
                     if (lead.Hl >= 0 && _hlDefs.TryGetValue(lead.Hl, out var h)) { var lf = HlFg(h); if (lf is not null) fg = lf.Value; }
-                    HlStyle(lead.Hl, out var fIt, out var fBd);
+                    HlStyle(lead.Hl, out var fIt, out var fBd, out var fUl, out var fUc, out var fUd, out var fSt, out var fDim);
+                    if (fDim) fg = DimToward(fg, rb); // dim: blend toward this run's bg
                     if (IsEmojiPresentation(t))
                     {
                         float fsize = EmojiNaturalSize(t, (float)rh);
@@ -1061,6 +1120,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                         else
                             ds.DrawText(t, (float)colLeft[tci], yNarrow, GetW2dBrush(rc, fg), Tf(false, fIt, fBd));
                     }
+                    DrawDecorations(ds, rc, fUl, fUc, fUd, fSt, (float)colLeft[tci], (float)(IsWideGlyph(t) ? _cellW * 2 : _cellW), rowTop[tr], rh, fg);
                 }
                  // c already points past the run — do NOT reset to cs (that re-filled the run).
             }
@@ -1085,7 +1145,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                 {
                     float yNarrow = (float)(rowTop[cr] + rh / 2 - _liftNarrow);
                     float yWide = (float)(rowTop[cr] + rh / 2 - _liftWide);
-                    HlStyle(cg.Cells[lr * cg.Cols + lc].Hl, out var cIt, out var cBd);
+                    HlStyle(cg.Cells[lr * cg.Cols + lc].Hl, out var cIt, out var cBd, out var cUl, out var cUc, out var cUd, out var cSt, out _);
                     if (IsEmojiPresentation(t))
                     {
                         float size = EmojiNaturalSize(t, (float)rh);
@@ -1095,6 +1155,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                         ds.DrawText(t, (float)colLeft[cc], yWide, GetW2dBrush(rc, _defBg), Tf(true, cIt, cBd));
                     else
                         ds.DrawText(t, (float)colLeft[cc], yNarrow, GetW2dBrush(rc, _defBg), Tf(false, cIt, cBd));
+                    DrawDecorations(ds, rc, cUl, cUc, cUd, cSt, (float)colLeft[cc], (float)(IsWideGlyph(t) ? _cellW * 2 : _cellW), rowTop[cr], rh, _defBg); // inverted: same color as the glyph
                 }
             }
         }
@@ -1449,7 +1510,12 @@ private static Hl ParseHl(object? v)
                           m.TryGetValue("reverse", out var rv) && rv is bool rb && rb,
                           fg >= 0, bg >= 0,
                           m.TryGetValue("italic", out var it) && it is bool ib && ib,
-                          m.TryGetValue("bold", out var bd) && bd is bool bb && bb);
+                          m.TryGetValue("bold", out var bd) && bd is bool bb && bb,
+                          m.TryGetValue("underline", out var ul) && ul is bool ub && ub,
+                          m.TryGetValue("undercurl", out var uc) && uc is bool ucb && ucb,
+                          m.TryGetValue("underdouble", out var ud) && ud is bool udb && udb,
+                          m.TryGetValue("strikethrough", out var st) && st is bool stb && stb,
+                          m.TryGetValue("dim", out var dm) && dm is bool dmb && dmb);
         }
         return default;
     }
