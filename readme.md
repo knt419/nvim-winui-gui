@@ -38,7 +38,7 @@ Diagnostic helpers kept out of version control; they live in this working copy o
 | `NVIM_WINUI_DIAG` | off | Enable diagnostic logging (per-frame RPC trace + redraw/resize events) to `%LOCALAPPDATA%\NvimWinUIGui\`. Off by default; rare fatal errors are always logged regardless. |
 | `NVIM_WINUI_SHOT` | off | With `NVIM_WINUI_DIAG=1`, save a full-canvas snapshot of the live composite (backgrounds + text) to `%LOCALAPPDATA%\NvimWinUIGui\fullshot.png` every 30th render — for pixel-level inspection without screen capture. |
 | `NVIM_WINUI_SELFTEST` | off | Run the startup self-test (types text and creates a test buffer). Diagnostics only — pollutes your session, so keep it off in normal use. |
-| `NVIM_WINUI_LINESPACE` | 1 | Extra line spacing in px between grid rows. |
+| `NVIM_WINUI_LINESPACE` | 0 | Pixels trimmed from each row's vertical pitch (tighter line spacing). `0` keeps the natural box height. |
 | `NVIM_WINUI_STATUSBAR` | off | Show the app status bar row (hidden by default; set to `1`). |
 | `NVIM_WINUI_FLOAT_BLUR` | 6.0 | Gaussian blur radius (DIP) applied to the parent layer while a floating window is up, so the float reads as focused foreground. `0` disables. |
 | `NVIM_LOG_BYTES` / `NVIM_LOG_FILE` | off | Dump every received socket byte to a hex file for stream forensics. |
