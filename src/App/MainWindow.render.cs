@@ -780,7 +780,7 @@ private static double ParseFloatBlur()
             bool isCur = r * cols + c == curIdx && curIdx >= 0;
             HlStyle(cell.Hl, out var runIt, out var runBd, out var runUl, out var runUc, out var runUd, out var runSt, out var runDim); // style of the lead cell
             Color fg;
-            if (isCur) fg = _defBg; // inverted cursor: default bg as glyph color
+            if (isCur && _cursorShape == "block") fg = _defBg; // inverted cursor: default bg as glyph color (bar/underline keep normal ink)
             else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) fg = HlFg(h) ?? _defFg;
             else fg = _defFg;
             if (!isCur && runDim) fg = DimToward(fg, CellBg(r, c, curIdx)); // dim: blend toward the cell's bg
@@ -883,7 +883,7 @@ private static double ParseFloatBlur()
                 if (t2.Length == 0) { c++; continue; } // covered tail: no ink, run continues
                 bool isCur2 = r * cols + c == curIdx && curIdx >= 0;
                 Color fg2;
-                if (isCur2) fg2 = _defBg;
+                if (isCur2 && _cursorShape == "block") fg2 = _defBg;
                 else if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = HlFg(h2) ?? _defFg;
                 else fg2 = _defFg;
                 // A style change (italic/bold/decoration on/off) breaks the run too: one DrawText call can only
@@ -922,6 +922,20 @@ private static double ParseFloatBlur()
         // Decorations follow the glyph's INK extent (clipped like its bleed), not the 1-cell slot.
         float decEnd = Math.Min(g.ClipX < float.MaxValue ? g.ClipX : (float)(g.X + _cellW * 3), (float)(g.X + _cellW * 3));
         DrawDecorations(ds, rc, g.Ul, g.Uc, g.Ud, g.St, g.X, (float)(decEnd - g.X), g.RowTop, g.Rh, UnpackPacked(g.Fg));
+    }
+
+    // Cursor bar/underline shapes (mode_info_set): a thin _defFg strip over the cursor cell, drawn
+    // AFTER text so it sits on top like neovide. Thickness = cell_percentage of the dimension;
+    // vertical hugs the left edge, horizontal the bottom edge. Skipped while blinked off.
+    if (curIdx >= 0 && _cursorVisible && _cursorShape != "block")
+    {
+        int cr2 = curIdx / cols, cc2 = curIdx % cols;
+        double rh2 = rowTop[cr2 + 1] - rowTop[cr2];
+        float x2 = (float)colLeft[cc2], w2 = (float)_cellW;
+        if (_cursorShape == "vertical")
+            ds.FillRectangle(new Windows.Foundation.Rect(x2, rowTop[cr2], Math.Max(1f, w2 * _cursorCellPct / 100f), rh2), GetW2dBrush(rc, _defFg));
+        else if (_cursorShape == "horizontal")
+            ds.FillRectangle(new Windows.Foundation.Rect(x2, rowTop[cr2] + rh2 - Math.Max(1f, (float)rh2 * _cursorCellPct / 100f), w2, Math.Max(1f, (float)rh2 * _cursorCellPct / 100f)), GetW2dBrush(rc, _defFg));
     }
 
     double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
@@ -1130,7 +1144,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
     // Sharp cursor: draw the inverted cursor block on top of the overlay (float / message)
     // so it is never blurred with the parent. When blur is off the cursor stays in the
     // base pass; suppressing it there only while a blur is active avoids a missing cursor.
-    if (_floatBlurAmount > 0 && CursorIsInSharpLayer() && _mgrid.TryGetValue(_curGridId, out var cg))
+    if (_floatBlurAmount > 0 && CursorIsInSharpLayer() && _cursorVisible && _mgrid.TryGetValue(_curGridId, out var cg))
     {
         int lr = _curLocalRow, lc = _curLocalCol;
         if (lr >= 0 && lr < cg.Rows && lc >= 0 && lc < cg.Cols)
@@ -1139,23 +1153,47 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
             if (cr >= 0 && cr < rows && cc >= 0 && cc < cols)
             {
                 double rh = rowTop[cr + 1] - rowTop[cr];
-                ds.FillRectangle(new Windows.Foundation.Rect(colLeft[cc], rowTop[cr], _cellW, rh), GetW2dBrush(rc, _defFg));
                 string t = cg.Cells[lr * cg.Cols + lc].Text;
-                if (t.Length > 0)
+                HlStyle(cg.Cells[lr * cg.Cols + lc].Hl, out var cIt, out var cBd, out var cUl, out var cUc, out var cUd, out var cSt, out _);
+                if (_cursorShape == "block")
                 {
+                    ds.FillRectangle(new Windows.Foundation.Rect(colLeft[cc], rowTop[cr], _cellW, rh), GetW2dBrush(rc, _defFg));
+                    if (t.Length > 0)
+                    {
+                        float yNarrow = (float)(rowTop[cr] + rh / 2 - _liftNarrow);
+                        float yWide = (float)(rowTop[cr] + rh / 2 - _liftWide);
+                        if (IsEmojiPresentation(t))
+                        {
+                            float size = EmojiNaturalSize(t, (float)rh);
+                             ds.DrawText(EmojiDrawText(t), (float)colLeft[cc], (float)(rowTop[cr] + rh / 2 - EmojiLift(t, size)), GetW2dBrush(rc, _defBg), EmojiTf(size));
+                        }
+                        else if (IsWideGlyph(t))
+                            ds.DrawText(t, (float)colLeft[cc], yWide, GetW2dBrush(rc, _defBg), Tf(true, cIt, cBd));
+                        else
+                            ds.DrawText(t, (float)colLeft[cc], yNarrow, GetW2dBrush(rc, _defBg), Tf(false, cIt, cBd));
+                        DrawDecorations(ds, rc, cUl, cUc, cUd, cSt, (float)colLeft[cc], (float)(IsWideGlyph(t) ? _cellW * 2 : _cellW), rowTop[cr], rh, _defBg); // inverted: same color as the glyph
+                    }
+                }
+                else if (t.Length > 0)
+                {
+                    // bar/underline over a float cell: normal ink + thin strip on top.
+                    Color cFg = cg.Cells[lr * cg.Cols + lc].Hl >= 0 && _hlDefs.TryGetValue(cg.Cells[lr * cg.Cols + lc].Hl, out var ch) ? (HlFg(ch) ?? _defFg) : _defFg;
                     float yNarrow = (float)(rowTop[cr] + rh / 2 - _liftNarrow);
                     float yWide = (float)(rowTop[cr] + rh / 2 - _liftWide);
-                    HlStyle(cg.Cells[lr * cg.Cols + lc].Hl, out var cIt, out var cBd, out var cUl, out var cUc, out var cUd, out var cSt, out _);
                     if (IsEmojiPresentation(t))
                     {
                         float size = EmojiNaturalSize(t, (float)rh);
-                         ds.DrawText(EmojiDrawText(t), (float)colLeft[cc], (float)(rowTop[cr] + rh / 2 - EmojiLift(t, size)), GetW2dBrush(rc, _defBg), EmojiTf(size));
+                        ds.DrawText(EmojiDrawText(t), (float)colLeft[cc], (float)(rowTop[cr] + rh / 2 - EmojiLift(t, size)), GetW2dBrush(rc, cFg), EmojiTf(size));
                     }
                     else if (IsWideGlyph(t))
-                        ds.DrawText(t, (float)colLeft[cc], yWide, GetW2dBrush(rc, _defBg), Tf(true, cIt, cBd));
+                        ds.DrawText(t, (float)colLeft[cc], yWide, GetW2dBrush(rc, cFg), Tf(true, cIt, cBd));
                     else
-                        ds.DrawText(t, (float)colLeft[cc], yNarrow, GetW2dBrush(rc, _defBg), Tf(false, cIt, cBd));
-                    DrawDecorations(ds, rc, cUl, cUc, cUd, cSt, (float)colLeft[cc], (float)(IsWideGlyph(t) ? _cellW * 2 : _cellW), rowTop[cr], rh, _defBg); // inverted: same color as the glyph
+                        ds.DrawText(t, (float)colLeft[cc], yNarrow, GetW2dBrush(rc, cFg), Tf(false, cIt, cBd));
+                    DrawDecorations(ds, rc, cUl, cUc, cUd, cSt, (float)colLeft[cc], (float)(IsWideGlyph(t) ? _cellW * 2 : _cellW), rowTop[cr], rh, cFg);
+                    if (_cursorShape == "vertical")
+                        ds.FillRectangle(new Windows.Foundation.Rect(colLeft[cc], rowTop[cr], Math.Max(1f, (float)_cellW * _cursorCellPct / 100f), rh), GetW2dBrush(rc, _defFg));
+                    else if (_cursorShape == "horizontal")
+                        ds.FillRectangle(new Windows.Foundation.Rect(colLeft[cc], rowTop[cr] + rh - Math.Max(1f, (float)rh * _cursorCellPct / 100f), (float)_cellW, Math.Max(1f, (float)rh * _cursorCellPct / 100f)), GetW2dBrush(rc, _defFg));
                 }
             }
         }
@@ -1181,7 +1219,7 @@ private static Color UnpackPacked(int p) => Color.FromArgb((byte)(p >> 24), (byt
 private Cell[]? _activeRenderCells; // set by RenderCore each frame (composited multigrid buffer)
 private Color CellBg(int r, int c, int curIdx)
 {
-    if (r * _screenCols + c == curIdx && curIdx >= 0) return _defFg; // inverted cursor: default fg as block
+    if (r * _screenCols + c == curIdx && curIdx >= 0 && _cursorShape == "block") return _defFg; // inverted cursor: default fg as block (bar/underline shapes draw their own thin fill after text)
     var buf = _activeRenderCells ?? _cells;
     var cell = buf[r * _screenCols + c];
     if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) { var cb = HlBg(h); if (cb is not null) return cb.Value; }
@@ -1535,9 +1573,35 @@ private static Color HintColor(int slot, int value)
     byte b = (byte)(value & 0xFF);
     return Color.FromArgb(a, r, g, b);
 }
-private void OnClosed(object sender, object e)
+// Cursor blink control for the active mode (mode_info_set params). Steady when blinkoff==0;
+// otherwise a thread-pool timer toggles _cursorVisible and posts a repaint. The timer fires on a
+// pool thread — only the bool flip + ScheduleRender happen there, both safe off-UI-thread.
+private int CurrentModeIdx() => _curModeIdx;
+private void ApplyCursorBlink(int mi)
+{
+    _blinkTimer?.Dispose(); _blinkTimer = null;
+    if (mi < 0 || mi >= _modeInfos.Count) { _cursorVisible = true; return; }
+    var info = _modeInfos[mi];
+    int wait = Math.Max(0, info.BlinkWait), on = Math.Max(1, info.BlinkOn), off = Math.Max(1, info.BlinkOff);
+    if (off == 0) { _cursorVisible = true; return; } // no blink for this mode
+    _cursorVisible = info.BlinkStart; // blinkstart: begin in the "on" phase
+    var t = new System.Threading.Timer(_ =>
     {
-        try { _client?.Dispose(); } catch { }
-        try { if (_nvimProc is not null && !_nvimProc.HasExited) _nvimProc.Kill(true); } catch { }
-    }
+        lock (_blinkTimerLock)
+        {
+            if (off == 0) return;
+            _cursorVisible = !_cursorVisible;
+            ScheduleRender();
+        }
+    }, null, info.BlinkStart ? on : wait, on + off); // first flip ends the starting phase
+    lock (_blinkTimerLock) { _blinkTimer?.Dispose(); _blinkTimer = t; }
+}
+private readonly object _blinkTimerLock = new();
+
+private void OnClosed(object sender, object e)
+{
+    try { _blinkTimer?.Dispose(); } catch { }
+    try { _client?.Dispose(); } catch { }
+    try { if (_nvimProc is not null && !_nvimProc.HasExited) _nvimProc.Kill(true); } catch { }
+}
 }

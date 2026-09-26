@@ -645,11 +645,46 @@ public partial class MainWindow
                 }
                 break;
             case "mode_change":
-                // Each tuple: [mode_name, mode_idx] — e.g. ["cmdline", 7].
+                // Each tuple: [mode_name, mode_idx] — e.g. ["cmdline", 7]. Resolve the cursor
+                // shape + blink params from the stored mode_info_set entry for this idx.
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 1) continue;
                     _modeName = t[0]?.ToString() ?? "normal";
+                    int mi = t.Length > 1 ? ToInt(t[1]) : -1;
+                    _curModeIdx = mi;
+                    if (mi >= 0 && mi < _modeInfos.Count)
+                    {
+                        var info = _modeInfos[mi];
+                        _cursorShape = string.IsNullOrEmpty(info.Shape) ? "block" : info.Shape;
+                        _cursorCellPct = info.Pct > 0 ? Math.Clamp(info.Pct, 1, 100) : 100;
+                    }
+                    else { _cursorShape = "block"; _cursorCellPct = 100; } // no info yet: default block
+                    ApplyCursorBlink(mi);
+                    ScheduleRender();
+                }
+                break;
+            case "mode_info_set":
+                // Each tuple: [info[], mode_idx] — info entries are dicts with cursor_shape,
+                // cell_percentage, blinkwait/blinkon/blinkoff (ms), blinkstart. Store for the
+                // current idx and re-apply if it matches the active mode.
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 2) continue;
+                    int mi = ToInt(t[1]);
+                    string shape = "block"; int pct = 100, bw = 0, bon = 0, boff = 0; bool bstart = false;
+                    if (t[0] is object?[] infos && infos.Length > 0 && infos[0] is Dictionary<string, object?> d)
+                    {
+                        shape = d.TryGetValue("cursor_shape", out var cs) ? cs?.ToString() ?? "block" : "block";
+                        pct = ToInt(d.TryGetValue("cell_percentage", out var cp) ? cp : null);
+                        bw = ToInt(d.TryGetValue("blinkwait", out var bwt) ? bwt : null);
+                        bon = ToInt(d.TryGetValue("blinkon", out var bo) ? bo : null);
+                        boff = ToInt(d.TryGetValue("blinkoff", out var bf) ? bf : null);
+                        bstart = d.TryGetValue("blinkstart", out var bs) && bs is bool bsb && bsb;
+                    }
+                    while (_modeInfos.Count <= mi) _modeInfos.Add(("block", 100, 0, 0, 0, false));
+                    _modeInfos[mi] = (shape, pct, bw, bon, boff, bstart);
+                    if (mi == CurrentModeIdx()) ApplyCursorBlink(mi); // active mode redefined: refresh shape/blink
                     ScheduleRender();
                 }
                 break;

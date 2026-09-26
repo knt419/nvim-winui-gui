@@ -79,6 +79,18 @@ public partial class MainWindow : Window
     private int _curLocalCol = -1;
     // Current nvim mode name from mode_change (e.g. "normal", "cmdline", "search").
     private string _modeName = "normal";
+    // Last mode_idx from mode_change — indexes into _modeInfos for cursor shape/blink.
+    private int _curModeIdx = -1;
+
+    // Cursor shape per mode, from mode_info_set: "block" / "horizontal" / "vertical".
+    // cell_percentage scales the bar/underline thickness (% of the cell dimension).
+    private readonly System.Collections.Generic.List<(string Shape, int Pct, int BlinkWait, int BlinkOn, int BlinkOff, bool BlinkStart)> _modeInfos = new();
+    private string _cursorShape = "block";
+    private int _cursorCellPct = 100;
+    // Blink state: off (BlinkOff=0) means steady. Toggled by a timer on the thread pool;
+    // ScheduleRender posts the repaint to the UI thread.
+    private bool _cursorVisible = true;
+    private System.Threading.Timer? _blinkTimer;
 
     // Font fallback chains. The first family is the user's guifont; the rest are system fonts that
     // supply glyphs the primary lacks, so wide/CJK/symbol code points don't render as tofu:
