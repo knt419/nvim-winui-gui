@@ -187,6 +187,7 @@ public partial class MainWindow
     {
         if (!_mgrid.TryGetValue(id, out var g)) return;
         if (rows == 0) return;
+        if (g.Cells.Length != g.Rows * g.Cols) return; // never sized: no storage to shift
         top   = Math.Max(0, Math.Min(top, g.Rows));
         bot   = Math.Max(0, Math.Min(bot, g.Rows));
         left  = Math.Max(0, Math.Min(left, g.Cols));
@@ -398,6 +399,10 @@ public partial class MainWindow
         {
             if (g.PosRow >= int.MaxValue) continue; // hidden
             if (skipOverlayLayers && MGridIsSharpLayer(g)) continue; // float/msg → sharp layer after blur
+            // A positioned-but-never-sized grid (win_pos/msg_set_pos arrived before any
+            // grid_resize, e.g. message grid 0 at startup under --embed) has no cell storage
+            // yet — indexing it would throw and blank the whole frame. Nothing to draw: skip.
+            if (g.Cells.Length == 0) continue;
             for (int r = 0; r < g.Rows; r++)
             {
                 int tr = g.PosRow + r;

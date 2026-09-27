@@ -1027,6 +1027,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
     foreach (var g in _mgrid.Values.OrderBy(g => g.ZIndex))
     {
         if (!MGridIsSharpLayer(g)) continue;
+        if (g.Cells.Length == 0) continue; // positioned but never sized (see BuildRenderCells): nothing to draw
         for (int r = 0; r < g.Rows; r++)
         {
             int tr = g.PosRow + r;
@@ -1148,7 +1149,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
     if (_floatBlurAmount > 0 && CursorIsInSharpLayer() && _cursorVisible && _mgrid.TryGetValue(_curGridId, out var cg))
     {
         int lr = _curLocalRow, lc = _curLocalCol;
-        if (lr >= 0 && lr < cg.Rows && lc >= 0 && lc < cg.Cols)
+        if (lr >= 0 && lr < cg.Rows && lc >= 0 && lc < cg.Cols && lr * cg.Cols + lc < cg.Cells.Length)
         {
             int cr = cg.PosRow + lr, cc = cg.PosCol + lc;
             if (cr >= 0 && cr < rows && cc >= 0 && cc < cols)

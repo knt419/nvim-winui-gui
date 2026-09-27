@@ -37,10 +37,16 @@ public partial class MainWindow
                 return;
             }
             int port = FindFreePort();
-            // --headless: without it, nvim's console-UI init path hangs startup when all stdio is
-            // redirected (no real console) and the --listen socket never opens. Verified empirically 2026-08-24.
+            // --embed (implies --headless): the documented GUI-backend mode, same recipe as
+            // Neovide (piped stdio + CREATE_NO_WINDOW). Verified empirically 2026-09-27
+            // (nvim 0.12.5, Win11 25H2): with plain --headless, :terminal children silently
+            // miss the ConPTY console (nushell REPL exits at once with "STDIN is not a TTY",
+            // blank screen, dead input); with --embed the terminal works end to end (shell
+            // lives, prompt/echo/output render, input executes). Our RPC stays on the TCP
+            // --listen socket; the embed stdio channel simply idles (stdin pipe held open,
+            // never written; stdout never read because nvim only writes when spoken to).
             string extraArgs = Environment.GetEnvironmentVariable("NVIM_WINUI_ARGS") ?? "";
-            var psi = new ProcessStartInfo(nvimPath, $"--listen 127.0.0.1:{port} --headless {extraArgs}")
+            var psi = new ProcessStartInfo(nvimPath, $"--embed --listen 127.0.0.1:{port} {extraArgs}")
             {
                 UseShellExecute = false,
                 RedirectStandardInput = true,
