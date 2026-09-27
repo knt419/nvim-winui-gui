@@ -362,7 +362,7 @@ private void RenderNow()
 private void EnsureTextFormats()
 {
     string nk = _narrowFont + "@" + _narrowSize;
-    if (nk != _tfKeyNarrow) { _tfNarrow = MakeTf(nk, false, false); _tfKeyNarrow = nk; _natLineHNarrow = -1; _liftNarrow = -1; _fontAdvance = -1; _tfStyleCache.Clear(); LogStartup($"TF narrow={_narrowFont.Split(',')[0]}@{_narrowSize}"); }
+    if (nk != _tfKeyNarrow) { _tfNarrow = MakeTf(nk, false, false); _tfKeyNarrow = nk; _natLineHNarrow = -1; _liftNarrow = -1; _fontAdvance = -1; _tfStyleCache.Clear(); _glyphAdv.Clear(); _glyphLiftN.Clear(); LogStartup($"TF narrow={_narrowFont.Split(',')[0]}@{_narrowSize}"); }
     string wk = _wideFont + "@" + _wideSize;
     if (wk != _tfKeyWide) { _tfWide = MakeTf(wk, false, false); _tfKeyWide = wk; _natLineHWide = -1; _liftWide = -1; LogStartup($"TF wide={_wideFont.Split(',')[0]}@{_wideSize}"); }
 }
@@ -1366,7 +1366,7 @@ private static bool IsEmojiPresentation(string s)
 }
 
 private readonly Dictionary<float, Microsoft.Graphics.Canvas.Text.CanvasTextFormat> _tfEmoji = new();
-private readonly Dictionary<int, float> _emojiLift = new();
+private readonly Dictionary<(int cp, float size), float> _emojiLift = new();
 
 private Microsoft.Graphics.Canvas.Text.CanvasTextFormat EmojiTf(float size)
 {
@@ -1391,7 +1391,9 @@ private Microsoft.Graphics.Canvas.Text.CanvasTextFormat EmojiTf(float size)
 private float EmojiLift(string s, float size)
 {
     int cp = FirstCodePoint(s);
-    if (_emojiLift.TryGetValue(cp, out var cached)) return cached;
+    // Key on (cp, size): lift is proportional to the font size (= row height), so a value cached
+    // at one rh must not be reused when the grid re-sizes — that was shifting emoji by several px.
+    if (_emojiLift.TryGetValue((cp, size), out var cached)) return cached;
     float lift;
     try
     {
@@ -1400,7 +1402,7 @@ private float EmojiLift(string s, float size)
         lift = (float)(b.Y + b.Height / 2);
     }
     catch { lift = 0.0f; } // measurement failure -> draw with layout top at the cell center line
-    _emojiLift[cp] = lift;
+    _emojiLift[(cp, size)] = lift;
     return lift;
 }
 
@@ -1481,7 +1483,14 @@ private float MeasureGlyphAdv(int cp, string s)
     try
     {
         using var l = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(GlyphCanvas, s, _tfNarrow!, 0, 0);
-        a = (float)l.LayoutBounds.Width; // ink width; spaces are special-cased in IsGridAlignedNarrow
+        // ADVANCE, not ink width: LayoutBounds.Width is the INK extent and varies per glyph even in a
+        // monospace font ('i'/'.' are ~85% of the cell), which made IsGridAlignedNarrow reject every
+        // Latin char (|0.85-1.0| > 0.10) and scatter them onto individually-measured lifts — the
+        // "height differs between characters" jitter on Maple Mono. LayoutBoundsIncludingTrailingWhitespace
+        // extends to the end of the glyph's advance, so it is exactly one cell for every glyph a
+        // monospace font owns; only glyphs whose ADVANCE strays (proportional fonts, fallback symbols)
+        // get individual placement.
+        a = (float)l.LayoutBoundsIncludingTrailingWhitespace.Width;
     }
     catch { a = (float)_cellW; } // measurement failure -> assume aligned (conservative: stays in runs)
     _glyphAdv[cp] = a;
