@@ -809,22 +809,9 @@ private static double ParseFloatBlur()
                     realCol = c2;
                     break;
                 }
-                // Uniform trailing blank. nvim allocates 2 cells for ✅/❌ but 3 for ⚠️+VS16 (and each
-                // codepoint's ink width differs), so drawing every emoji at its own cell origin leaves a
-                // different amount of whitespace before the following text on each line ("some lines have
-                // a gap, some don't"). Right-align instead: place the emoji so its TIGHT ink right edge
-                // lands a fixed small gap left of the next real-text column — every line then shows the
-                // same blank. Clamped to the emoji's own cell origin (never shifted LEFT onto previous
-                // content); for a 2-cell ✅ whose ink nearly fills both cells the clamp keeps it at its
-                // origin and the residual gap is ~0, matching the others within a couple of px. The
-                // reserved blank span below still comes from LayoutBounds so no real text is swallowed.
-                float xEm = (float)colLeft[c];
-                if (realCol >= 0)
-                {
-                    float inkW = EmojiInkW(txt, size);
-                    if (inkW > 0)
-                        xEm = Math.Max(xEm, (float)(colLeft[realCol] - _cellW * 0.25f - inkW));
-                }
+                // Draw at nvim's own cell allocation, natural origin: ✅/❌ occupy 2 cells, ⚠️+VS16
+                // occupies 3 — the grid already carries that spacing, so no per-glyph x adjustment.
+                // (A previous right-align-to-following-text pass shifted ⚠️ backwards; removed.)
                 float adv = EmojiAdvance(txt, size);
                 float inkEnd = (float)colLeft[c] + adv;
                 const float blankMargin = 1.0f;
@@ -832,8 +819,8 @@ private static double ParseFloatBlur()
                 while (occ < cols - c && colLeft[c + occ] < inkEnd + blankMargin) occ++;
                 if (realCol >= 0 && occ > realCol - c) occ = realCol - c; // never swallow real text
                 float yEm = (float)(rowTop[r] + rh / 2 - EmojiLift(txt, size));
-                if (outer && _diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} inkW={adv:F2}px size={size:F2}R realCol={realCol} cells={occ} xEm={xEm:F2} yEm={yEm:F2}");
-                ds.DrawText(EmojiDrawText(txt), xEm, yEm, GetW2dBrush(rc, fg), EmojiTf(size));
+                if (outer && _diagEnabled && r == curRow) LogStartup($"EMOJI-CELL row={r} col={c} txt='{txt}' cp=U+{FirstCodePoint(txt):X4} inkW={adv:F2}px size={size:F2}R realCol={realCol} cells={occ} xEm={(float)colLeft[c]:F2} yEm={yEm:F2}");
+                ds.DrawText(EmojiDrawText(txt), (float)colLeft[c], yEm, GetW2dBrush(rc, fg), EmojiTf(size));
                 c += occ; // this cell + the reserved blank span
                 continue;
             }
@@ -1448,20 +1435,6 @@ private float EmojiAdvance(string s, float size)
     }
     catch { }
     return 0.0f; // measurement failure -> fall back to a single cell
-}
-
-// TIGHT ink width of the color emoji (DrawBounds = visible-pixel rect), used to right-align every
-// emoji's trailing gap uniformly. LayoutBounds includes font bearings and varies per codepoint, so
-// it would leave different amounts of blank space after ✅ vs ⚠️; DrawBounds is the real glyph span.
-private float EmojiInkW(string s, float size)
-{
-    try
-    {
-        using var l = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(GlyphCanvas, EmojiDrawText(s), EmojiTf(size), 5000, 0);
-        return (float)l.DrawBounds.Width;
-    }
-    catch { }
-    return 0.0f;
 }
 
 // DIAG only: asynchronously save an offscreen render target to a PNG (Win2D has no synchronous
