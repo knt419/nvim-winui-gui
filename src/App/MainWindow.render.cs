@@ -789,14 +789,16 @@ private static double ParseFloatBlur()
 
             if (IsEmojiPresentation(txt))
             {
-                // Color-emoji cell. Never related-fit the glyph first: draw it at its NATURAL display size
-                // (ink fitted to the ROW HEIGHT — no width squeezing) whenever the following text
-                // leaves room. The reserved blank is then sized from the ink's RIGHT EDGE: cells
-                // are reserved (rendered as space) until the next column's left edge clears the ink
-                // end by a margin. If a REAL (non-blank) character already sits inside the ink's
-                // reach — nvim tight-packed the emoji, e.g. a 1-cell allocation — the emoji is
-                // SHRUNK to fit up to that character instead, so the following text always stays
-                // visible (no swallowed 'O'). The first visible cell past the ink always shows.
+                // Color-emoji cell. Always draw at the NATURAL display size (ink fitted to the ROW
+                // HEIGHT — no width squeezing, no shrinking for following text). Neovide shapes every
+                // glyph at one font size regardless of what follows; our old "shrink to fit the room"
+                // branch made an emoji whose line had trailing text render ~35% smaller than one on a
+                // bare line (checkhealth: 'lspconfig:' ✅ full-size, 'OK ...' ✅ shrunk). The reserved
+                // blank is sized from the ink's RIGHT EDGE: cells are reserved (rendered as space) until
+                // the next column's left edge clears the ink end by a margin. If a REAL (non-blank)
+                // character already sits inside the ink's reach — nvim tight-packed the emoji, e.g. a
+                // 1-cell allocation — the reservation is capped at that column so the following text is
+                // never swallowed; the glyph itself keeps its natural size and may overlap slightly.
                 float size = EmojiNaturalSize(txt, (float)rh);
                 float adv = EmojiAdvance(txt, size);
                 int realCol = -1;
@@ -807,13 +809,6 @@ private static double ParseFloatBlur()
                     if (IsSelectorOnly(t2)) continue; // VS16/ZWJ-only cell: no ink, absorbed by this emoji
                     realCol = c2;
                     break;
-                }
-                if (realCol >= 0)
-                {
-                    float avail = (float)(colLeft[realCol] - colLeft[c]);
-                    if (avail > 0 && adv > avail)
-                        size = Math.Max(3f, size * avail / adv); // tight layout: fit the emoji to the room
-                    adv = EmojiAdvance(txt, size);
                 }
                 float inkEnd = (float)colLeft[c] + adv;
                 const float blankMargin = 1.0f;
@@ -1406,12 +1401,12 @@ private float EmojiLift(string s, float size)
     return lift;
 }
 
- // Emoji display size: the color glyph is drawn at the ROW HEIGHT (fills the em box
- // exactly). Never scale down based on DrawBounds/LayoutBounds height — those include
- // font bearings and vary wildly between mono/color variants of the same codepoint
- // (e.g. U+26A0 alone vs U+26A0+U+FE0F), which causes the glyph to be shrunk to a
- // few pixels. The caller reserves blank cells for horizontal overflow via EmojiAdvance.
- private static float EmojiNaturalSize(string s, float rh) => rh;
+ // Emoji display size: ~70% of the ROW HEIGHT (user preference — full row height looked too big;
+ // Neovide renders its emoji at roughly this proportion). Never scale down based on DrawBounds/
+ // LayoutBounds height or for following text — those include font bearings and vary wildly between
+ // mono/color variants of the same codepoint, which caused per-line size differences. The caller
+ // reserves blank cells for horizontal overflow via EmojiAdvance.
+ private static float EmojiNaturalSize(string s, float rh) => rh * 0.7f;
 
  // Ensure the glyph is rendered as a COLOR emoji (not a monochrome outline).
  // Without U+FE0F (VS16), fonts like Segoe UI Emoji may pick the text/mono
