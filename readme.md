@@ -39,7 +39,7 @@ The design merges both parents: the **Neovim "N"** (blue left stem + green body,
 | `v4` | **WinUI hexagon tile** (flat top/bottom, pointed sides, radial `#5AA5E8` → `#0B47A5`), white N |
 | `v5` | WinUI hexagon tile: the reference's `< >` chevrons + the N's diagonal as the green slash |
 | `v6` | squircle tile in the WinUI reference's radial blue gradient (no green), white N |
-| `v7` **(installed)** | v5 palette + the **Neovim N**: white stems, green diagonal band |
+| `v7` | v5 palette + the **Neovim N**: white stems, green diagonal band |
 | `v8` | v5 palette + the Neovim N in Neovim's own colour placement: green left stem, white rest |
 | `v9` | v5 palette + the Neovim N as a **hollow outline** (white stroke, green diagonal inside) |
 | `v10` | **v1 + white `< >` brackets** flanking the N (arm slope 0.591 from the WinUI reference; vertex at ±0.400, arms ±0.150 tall, 0.075 thick, **arm ends cut vertically**) |
@@ -47,7 +47,7 @@ The design merges both parents: the **Neovim "N"** (blue left stem + green body,
 | `v12` | v10's proportions kept at every size (no optical drop of the brackets) |
 | `v13` | vertical ends, thinner stroke (0.050 thick, arms ±0.150) — the tip's cut is shorter |
 | `v14` | vertical ends, longer arms (0.065 thick, arms ±0.220) — the cut is half the arm, most bracket-like |
-| `v15` | vertical ends with 45° arms (0.075 thick, arms ±0.135) — same thickness, much shorter cut |
+| `v15` **(installed)** | vertical ends with 45° arms (0.075 thick, arms ±0.135) — same thickness, much shorter cut |
 
 `v10` uses optical sizing: at ≤24px the brackets only add mush, so they are dropped and the N is enlarged (0.68 vs 0.54 of the tile height) — `v13`–`v15` follow the same rule, while `v12` keeps the brackets at every size for comparison.
 
