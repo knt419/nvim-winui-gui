@@ -96,6 +96,7 @@ public partial class MainWindow
         int maxRow = buf.Length / bufCols;
         if (rowIdx >= maxRow) return;
         int col = colStart;
+        bool absorbNext = false; // fold the next selector-only entry into the preceding emoji's span
         foreach (var cellRaw in cellArray)
         {
             string txt;
@@ -112,6 +113,12 @@ public partial class MainWindow
             }
             else continue;
 
+            // nvim splits VS16/ZWJ off a grapheme into its own grid cell (⚠️ -> ['⚠','\uFE0F']).
+            // The emoji head already reserves EmojiCells cells, so fold the selector in instead of
+            // letting it claim a column of its own — that would push every later glyph one cell right.
+            if (absorbNext && IsSelectorOnly(txt)) continue;
+            absorbNext = false;
+
             for (int r = 0; r < repeatCount && col < bufCols; r++)
             {
                 int p = 0;
@@ -123,10 +130,17 @@ public partial class MainWindow
                     else
                         { g = txt[p].ToString(); p += 1; }    // BMP code point
                     if (col >= bufCols) break;
+                    // A VS16/ZWJ code point riding ALONE inside a cell entry (nvim packs
+                    // "⚠️" = U+26A0 U+FE0F into one cell) is not a glyph: it must claim no
+                    // column, or it pushes every later cell one column right. IsEmojiPresentation
+                    // returns TRUE for it (it tests for FE0F), so the wide width would be applied
+                    // here and the line would be 2 cells wider than the same line using "✅".
+                    if (IsSelectorOnly(g)) continue;
                     var head = buf[rowIdx * bufCols + col];
                     head.Text = g;                            // the glyph (never empty here)
                     head.Hl = hl >= 0 ? hl : -1;              // only apply valid highlight IDs
-                    int w = IsWideGlyph(g) ? 2 : 1;           // display width in cells
+                    int w = AppGlyphWidth(g);                 // display width in cells (emoji=EmojiCells, wide=2, else 1)
+                    if (IsEmojiPresentation(g)) absorbNext = true;
                     col++;
                     for (int k = 1; k < w && col < bufCols; k++)
                     {
@@ -138,6 +152,66 @@ public partial class MainWindow
                 }
             }
         }
+    }
+
+    // Number of APP cells reserved per emoji-presentation glyph. Single source of truth: the cell
+    // write loop, the nvim<->app column remap, the cursor, and the mouse all read this, so changing
+    // the allocation here moves every path together. 2 matches nvim's own grid width for these
+    // glyphs, so the remap becomes the identity for emoji and the two spaces stay in lockstep.
+    internal const int EmojiCells = 2;
+
+    // Display width of one glyph in APP cells: every emoji-presentation glyph gets a uniform
+    // EmojiCells-cell allocation (user requirement — ✅/❌/⚠️ all render identically wide),
+    // CJK/wide = 2, narrow = 1. nvim's own grid counts these emojis as 2 columns; the divergence is
+    // bridged by NvimColToAppCol / AppColToNvimCol for cursor and mouse events.
+    private static int AppGlyphWidth(string g) => IsEmojiPresentation(g) ? EmojiCells : (IsWideGlyph(g) ? 2 : 1);
+
+    // nvim-grid width of one cell's text: covered tails ("") carry no column of their own — they
+    // are counted by the head that wrote them. Emoji heads count as 2 in nvim's grid (verified via
+    // nvim_strwidth on 0.12.5 for ✅/❌/⚠️+VS16), CJK wide = 2, narrow = 1.
+    private static int NvimWidthOf(string t)
+    {
+        if (t.Length == 0) return 0;
+        if (IsEmojiPresentation(t)) return 2;
+        if (IsWideGlyph(t)) return 2;
+        return 1;
+    }
+
+    // App column holding nvim column `ncol` on this row. Derived from cell CONTENTS (emoji head =
+    // non-empty IsEmojiPresentation cell, covered tails are ""), so it stays correct across
+    // scrolls/clears/resizes with no bookkeeping. A cursor inside a glyph's nvim span lands on the
+    // matching app column of that span (nvim col c+1 of ✅ -> app col head+1).
+    private static int NvimColToAppCol(Cell[] cells, int cols, int row, int ncol)
+    {
+        if (cols <= 0 || row < 0 || row * cols >= cells.Length) return Math.Clamp(ncol, 0, Math.Max(0, cols - 1));
+        int app = 0, nv = 0;
+        for (; app < cols; app++)
+        {
+            string t = cells[row * cols + app].Text;
+            if (t.Length == 0) continue; // covered tail of the current glyph span
+            int w = NvimWidthOf(t);
+            if (ncol >= nv && ncol < nv + w) return Math.Min(app + (ncol - nv), cols - 1);
+            nv += w;
+        }
+        return Math.Clamp(ncol, 0, cols - 1); // past the last glyph: identity clamp
+    }
+
+    // Inverse of NvimColToAppCol for mouse clicks: any app column inside a glyph's span maps to
+    // that glyph's STARTING nvim column (clicking anywhere on ✅ positions at its first cell).
+    private static int AppColToNvimCol(Cell[] cells, int cols, int row, int acol)
+    {
+        if (cols <= 0 || row < 0 || row * cols >= cells.Length) return Math.Clamp(acol, 0, Math.Max(0, cols - 1));
+        int nv = 0;
+        for (int a = 0; a <= Math.Min(acol, cols - 1); a++)
+        {
+            string t = cells[row * cols + a].Text;
+            if (t.Length == 0) continue; // tail: belongs to the current span's start col
+            int w = NvimWidthOf(t);
+            int appW = AppGlyphWidth(t);
+            if (acol >= a && acol < a + appW) return Math.Clamp(nv, 0, cols - 1);
+            nv += w;
+        }
+        return Math.Clamp(nv, 0, cols - 1);
     }
 
     private MGrid GetOrCreateMGrid(int id)
@@ -170,6 +244,18 @@ public partial class MainWindow
     // grid_line [grid_id, row, col_start, cells] into a per-window grid buffer.
     private void MGridLine(int id, int rowIdx, int colStart, object?[] cellArray)
     {
+        if (_diagEnabled)
+        {
+            var sbr = new System.Text.StringBuilder();
+            foreach (var cr in cellArray)
+            {
+                if (cr is string ss) sbr.Append($"'{ss}' ");
+                else if (cr is object?[] ce2)
+                    sbr.Append("[" + string.Join(",", ce2.Select(x => x?.ToString() ?? "null")) + "] ");
+                else sbr.Append($"[{System.Convert.ToString(cr)}] ");
+            }
+            LogStartup($"GRIDLINE-RAW grid={id} row={rowIdx} colstart={colStart} cells=[{sbr}]");
+        }
         if (!_mgrid.TryGetValue(id, out var g)) return;
         if (rowIdx < 0 || rowIdx >= g.Rows) return;
         WriteCellArray(g.Cells, g.Cols, rowIdx, colStart, cellArray, ref g.LastHl);
@@ -458,10 +544,16 @@ public partial class MainWindow
         oRow = row; oCol = col;
         if (_mgrid.TryGetValue(gridId, out var g))
         {
+            // nvim's column is in NVIM-grid space (emoji=2 cols); the app buffer allocates EmojiCells
+            // per emoji. Remap through the row contents so the block lands on the right cell.
+            int localApp = NvimColToAppCol(g.Cells, g.Cols, row, col);
             oRow = g.PosRow + row;
-            oCol = g.PosCol + col;
+            oCol = g.PosCol + localApp;
             return true;
         }
+        // grid 1 / unknown -> already outer-frame coords (remap the emoji span there too).
+        if (_cells.Length > 0 && row >= 0 && row < _rows)
+            oCol = NvimColToAppCol(_cells, _cols, row, col);
         return false; // grid 1 / unknown -> already outer-frame coords
     }
 }

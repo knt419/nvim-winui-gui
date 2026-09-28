@@ -98,6 +98,9 @@ public partial class MainWindow
         // so a plain division lands on the right cell.
         int col = Math.Clamp((int)(pos.X / _cellW), 0, Math.Max(0, _cols - 1));
         int row = Math.Clamp((int)(pos.Y / _cellH), 0, Math.Max(0, _rows - 1));
+        // App columns -> nvim grid columns: an emoji spans EmojiCells app cells but only 2 in nvim's
+        // own grid, so a click on the span's tail must report the glyph's starting nvim column.
+        if (_cells.Length > 0 && row < _rows) col = AppColToNvimCol(_cells, _cols, row, col);
         LogStartup($"MOUSE {button} {action} pos=({pos.X:F0},{pos.Y:F0}) -> cell ({row},{col}) mod={MouseModifiers()}");
         try
         {

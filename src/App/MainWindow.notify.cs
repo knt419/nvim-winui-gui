@@ -318,39 +318,42 @@ public partial class MainWindow
     // the actual XAML update onto the UI thread via _uiSyncCtx.
     private async Task RefreshGuifontAsync()
     {
-        string? guifont = null, guifontwide = null;
         try
         {
-            // guifont/guifontwide are OPTIONS (&guifont), not Vimscript variables — read them with
-            // nvim_get_option_value. (nvim_get_value reads g:guifont, which is nil unless the user
-            // happens to set a variable of that name.) Empty opts {} = global scope.
-            object? gf = await _client!.CallAsync("nvim_get_option_value", "guifont", new Dictionary<string, object?>());
-            if (gf is string s) guifont = s;
-            object? gfw = await _client.CallAsync("nvim_get_option_value", "guifontwide", new Dictionary<string, object?>());
-            if (gfw is string s2) guifontwide = s2;
+            string? guifont = null, guifontwide = null;
+            try
+            {
+                // guifont/guifontwide are OPTIONS (&guifont), not Vimscript variables — read them with
+                // nvim_get_option_value. (nvim_get_value reads g:guifont, which is nil unless the user
+                // happens to set a variable of that name.) Empty opts {} = global scope.
+                object? gf = await _client!.CallAsync("nvim_get_option_value", "guifont", new Dictionary<string, object?>());
+                if (gf is string s) guifont = s;
+                object? gfw = await _client.CallAsync("nvim_get_option_value", "guifontwide", new Dictionary<string, object?>());
+                if (gfw is string s2) guifontwide = s2;
+            }
+            catch { /* non-fatal: keep current fonts */ }
+
+            LogStartup($"guifont={guifont ?? ""} guifontwide={guifontwide ?? ""}");
+
+            string newNarrow, newWide; double newNSize, newWSize;
+            ParseNvimFont(guifont, NarrowFallback, out newNarrow, out newNSize);
+            if (!string.IsNullOrEmpty(guifontwide))
+                ParseNvimFont(guifontwide, WideFallback, out newWide, out newWSize);
+            else { newWide = newNarrow; newWSize = newNSize; }
+
+            // Apply + re-render only on change so the 1s re-read is a no-op when fonts are stable.
+            if (newNarrow == _narrowFont && newNSize == _narrowSize &&
+                newWide == _wideFont && newWSize == _wideSize) return;
+
+            LogStartup($"guifont APPLIED: narrow={newNarrow}@{newNSize} wide={newWide}@{newWSize}");
+            _narrowFont = newNarrow; _narrowSize = newNSize;
+            _wideFont = newWide; _wideSize = newWSize;
+            // Derive the reference cell size from the real font metrics so window<->grid conversions
+            // track the guifont (UI thread: MeasureRefCell creates a XAML TextBlock).
+            UiPostAsync(MeasureRefCell);
+            ScheduleRender();
         }
-        catch { /* non-fatal: keep current fonts */ }
-
-        LogStartup($"guifont={guifont ?? ""} guifontwide={guifontwide ?? ""}");
-
-        string newNarrow, newWide; double newNSize, newWSize;
-        ParseNvimFont(guifont, NarrowFallback, out newNarrow, out newNSize);
-        if (!string.IsNullOrEmpty(guifontwide))
-            ParseNvimFont(guifontwide, WideFallback, out newWide, out newWSize);
-        else { newWide = newNarrow; newWSize = newNSize; }
-
-        // Apply + re-render only on change so the 1s re-read is a no-op when fonts are stable.
-        if (newNarrow == _narrowFont && newNSize == _narrowSize &&
-            newWide == _wideFont && newWSize == _wideSize) return;
-
-        LogStartup($"guifont APPLIED: narrow={newNarrow}@{newNSize} wide={newWide}@{newWSize}");
-        _narrowFont = newNarrow; _narrowSize = newNSize;
-        _wideFont = newWide; _wideSize = newWSize;
-        // Derive the reference cell size from the real font metrics so window<->grid conversions
-        // track the guifont (UI thread: MeasureRefCell creates a XAML TextBlock).
-        UiPostAsync(MeasureRefCell);
-        ScheduleRender();
-        FlushRender(); // runs on the UI thread (async continuation) — not inside HandleNotification
+        catch (Exception ex) { LogCritical("RefreshGuifont failed: " + ex); }
     }
 
     // Diagnostic logging (file-based). OFF by default — set NVIM_WINUI_DIAG=1 to enable. The hot
@@ -511,6 +514,7 @@ public partial class MainWindow
 
                     if (rowIdx < 0 || rowIdx >= _rows) continue;
                     int col = colStart;
+                    bool absorbNext = false; // fold the next selector-only entry into the preceding emoji's span
                     if (_diagEnabled)
                     {
                         var sbr = new System.Text.StringBuilder();
@@ -539,10 +543,17 @@ public partial class MainWindow
                         }
                         else continue;
 
-                        // Place character-by-character so wide glyphs (CJK/emoji, display width 2)
-                        // advance the column by 2 and their tail cell is marked covered-blank. The
-                        // old code advanced col by 1 per entry, which desynced every column after a
-                        // wide char from nvim's grid -> misalignment + tofu in the tail cells.
+                        // nvim splits VS16/ZWJ off a grapheme into its own grid cell (⚠️ -> ['⚠','\uFE0F']).
+                        // The emoji head already reserves EmojiCells cells, so fold the selector in
+                        // instead of letting it claim a column of its own — that would push every
+                        // later glyph one cell right.
+                        if (absorbNext && IsSelectorOnly(txt)) continue;
+                        absorbNext = false;
+
+                        // Place character-by-character so wide glyphs advance the column by their display width
+                        // and their tail cells are marked covered-blank: emoji-presentation glyphs get a uniform
+                        // EmojiCells allocation, CJK/wide 2. The old code advanced col by 1 per entry, which desynced
+                        // every column after a wide char from nvim's grid -> misalignment + tofu in the tail cells.
                         for (int r = 0; r < repeatCount && col < _cols; r++)
                         {
                             int p = 0;
@@ -554,10 +565,17 @@ public partial class MainWindow
                                 else
                                     { g = txt[p].ToString(); p += 1; }    // BMP code point
                                 if (col >= _cols) break;
+                                // A VS16/ZWJ code point riding ALONE inside a cell entry (nvim packs
+                                // "⚠️" = U+26A0 U+FE0F into one cell) is not a glyph: it must claim no
+                                // column, or it pushes every later cell one column right. IsEmojiPresentation
+                                // returns TRUE for it (it tests for FE0F), so the wide width would be applied
+                                // here and the line would be 2 cells wider than the same line using "✅".
+                                if (IsSelectorOnly(g)) continue;
                                 var head = _cells[rowIdx * _cols + col];
                                 head.Text = g;                            // the glyph (never empty here)
                                 head.Hl = hl >= 0 ? hl : -1;              // only apply valid highlight IDs
-                                int w = IsWideGlyph(g) ? 2 : 1;           // display width in cells
+                                int w = AppGlyphWidth(g);                 // display width in cells (emoji=EmojiCells, wide=2, else 1)
+                                if (IsEmojiPresentation(g)) absorbNext = true;
                                 col++;
                                 for (int k = 1; k < w && col < _cols; k++)
                                 {

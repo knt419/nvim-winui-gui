@@ -696,12 +696,12 @@ private static double ParseFloatBlur()
                 float clipX = 12 + (float)_cellW;
                 using (ds2.CreateLayer(1.0f, new Windows.Foundation.Rect(0, 0, clipX, 20000)))
                     ds2.DrawText("★", 12, yB, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), _tfNarrow!);
-                // Repro band C (width-2 allocation): emoji cell + tail + blank + "OK" at cell3.
-                // Emoji has ~3 cells of room -> natural size, O must appear at 12+3*cellW.
+                // Repro band C (EmojiCells allocation): emoji cell + tail + "OK" at cell EmojiCells.
+                // The emoji gets that many cells of room -> natural size, O at 12+EmojiCells*cellW.
                 float yC = (float)(rhS / 2 - EmojiLift("✅", EmojiNaturalSize("✅", (float)rhS))) + 86;
                 float yCn = (float)(rhS / 2 - _liftNarrow) + 86;
                 ds2.DrawText("✅", 12, yC, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), EmojiTf(EmojiNaturalSize("✅", (float)rhS)));
-                ds2.DrawText("OK", 12 + 3 * (float)_cellW, yCn, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), _tfNarrow!);
+                ds2.DrawText("OK", 12 + EmojiCells * (float)_cellW, yCn, GetW2dBrush(rt, Windows.UI.Color.FromArgb(255, 255, 255, 255)), _tfNarrow!);
                 // Repro band D (width-1 tight allocation): " " at cell1, "O" at cell2 (17.6px).
                 // No room for the natural ink -> the emoji shrinks to fit 2 cells, O stays visible.
                 float availD = 2 * (float)_cellW;
@@ -1146,7 +1146,7 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
     // base pass; suppressing it there only while a blur is active avoids a missing cursor.
     if (_floatBlurAmount > 0 && CursorIsInSharpLayer() && _cursorVisible && _mgrid.TryGetValue(_curGridId, out var cg))
     {
-        int lr = _curLocalRow, lc = _curLocalCol;
+        int lr = _curLocalRow, lc = NvimColToAppCol(cg.Cells, cg.Cols, _curLocalRow, _curLocalCol); // nvim col -> app col (emoji spans EmojiCells)
         if (lr >= 0 && lr < cg.Rows && lc >= 0 && lc < cg.Cols && lr * cg.Cols + lc < cg.Cells.Length)
         {
             int cr = cg.PosRow + lr, cc = cg.PosCol + lc;
@@ -1343,7 +1343,7 @@ private static int FirstCodePoint(string s)
 // A cell holding ONLY variation selectors / ZWJ (e.g. the U+FE0F that nvim splits off from ⚠️
 // into its own grid cell) has no visible ink of its own. It must not count as "real text" in the
 // emoji tight-fit scan — treating it as such shrank ⚠ to ~1/3 size (size=6.4R at rh=19) because
-// the fit target was a single cell while the natural ink spans ~3 cells. The preceding emoji cell
+// the fit target was a single cell while the natural ink spans more than one cell. The preceding emoji cell
 // absorbs it: EmojiDrawText appends VS16, and the reserved blank span covers this cell.
 private static bool IsSelectorOnly(string s)
 {
