@@ -341,6 +341,7 @@ private void RenderNow()
     if (_fontAdvance > 0 && cols > 0) _cellW = Math.Max(1.0, _fontAdvance);
     else if (availW > 0 && cols > 0) _cellW = Math.Max(1.0, availW / cols);
     if (availH > 0 && rows > 0) _cellH = Math.Max(1.0, availH / rows);
+    ImeTrackCursor(); // cell metrics moved, so the IME candidate anchor is stale
 
     // Size the canvas to exactly the grid; the ScrollViewer centers it in the content area. The
     // whole-pixel size lets the last cell edge land on the canvas boundary — no sliver of clear
@@ -1618,6 +1619,7 @@ private readonly object _blinkTimerLock = new();
 private void OnClosed(object sender, object e)
 {
     try { _blinkTimer?.Dispose(); } catch { }
+    try { ImeDetach(); } catch { }
     try { _client?.Dispose(); } catch { }
     try { if (_nvimProc is not null && !_nvimProc.HasExited) _nvimProc.Kill(true); } catch { }
 }

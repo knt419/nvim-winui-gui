@@ -20,6 +20,9 @@ public partial class MainWindow
 
     private async void OnGlyphCanvasPointerPressed(object sender, PointerRoutedEventArgs e)
     {
+        // Clicking the grid must not steal focus from the IME target — the canvas is
+        // Focusable, so without this the IME would lose its target and stop composing.
+        ImeFocusTarget();
         var pt = e.GetCurrentPoint(GlyphCanvas);
         string? button = MapMouseButton(pt.Properties);
         if (button == null) return;

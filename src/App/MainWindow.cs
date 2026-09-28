@@ -184,8 +184,10 @@ public partial class MainWindow : Window
             FontSize = 12,
             Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0x9A, 0xA0, 0xA6))
         };
-
-         _root = new Grid { Background = new SolidColorBrush(_defBg) };
+        // Layout root. The IME target is NOT a XAML child of this tree — it is a native Win32 EDIT
+        // parented to the top-level HWND (see MainWindow.ime.cs), because this pure-C# build has no
+        // PRI/XBF pipeline and so has no control templates to instantiate a XAML TextBox from.
+        _root = new Grid { Background = new SolidColorBrush(_defBg) };
          _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
          // Fixed height for the status row so it matches exactly what UpdateWindowSize calculates.
          // Hidden by default (NVIM_WINUI_STATUSBAR=1 to show).
@@ -224,7 +226,11 @@ public partial class MainWindow : Window
         // programmatic-resize loops).
         _root.SizeChanged += (s, e) => { if (_diagEnabled) LogStartup($"ROOT-SIZECHG root={_root.ActualWidth:F0}x{_root.ActualHeight:F0}"); ScheduleRender(); FlushRender(); ScheduleNvimResize(); };
         _root.Loaded += OnLoadedAsync;
-        Activated += (s, e) => _root.Focus(FocusState.Programmatic);
+        // IME: the native EDIT target needs a realized top-level HWND, so attach it once loaded and
+        // hand it keyboard focus on every activation. `_root.Focus` is deliberately NOT used: the
+        // EDIT is a separate top-level window, and focus must belong to it or the IME stops composing.
+        _root.Loaded += (s, e) => ImeAttach();
+        Activated += (s, e) => ImeFocusTarget();
         Closed += OnClosed;
     }
 
@@ -240,6 +246,17 @@ public partial class MainWindow : Window
     private async void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (_client == null || _nvimProc == null) return;
+        // While the IME is composing, keys belong to the IME (they are shaping the preedit), not
+        // to nvim. Forwarding them would insert the romaji keystrokes that drive the IME as if they
+        // were plain input, so swallow every key and let the EDIT's own proc feed the IME. Escape
+        // falls through: it cancels the composition, and nvim should see it.
+        if (ImeIsComposing() && e.Key != VirtualKey.Escape)
+        {
+            // Space/Enter commit; the IME turns them into WM_IME_CHAR plus the resulting synthetic
+            // WM_CHAR on the EDIT, which forwards the resolved text exactly once.
+            e.Handled = e.Key == VirtualKey.Space || e.Key == VirtualKey.Enter;
+            return;
+        }
         string? kv = MapModifierKey(e.Key) ?? MapKey(e.Key);
         if (kv != null)
         {

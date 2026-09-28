@@ -665,6 +665,7 @@ public partial class MainWindow
                     if (tuple is not object?[] t || t.Length < 3) continue;
                     _curGridId = ToInt(t[0]);
                     _curLocalRow = ToInt(t[1]); _curLocalCol = ToInt(t[2]);
+                    ImeTrackCursor(); // keep the IME candidate list on the cursor
                     ScheduleRender();
                 }
                 break;

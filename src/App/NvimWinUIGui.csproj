@@ -47,5 +47,7 @@
     <Compile Include="MainWindow.render.cs" />
     <Compile Include="MainWindow.multigrid.cs" />
     <Compile Include="MainWindow.mouse.cs" />
+    <!-- IME: native Win32 EDIT target that receives the OS IME's committed text. -->
+    <Compile Include="MainWindow.ime.cs" />
   </ItemGroup>
 </Project>
