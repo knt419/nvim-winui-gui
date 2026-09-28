@@ -24,6 +24,10 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <UseAppHost>true</UseAppHost>
 
+    <!-- App icon: embedded into the exe (Explorer/taskbar/Alt-Tab). Regenerate with
+         tools/make_icon.py (see readme.md "App icon"). -->
+    <ApplicationIcon>Assets\appicon.ico</ApplicationIcon>
+
     <!-- Zip-SDK workaround: MrtCore's PRI tooling chain (MrtCore.PriGen.targets) calls MSBuild tasks whose DLLs are absent from this zip SDK (MSB4062). No XAML/PRI resources exist, so opt out of the whole chain. -->
     <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
   </PropertyGroup>
@@ -35,6 +39,15 @@
          1920 XAML cell elements (no per-cell layout pass; CPU encodes, GPU rasterizes). -->
     <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.0" />
     <ProjectReference Include="..\NvimCore\NvimCore.csproj" />
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <!-- Ship the .ico next to the exe so the window can set it explicitly at runtime (MainWindow ctor);
+         the EXE already carries the same icon via <ApplicationIcon>. -->
+    <None Update="Assets\appicon.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 

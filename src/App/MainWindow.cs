@@ -150,6 +150,14 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         Title = "nvim-winui-gui";
+        // Taskbar/Alt-Tab icon. The exe already embeds Assets\appicon.ico (<ApplicationIcon>), but set it
+        // on the AppWindow as well so the running window shows it even for a fresh/uncached exe path.
+        try
+        {
+            string ico = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "appicon.ico");
+            if (System.IO.File.Exists(ico)) AppWindow.SetIcon(ico);
+        }
+        catch { }
         // ExtendsContentIntoTitleBar makes the content area fill the full window (title bar region
         // becomes part of content), so Resize(width, height) directly sets the display size.
         ExtendsContentIntoTitleBar = true;

@@ -24,6 +24,24 @@ dotnet build src/App/NvimWinUIGui.csproj --nologo  # builds core + app (0 errors
 
 `NvimWinUISolution.sln` additionally references the local-only `tools/rpc-test` harness (see below); on a fresh clone build the csproj directly, or restore `tools/` first.
 
+## App icon
+`src/App/Assets/` holds the mark: `appicon.ico` (16/24/32/48/64/128/256, embedded into the exe by `<ApplicationIcon>` and copied next to it so the window can set it on the `AppWindow` at startup), `appicon.png` (256px master) and `appicon.svg` (vector twin).
+
+The design merges both parents: the **Neovim "N"** (blue left stem + green body, geometry measured from the official logo — every edge a 45° bevel) on a **Fluent/WinUI squircle tile** carrying a Windows-blue → Neovim-green gradient. The generator ships two alternates:
+
+| variant | look |
+|---|---|
+| `v1` (installed) | Fluent blue → Neovim green gradient squircle, white N |
+| `v2` | dark squircle + hairline border, authentic two-tone N (blue stem `#0674B3`, green `#57A143`) |
+| `v3` | Windows-blue squircle: the WinUI `</>` code tag with the N's diagonal as the green slash |
+
+Regenerate or switch variant (Pillow + numpy via `uv`; no other toolchain needed):
+```sh
+uv run --with pillow --with numpy --python 3.12 python tools/make_icon.py --install v1     # -> src/App/Assets/*
+uv run --with pillow --with numpy --python 3.12 python tools/make_icon.py --preview ./out   # contact sheet, all variants
+```
+Raster sizes ≤32px use an optical-sizing ramp (the N is enlarged) so the strokes stay legible at 16×16. `tools/` is git-ignored, so this one generator is force-added (`git add -f`).
+
 ## Local-only tools (`tools/`, git-ignored)
 Diagnostic helpers kept out of version control; they live in this working copy only and are not needed to run the app:
 - `rpc-test/` — console harness that proves NvimCore against a **real** nvim: handshake + `nvim_get_api_info`, `nvim_eval`, `nvim_ui_attach` with redraw notification capture. Byte logging for stream forensics (`NVIM_LOG_BYTES=1`). Expected output: `TEST1`/`TEST2` PASS, redraw batches from `nvim_ui_attach`, `[rpc-test] DONE: SUCCESS`.
