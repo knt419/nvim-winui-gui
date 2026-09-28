@@ -782,7 +782,7 @@ private static double ParseFloatBlur()
             bool isCur = r * cols + c == curIdx && curIdx >= 0;
             HlStyle(cell.Hl, out var runIt, out var runBd, out var runUl, out var runUc, out var runUd, out var runSt, out var runDim); // style of the lead cell
             Color fg;
-            if (isCur && _cursorShape == "block") fg = _defBg; // inverted cursor: default bg as glyph color (bar/underline keep normal ink)
+            if (isCur && _cursorShape == "block") fg = CursorGlyphOn(r, c, curIdx); // inverted: contrast against the block we just filled
             else if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) fg = HlFg(h) ?? _defFg;
             else fg = _defFg;
             if (!isCur && runDim) fg = DimToward(fg, CellBg(r, c, curIdx)); // dim: blend toward the cell's bg
@@ -883,7 +883,7 @@ private static double ParseFloatBlur()
                 if (t2.Length == 0) { c++; continue; } // covered tail: no ink, run continues
                 bool isCur2 = r * cols + c == curIdx && curIdx >= 0;
                 Color fg2;
-                if (isCur2 && _cursorShape == "block") fg2 = _defBg;
+                if (isCur2 && _cursorShape == "block") fg2 = CursorGlyphOn(r, c, curIdx);
                 else if (cc2.Hl >= 0 && _hlDefs.TryGetValue(cc2.Hl, out var h2)) fg2 = HlFg(h2) ?? _defFg;
                 else fg2 = _defFg;
                 // A style change (italic/bold/decoration on/off) breaks the run too: one DrawText call can only
@@ -1158,7 +1158,21 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                 HlStyle(cg.Cells[lr * cg.Cols + lc].Hl, out var cIt, out var cBd, out var cUl, out var cUc, out var cUd, out var cSt, out _);
                 if (_cursorShape == "block")
                 {
-                    ds.FillRectangle(new Windows.Foundation.Rect(colLeft[cc], rowTop[cr], _cellW, rh), GetW2dBrush(rc, _defFg));
+                    // Same rule as the base grid: the block takes the float cell's own fg and the
+                    // glyph its own bg, both read from the SAME cell. Float hl ids are synthesized
+                    // with resolved colors (FgSet/BgSet=true), so HlFg/HlBg return the real values.
+                    Color fCellBg = _defBg, fCellFg = _defFg;
+                    var fcell = cg.Cells[lr * cg.Cols + lc];
+                    if (fcell.Hl >= 0 && _hlDefs.TryGetValue(fcell.Hl, out var fh))
+                    {
+                        var fb = HlBg(fh); if (fb is not null) fCellBg = fb.Value;
+                        var ff = HlFg(fh); if (ff is not null) fCellFg = ff.Value;
+                    }
+                    Color blockC = ColorDistance(fCellFg, fCellBg) >= 48
+                        ? fCellFg
+                        : (ColorDistance(_defBg, fCellBg) > ColorDistance(_defFg, fCellBg) ? _defBg : _defFg);
+                    Color inkC = ColorDistance(fCellBg, blockC) >= 48 ? fCellBg : (blockC == _defFg ? _defBg : _defFg);
+                    ds.FillRectangle(new Windows.Foundation.Rect(colLeft[cc], rowTop[cr], _cellW, rh), GetW2dBrush(rc, blockC));
                     if (t.Length > 0)
                     {
                         float yNarrow = (float)(rowTop[cr] + rh / 2 - _liftNarrow);
@@ -1166,13 +1180,13 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                         if (IsEmojiPresentation(t))
                         {
                             float size = EmojiNaturalSize(t, (float)rh);
-                             ds.DrawText(EmojiDrawText(t), (float)colLeft[cc], (float)(rowTop[cr] + rh / 2 - EmojiLift(t, size)), GetW2dBrush(rc, _defBg), EmojiTf(size));
+                             ds.DrawText(EmojiDrawText(t), (float)colLeft[cc], (float)(rowTop[cr] + rh / 2 - EmojiLift(t, size)), GetW2dBrush(rc, inkC), EmojiTf(size));
                         }
                         else if (IsWideGlyph(t))
-                            ds.DrawText(t, (float)colLeft[cc], yWide, GetW2dBrush(rc, _defBg), Tf(true, cIt, cBd));
+                            ds.DrawText(t, (float)colLeft[cc], yWide, GetW2dBrush(rc, inkC), Tf(true, cIt, cBd));
                         else
-                            ds.DrawText(t, (float)colLeft[cc], yNarrow, GetW2dBrush(rc, _defBg), Tf(false, cIt, cBd));
-                        DrawDecorations(ds, rc, cUl, cUc, cUd, cSt, (float)colLeft[cc], (float)(IsWideGlyph(t) ? _cellW * 2 : _cellW), rowTop[cr], rh, _defBg); // inverted: same color as the glyph
+                            ds.DrawText(t, (float)colLeft[cc], yNarrow, GetW2dBrush(rc, inkC), Tf(false, cIt, cBd));
+                        DrawDecorations(ds, rc, cUl, cUc, cUd, cSt, (float)colLeft[cc], (float)(IsWideGlyph(t) ? _cellW * 2 : _cellW), rowTop[cr], rh, inkC); // inverted: same color as the glyph
                     }
                 }
                 else if (t.Length > 0)
@@ -1220,11 +1234,86 @@ private static Color UnpackPacked(int p) => Color.FromArgb((byte)(p >> 24), (byt
 private Cell[]? _activeRenderCells; // set by RenderCore each frame (composited multigrid buffer)
 private Color CellBg(int r, int c, int curIdx)
 {
-    if (r * _screenCols + c == curIdx && curIdx >= 0 && _cursorShape == "block") return _defFg; // inverted cursor: default fg as block (bar/underline shapes draw their own thin fill after text)
     var buf = _activeRenderCells ?? _cells;
     var cell = buf[r * _screenCols + c];
+    if (r * _screenCols + c == curIdx && curIdx >= 0 && _cursorShape == "block")
+    {
+        // Inverted cursor. Nvim's own terminals and neovide invert the cell's ACTUAL colors, so the
+        // cursor is visible on ANY background. We used to fill with _defFg unconditionally, which
+        // is invisible whenever the cell's bg is the same color — e.g. on a `reverse` band (its
+        // fill is Normal's fg = _defFg by definition, see HlBg) the cursor vanished completely.
+        // So: real cell bg -> real cell fg; and if those two are too close to tell apart (a `reverse`
+        // band whose fg happens to match), fall back to a contrasting color instead of hiding.
+        Color cellBg = _defBg;
+        if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var ch))
+        {
+            var cb = HlBg(ch);
+            if (cb is not null) cellBg = cb.Value;
+        }
+        Color block = InvertForCursor(r, c, cellBg);
+        return block.A == 0 ? _defFg : block;
+    }
     if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) { var cb = HlBg(h); if (cb is not null) return cb.Value; }
     return TransparentColor;
+}
+
+// Glyph color for the inverted block cursor at (r,c). A terminal inverts the cursor cell:
+// the BLOCK takes the cell's foreground and the GLYPH takes the cell's background. Both are
+// read from the same cell at (r,c) — never from a recomputed cursor index, which under
+// multigrid points into another grid and yields the previous character/row's colors.
+private Color CursorGlyphOn(int r, int c, int curIdx)
+{
+    var buf = _activeRenderCells ?? _cells;
+    int idx = r * _screenCols + c;
+    if (idx < 0 || idx >= buf.Length) return _defBg;
+    var cell = buf[idx];
+    // The cell's own background, reverse-aware: on a `reverse` group HlBg already returns the
+    // swapped color, so this is exactly what the block was painted over.
+    Color cellBg = _defBg;
+    if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h))
+    {
+        var cb = HlBg(h);
+        if (cb is not null && cb.Value.A != 0) cellBg = cb.Value;
+    }
+    // The block is this cell's fg (or a contrast fallback), so the glyph must differ from it.
+    Color block = InvertForCursor(r, c, cellBg);
+    if (block.A == 0) return _defBg;
+    if (ColorDistance(cellBg, block) >= 48) return cellBg;
+    return block == _defFg ? _defBg : _defFg;
+}
+
+// Cursor block color for the cell at (r,c), given that cell's resolved background.
+// Terminals invert the CURSOR'S OWN cell colors: block = the cell's fg, glyph = the cell's
+// bg. Both must come from the SAME cell, so (r,c) is passed in rather than recomputed —
+// recomputing from _curLocalRow/_curLocalCol points at a different grid under multigrid,
+// which paints the previous row's/character's color (BUG: wrong colors on the cursor).
+private Color InvertForCursor(int r, int c, Color bg)
+{
+    var buf = _activeRenderCells ?? _cells;
+    int idx = r * _screenCols + c;
+    Color fg = _defFg;
+    if (idx >= 0 && idx < buf.Length)
+    {
+        var cell = buf[idx];
+        if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h))
+        {
+            var f = HlFg(h);
+            if (f is not null) fg = f.Value;
+        }
+    }
+    if (ColorDistance(fg, bg) >= 48) return fg;
+    // fg and bg are indistinguishable (e.g. a `reverse` group whose fg matches its fill):
+    // pick whichever of Normal's two colors contrasts, so the cursor is never invisible.
+    return ColorDistance(_defBg, bg) > ColorDistance(_defFg, bg) ? _defBg : _defFg;
+}
+
+// Perceived-brightness-aware RGB distance (weighted, so a green-vs-dark-red pair that is far apart
+// in raw RGB still counts as close). Threshold used by InvertForCursor is deliberately generous.
+private static int ColorDistance(Color a, Color b)
+{
+    int rm = (a.R + b.R) / 2;
+    int dr = a.R - b.R, dg = a.G - b.G, db = a.B - b.B;
+    return (int)Math.Sqrt((2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db);
 }
 // nvim's `blend` attribute on a highlight: the percentage of the WINDOW background color to mix
 // into this group's background. blend=0 -> pure hl bg (opaque), blend=100 -> pure window bg. A real
