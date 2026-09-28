@@ -297,9 +297,11 @@ def build(variant, size):
             img = over(img, WHITE, down(n_mask(size, 0.68), size))
         else:
             img = over(img, WHITE, down(n_mask(size, 0.54 if size >= 64 else 0.58), size))
-            th = 0.055 if size >= 64 else 0.070
+            # brackets: thicker + shorter than the first pass (th 0.075, arms +-0.145 of the tile)
+            hh = 0.145 if size >= 64 else 0.150
+            th = 0.075 if size >= 64 else 0.082
             for side in (-1, 1):
-                img = over(img, WHITE, down(bracket_mask(size, side, 0.40, 0.185, th), size))
+                img = over(img, WHITE, down(bracket_mask(size, side, 0.415, hh, th), size))
     elif variant == "v11":    # v1 tile + full-size white N, larger brackets tucked behind it
         img = tile_base(size, FLUENT_A, NV_GREEN, inset=0.055, angle=45.0)
         img = over(img, WHITE, down(n_mask(size, 0.60), size))
@@ -309,7 +311,7 @@ def build(variant, size):
         img = tile_base(size, FLUENT_A, NV_GREEN, inset=0.055, angle=45.0)
         img = over(img, WHITE, down(n_mask(size, 0.54), size))
         for side in (-1, 1):
-            img = over(img, WHITE, down(bracket_mask(size, side, 0.40, 0.185, 0.055), size))
+            img = over(img, WHITE, down(bracket_mask(size, side, 0.415, 0.145, 0.075), size))
     else:
         raise SystemExit("variant must be v1..v12")
     return img
