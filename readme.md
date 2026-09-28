@@ -42,6 +42,11 @@ The design merges both parents: the **Neovim "N"** (blue left stem + green body,
 | `v7` **(installed)** | v5 palette + the **Neovim N**: white stems, green diagonal band |
 | `v8` | v5 palette + the Neovim N in Neovim's own colour placement: green left stem, white rest |
 | `v9` | v5 palette + the Neovim N as a **hollow outline** (white stroke, green diagonal inside) |
+| `v10` | **v1 + white `< >` brackets** flanking the N (brackets arm slope 0.591, from the WinUI reference) |
+| `v11` | v10 with bigger brackets that tuck into/overlap the N |
+| `v12` | v10's proportions kept at every size (no optical drop of the brackets) |
+
+`v10` uses optical sizing: at ≤24px the brackets only add mush, so they are dropped and the N is enlarged (0.68 vs 0.54 of the tile height) — `v12` is the same design with the brackets kept at every size for comparison.
 
 `v7`/`v8`/`v9` reuse v5's tile and split the N into its parts along the measured lines: the green diagonal is the band between L1 (`(57,105)`→`(409,641)`) and L2 (`(155,5)`→`(407,390)`), clipped at the right stem's left edge `x=407` so stems and diagonal never overlap; the hollow variant strokes the union silhouette `N_OUTLINE`.
 

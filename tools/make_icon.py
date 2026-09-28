@@ -233,6 +233,20 @@ def stroke_mask(mask, k):
     return ImageChops.subtract(mask, mask.filter(ImageFilter.MinFilter(2 * k + 1)))
 
 
+def bracket_mask(size, side, vx_frac, half_h_frac, th_frac, slope=HEX_SLOPE, ss=SS):
+    """One WinUI-style white angle bracket: vertex at vx_frac, arms at `slope`, flat ends."""
+    S = size * ss
+    c = S / 2.0
+    vx = c + side * vx_frac * S
+    hh = half_h_frac * S
+    th = th_frac * S
+    dx = -side * slope * hh
+    m = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(m).polygon([(vx, c), (vx + dx, c - hh), (vx + dx - side * th, c - hh),
+                               (vx - side * th, c), (vx + dx - side * th, c + hh), (vx + dx, c + hh)], fill=255)
+    return m
+
+
 def n_scale(size):
     """Optical sizing: enlarge the N on small raster sizes so the strokes stay legible."""
     return 0.60 if size >= 64 else (0.68 if size >= 32 else 0.76)
@@ -276,8 +290,28 @@ def build(variant, size):
         img = over(img, NV_GREEN, down(diag_mask(size, n_scale(size)), size))
         ring = stroke_mask(n_mask(size, n_scale(size)), max(3, int(0.028 * size * SS)))
         img = over(img, WHITE, down(ring, size))
+    elif variant == "v10":    # v1 tile + white N flanked by white "< >" brackets
+        img = tile_base(size, FLUENT_A, NV_GREEN, inset=0.055, angle=45.0)
+        if size <= 24:
+            # optical sizing: below 24px the brackets only add mush, so drop them and bolden the N
+            img = over(img, WHITE, down(n_mask(size, 0.68), size))
+        else:
+            img = over(img, WHITE, down(n_mask(size, 0.54 if size >= 64 else 0.58), size))
+            th = 0.055 if size >= 64 else 0.070
+            for side in (-1, 1):
+                img = over(img, WHITE, down(bracket_mask(size, side, 0.40, 0.185, th), size))
+    elif variant == "v11":    # v1 tile + full-size white N, larger brackets tucked behind it
+        img = tile_base(size, FLUENT_A, NV_GREEN, inset=0.055, angle=45.0)
+        img = over(img, WHITE, down(n_mask(size, 0.60), size))
+        for side in (-1, 1):
+            img = over(img, WHITE, down(bracket_mask(size, side, 0.40, 0.24, 0.075), size))
+    elif variant == "v12":    # v10 proportions kept at EVERY size (no optical drop of the brackets)
+        img = tile_base(size, FLUENT_A, NV_GREEN, inset=0.055, angle=45.0)
+        img = over(img, WHITE, down(n_mask(size, 0.54), size))
+        for side in (-1, 1):
+            img = over(img, WHITE, down(bracket_mask(size, side, 0.40, 0.185, 0.055), size))
     else:
-        raise SystemExit("variant must be v1..v9")
+        raise SystemExit("variant must be v1..v12")
     return img
 
 
@@ -428,11 +462,11 @@ def main():
     a = ap.parse_args()
 
     if a.ascii:
-        for v in ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9"):
+        for v in ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12"):
             ascii_preview(build(v, 64), v)
     if a.preview:
         os.makedirs(a.preview, exist_ok=True)
-        vs = ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9")
+        vs = ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12")
         print("preview:", contact_sheet(vs, os.path.join(a.preview, "icon_variants.png")))
         for v in vs:
             build(v, 512).save(os.path.join(a.preview, "%s_512.png" % v))
