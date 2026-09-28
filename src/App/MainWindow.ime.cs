@@ -186,6 +186,11 @@ public partial class MainWindow
         // proc has run, not before: the proc is what actually inserts the character into the
         // control, so clearing first would let it re-insert and the text would be forwarded twice.
         bool clearAfter = false;
+        // Keys we forward to nvim as commands must NOT reach the EDIT's own proc. The control is
+        // single-line and permanently empty (cleared after every commit), so it cannot act on
+        // Backspace/Enter/Tab/Esc/Delete/arrows: Windows rings the bell for a keystroke a control
+        // refuses. Consuming them here keeps the beep out while nvim still gets the key.
+        bool suppressOriginal = false;
         try
         {
             switch (msg)
@@ -224,9 +229,15 @@ public partial class MainWindow
                     // The IME target holds keyboard focus, so XAML's KeyDown never fires and every
                     // ordinary nvim key would be lost. Non-printable keys are handled here; printable
                     // ones are NOT, because Windows pairs every WM_KEYDOWN with a WM_CHAR carrying the
-                    // same character — forwarding both would send each keystroke to nvim twice.
+                    // same character -- forwarding both would send each keystroke to nvim twice.
                     // While the IME is composing, keys belong to the IME and nothing is forwarded.
-                    if (!_imeComposing) ForwardNvimKey(wParam, lParam, printable: false);
+                    if (!_imeComposing)
+                    {
+                        ForwardNvimKey(wParam, lParam, printable: false);
+                        // Every non-printable key is consumed here: the EDIT is empty and single-line,
+                        // so it can only refuse it, and a refused key rings the bell.
+                        suppressOriginal = true;
+                    }
                     break;
                 }
                 case WM_CHAR:
@@ -236,20 +247,29 @@ public partial class MainWindow
                     // for a committed IME character, so plain typing and committed kanji share one path.
                     if (wParam == 0x1B)                       // <Esc> arrives as a char too
                     {
-                        if (!_imeComposing) ForwardNvimKey(0x1B, lParam, printable: false);
+                        // Already forwarded from WM_KEYDOWN: forwarding it again here sent <Esc>
+                        // to nvim twice per press. Just consume the char.
+                        suppressOriginal = true;
                         break;
                     }
                     if (wParam == 0x0D || wParam == 0x0A) // <CR> arrives as a char, not a keydown
                     {
-                        if (!_imeComposing) ForwardToNvim("<CR>");
+                        if (!_imeComposing) { ForwardToNvim("<CR>"); suppressOriginal = true; }
                         break;
                     }
                     if (wParam == 0x09)                     // <Tab> likewise
                     {
-                        if (!_imeComposing) ForwardToNvim("<Tab>");
+                        if (!_imeComposing) { ForwardToNvim("<Tab>"); suppressOriginal = true; }
                         break;
                     }
-                    if (wParam == 0x7F || wParam == 0x08) { /* BS: handled on WM_KEYDOWN */ break; }
+                    // Every other control char (^H/BS, ^G, ^C, DEL...) was already forwarded from
+                    // WM_KEYDOWN. Forwarding here too would double it, so only consume: the EDIT is
+                    // empty and single-line, so it would refuse the char and ring the bell.
+                    if (wParam < 0x20 || wParam == 0x7F)
+                    {
+                        suppressOriginal = true;
+                        break;
+                    }
                     if (wParam >= 1 && wParam <= 0xFFFF && (wParam & 0xF800) != 0xD800)
                         clearAfter = CommitImeText(((char)wParam).ToString());
                     break;
@@ -266,9 +286,15 @@ public partial class MainWindow
 
         // Chain to the original proc, or DefWindowProc if the chain was torn down (e.g. the control
         // is being destroyed). Calling a null prev-proc would jump to address 0 and hard-crash.
-        IntPtr result = _imeEditPrevProc != IntPtr.Zero
-            ? CallWindowProcW(_imeEditPrevProc, hWnd, msg, wParam, lParam)
-            : DefWindowProcW(hWnd, msg, wParam, lParam);
+        // A key we already handled above is NOT chained: the EDIT is permanently empty and
+        // single-line, so it can only refuse the keystroke, and Windows rings the bell for a
+        // refused keystroke. Consuming it here is what silences the buzzer.
+        IntPtr result;
+        if (suppressOriginal) result = IntPtr.Zero;
+        else
+            result = _imeEditPrevProc != IntPtr.Zero
+                ? CallWindowProcW(_imeEditPrevProc, hWnd, msg, wParam, lParam)
+                : DefWindowProcW(hWnd, msg, wParam, lParam);
 
         if (clearAfter) ImeEditClear();
         return result;
