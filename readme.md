@@ -1,3 +1,5 @@
+<img src="src/App/Assets/appicon.png" width="112" alt="nvim-winui-gui app icon">
+
 # nvim-winui-gui
 
 A WinUI 3 shell around `nvim --embed` (msgpack-RPC). The app spawns a headless
@@ -31,13 +33,13 @@ The design merges both parents: the **Neovim "N"** (blue left stem + green body,
 
 | variant | look |
 |---|---|
-| `v1` (installed) | Fluent blue → Neovim green gradient squircle, white N |
+| `v1` | Fluent blue → Neovim green gradient squircle, white N |
 | `v2` | dark squircle + hairline border, authentic two-tone N (blue stem `#0674B3`, green `#57A143`) |
 | `v3` | Windows-blue squircle: the WinUI `</>` code tag with the N's diagonal as the green slash |
 | `v4` | **WinUI hexagon tile** (flat top/bottom, pointed sides, radial `#5AA5E8` → `#0B47A5`), white N |
 | `v5` | WinUI hexagon tile: the reference's `< >` chevrons + the N's diagonal as the green slash |
 | `v6` | squircle tile in the WinUI reference's radial blue gradient (no green), white N |
-| `v7` | v5 palette + the **Neovim N**: white stems, green diagonal band |
+| `v7` **(installed)** | v5 palette + the **Neovim N**: white stems, green diagonal band |
 | `v8` | v5 palette + the Neovim N in Neovim's own colour placement: green left stem, white rest |
 | `v9` | v5 palette + the Neovim N as a **hollow outline** (white stroke, green diagonal inside) |
 
@@ -47,7 +49,7 @@ The hexagon geometry and its gradient come from measuring the supplied WinUI ref
 
 Regenerate or switch variant (Pillow + numpy via `uv`; no other toolchain needed):
 ```sh
-uv run --with pillow --with numpy --python 3.12 python tools/make_icon.py --install v1     # -> src/App/Assets/*
+uv run --with pillow --with numpy --python 3.12 python tools/make_icon.py --install v7     # -> src/App/Assets/*
 uv run --with pillow --with numpy --python 3.12 python tools/make_icon.py --preview ./out   # contact sheet, all variants
 ```
 Raster sizes ≤32px use an optical-sizing ramp (the N is enlarged) so the strokes stay legible at 16×16. `tools/` is git-ignored, so this one generator is force-added (`git add -f`).
