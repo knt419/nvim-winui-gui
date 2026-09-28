@@ -1619,6 +1619,7 @@ private readonly object _blinkTimerLock = new();
 private void OnClosed(object sender, object e)
 {
     try { _blinkTimer?.Dispose(); } catch { }
+    try { _flushWatchdogTimer?.Dispose(); } catch { }
     try { ImeDetach(); } catch { }
     try { _client?.Dispose(); } catch { }
     try { if (_nvimProc is not null && !_nvimProc.HasExited) _nvimProc.Kill(true); } catch { }

@@ -90,15 +90,34 @@ public partial class MainWindow
             });
 
             _client.OnNotification += OnNvimNotification;
-            // ext_linegrid: switch nvim to line-based grid events (grid_line/grid_clear/
-            // cursor_position/hl_attr_define). Without it nvim emits only the legacy
-            // terminal protocol (put/cursor_goto/move_cursor), which this handler does not
+            // Self-identify so nvim_get_chan_info().client names this UI — useful in :checkhealth,
+            // in channel dumps, and for plugins that branch on the frontend. Five args (verified
+            // against 0.12.5): name, version, type, methods, attributes. type must be one of
+            // embedder|host|msgpack-rpc|plugin|remote|ui; "ui" is correct for a GUI frontend.
+            // Best-effort: a failure here must not block attaching the UI.
+            try
+            {
+                await _client.CallAsync("nvim_set_client_info", "nvim-winui-gui",
+                    new Dictionary<string, object?> { ["major"] = 0, ["minor"] = 1, ["patch"] = 0, ["prerelease"] = "dev" },
+                    "ui",
+                    new Dictionary<string, object?> { ["ext_linegrid"] = true, ["ext_multigrid"] = true, ["rgb"] = true },
+                    new Dictionary<string, object?> { ["platform"] = "win32", ["info"] = "WinUI 3 + Direct2D" });
+                LogStartup("CLIENT-INFO announced (name=nvim-winui-gui type=ui)");
+            }
+            catch (Exception ex) { LogCritical("nvim_set_client_info failed: " + ex.Message); }
+            // ext_linegrid: switch nvim to line-based grid events (grid_resize/grid_clear/
+            // grid_line/grid_scroll/grid_cursor_goto/hl_attr_define). Without it nvim emits only the
+            // legacy terminal protocol (put/cursor_goto/move_cursor), which this handler does not
             // consume -> empty screen. Verified against runtime/doc/api-ui-events.txt (0.12).
             LogStartup("ATTACH-PRE sending ui_attach (notification)");
-            // nvim_ui_attach is a notification per the nvim 0.12 RPC API — it does not send a
-            // response, so CallAsync would hang forever waiting for one that never arrives.
-            // Use NotifyAsync instead: fire-and-forget, then rely on redraw notifications to
-            // confirm the UI was attached (same pattern as tools/rpc-test/Program.cs line 153).
+            // nvim_ui_attach is sent as a NOTIFICATION ([2, method, params]) and we deliberately do
+            // NOT wait for a reply: the UI is confirmed attached by the redraw traffic that follows.
+            // (Corrected 2026-09-29: the earlier comment here claimed ui_attach "does not send a
+            // response, so CallAsync would hang forever". That was wrong — nvim 0.12.5 declares NO
+            // function with return type void in --api-info, and ui_attach sent as a REQUEST [0,id,..]
+            // returns error=null/result=null and attaches identically (verified: grid_line=17,
+            // grid_resize=10, mode_info_set=3 either way). Notification is kept because it avoids
+            // blocking startup on a round-trip, but CallAsync would work if you prefer the sync path.)
             // ext_multigrid: nvim splits the screen into per-window grids positioned via win_pos
             // (implies ext_linegrid). Grid 1 is the outer frame; window/message grids are routed
             // to their own buffers in DispatchRedrawEvent and drawn on top in RenderCore.
@@ -425,6 +444,7 @@ public partial class MainWindow
         if (trc) LogStartup($"HN ENTER #{_hnTrace} thread={System.Threading.Thread.CurrentThread.ManagedThreadId}");
         int hb = Interlocked.Increment(ref _hbCount);
         if (_hbCount % 50 == 0) LogStartup($"HB handle_notification count={_hbCount}");
+        _sawFlush = false;
         try
         {
             // nvim batches ALL redraw events into ONE notification: [2,"redraw",[[name,...],...]].
@@ -456,8 +476,11 @@ public partial class MainWindow
             }
             else
             {
-                // Defensive: some transports forward individual events directly.
+                // Defensive: some transports forward individual events directly. A notification that
+                // is NOT a "redraw" batch has no flush marker of its own, so it must not be gated —
+                // it IS the final state, not an intermediate one.
                 DispatchRedrawEvent(method, args);
+                _sawFlush = true;
             }
         }
         catch (Exception ex)
@@ -470,9 +493,63 @@ public partial class MainWindow
             double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
             _handleMsTotal += ms; int hc = Interlocked.Increment(ref _handleCount);
             if (_diagEnabled && (hc % 25 == 0 || ms > 8)) LogStartup($"HANDLE #{hc} {ms:F1}ms avg={_handleMsTotal/hc:F1}ms events={(args?.Length ?? 0)}");
-            // One render per notification batch: ScheduleRender only marked dirty during the loop.
-            FlushRender();
+            // One render per batch, gated on nvim's `flush` marker.
+            //
+            // api-ui-events.txt: multiple "redraw" batches may be sent before the whole screen is
+            // redrawn, with "flush" only at the end of the LAST one; the user should only ever see
+            // the final, consistent state. We honour that: a batch that did not end with flush
+            // marks the render dirty but does NOT paint. Never painting is safe (the next flush
+            // repaints), whereas painting early shows a half-updated screen.
+            //
+            // Watchdog: if a flush-gated render never follows, the screen would stay stale forever,
+            // so _flushWatchdogMs later forces a paint. Blanked screens from a wedged render path
+            // have bitten this app before (see the BUG HISTORY in NvimClient), hence the backstop.
+            // (FlushRender itself stays unconditional: it is also called off the notification path,
+            // e.g. the ui_attach sequence and SizeChanged, where there is no flush to wait for.)
+            if (_sawFlush) { _flushWatchdogDue = 0; FlushRender(); }
+            else { ArmFlushWatchdog(); }
         }
+    }
+
+    // ---- flush-gated rendering ---------------------------------------------------------------
+    // Per api-ui-events.txt only the state at `flush` is meant to be shown, so HandleNotification
+    // paints on flush rather than after every batch. Two safety nets keep that from ever going
+    // stale: non-redraw notifications (any notification that is not "redraw" arrives via the
+    // defensive DispatchRedrawEvent path) and a timer if a flush never comes.
+    private bool _sawFlush;
+    private long _flushWatchdogDue;   // Stopwatch ticks; 0 = not armed
+    private const double _flushWatchdogMs = 250;
+
+    /// <summary>Force a paint if the flush-gated render never arrived. UI thread.</summary>
+    private void ArmFlushWatchdog()
+    {
+        if (_flushWatchdogDue != 0) return; // already armed; the first due wins
+        long freq = System.Diagnostics.Stopwatch.Frequency;
+        _flushWatchdogDue = System.Diagnostics.Stopwatch.GetTimestamp()
+                            + (long)(_flushWatchdogMs / 1000.0 * freq);
+        // ONE timer for the app's lifetime, re-armed with Change() — allocating a fresh Timer per
+        // flush cycle would leak one handle per redraw. The callback runs on the thread pool and
+        // hops to the UI thread, because it touches _renderQueued and calls RenderNow.
+        var t = _flushWatchdogTimer;
+        if (t == null)
+        {
+            t = new System.Threading.Timer(_ => UiPostAsync(FlushWatchdogTick), null,
+                System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+            _flushWatchdogTimer = t;
+        }
+        try { t.Change((int)_flushWatchdogMs, System.Threading.Timeout.Infinite); }
+        catch (ObjectDisposedException) { /* window closed */ }
+    }
+
+    private System.Threading.Timer? _flushWatchdogTimer;
+
+    private void FlushWatchdogTick()
+    {
+        long due = Interlocked.Exchange(ref _flushWatchdogDue, 0);
+        if (due == 0) return;                 // a flush landed first; nothing to rescue
+        if (System.Diagnostics.Stopwatch.GetTimestamp() < due) return;
+        LogImportant("FLUSH-WATCHDOG fired — no flush seen, painting anyway");
+        FlushRender();
     }
 
     private void DispatchRedrawEvent(string name, object?[] a)
@@ -591,6 +668,12 @@ public partial class MainWindow
                 }
                 break;
             }
+            case "flush":
+                // ["flush", []] — end-of-screen marker. Nvim may send several redraw batches before
+                // the whole screen is consistent; flush closes the last one. Recorded here and acted
+                // on in HandleNotification's finally block (where the render actually happens).
+                _sawFlush = true;
+                break;
             case "grid_clear":
                 // linegrid: no args (clear outer frame). multigrid: [grid_id] clears one window/message grid.
                 if (a.Length >= 1 && ToInt(a[0]) != 1)
@@ -657,9 +740,11 @@ public partial class MainWindow
                 }
                 break;
             }
-            case "cursor_position":
             case "grid_cursor_goto":
                 // Each tuple: [grid_id, row, col] — store grid + local coords; resolve to outer-frame at render.
+                // ("cursor_position" was handled here too but is dead code: it is not in nvim's
+                // ui_events (verified against --api-info on 0.12.5) and never sent. grid_cursor_goto
+                // is the ext_linegrid event; cursor_position belonged to the legacy cell-based grid.)
                 foreach (var tuple in a)
                 {
                     if (tuple is not object?[] t || t.Length < 3) continue;
@@ -752,6 +837,55 @@ public partial class MainWindow
                     ScheduleRender();
                 }
                 break;
+            case "option_set":
+            {
+                // Each tuple: [name, value] — UI-relevant options only ('guifont', 'guifontwide',
+                // 'linespace', 'arabicshape', 'ambiwidth', 'emoji', 'mousefocus', 'mousehide',
+                // 'mousemoveevent', 'pumblend', 'showtabline', 'termguicolors', and every ext_*).
+                // Fired at attach time AND on every later :set / plugin change, so this is the live
+                // path for ':set guifont' (the startup + 1s re-read only covers the launch window).
+                // guifont/guifontwide/linespace affect layout, so they need a metric re-measure, not
+                // just a repaint — RefreshGuifontAsync already no-ops when the parsed font is unchanged.
+                bool fontChanged = false;
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 2) continue;
+                    string oname = t[0]?.ToString() ?? "";
+                    switch (oname)
+                    {
+                        case "guifont":
+                        case "guifontwide":
+                            fontChanged = true;
+                            LogImportant($"OPTION-SET {oname}={t[1]} -> refresh fonts");
+                            break;
+                        case "linespace":
+                            // nvim's 'linespace' pads each ROW in nvim's own layout, so the grid
+                            // height change already arrives as grid_resize/grid_line — nothing to do.
+                            // This app's vertical pitch trim is NVIM_WINUI_LINESPACE (an app-level
+                            // knob read once at startup), so a repaint is all that applies here.
+                            LogImportant($"OPTION-SET linespace={t[1]} (nvim-side row padding)");
+                            ScheduleRender();
+                            break;
+                        case "showtabline":
+                            // Status row visibility: re-sync the nvim grid so the screen height
+                            // accounts for the tabline row nvim just started/stopped drawing.
+                            ScheduleNvimResize();
+                            break;
+                        default:
+                            // Emoji width / arabicshape / ambiwidth change how grid_line cells must
+                            // be measured; a repaint alone would keep stale column math.
+                            if (oname is "emoji" or "arabicshape" or "ambiwidth")
+                                LogImportant($"OPTION-SET {oname}={t[1]} (affects cell metrics)");
+                            break;
+                    }
+                }
+                if (fontChanged)
+                {
+                    _ = RefreshGuifontAsync();
+                    ScheduleRender();
+                }
+                break;
+            }
             case "win_pos":
                 // [grid_id, win_handle, start_row, start_col, width, height] — place a window grid.
                 foreach (var tuple in a)

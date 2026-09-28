@@ -91,7 +91,35 @@ Cell colors resolve through two helpers (`HlFg`/`HlBg`) that mirror neovide's se
 - **No explicit value** → null, and the caller falls back to its default (`_defFg`/`_defBg`). This is why synthesized float/message hl ids must carry `FgSet`/`BgSet=true`: their colors are already fully resolved by blending over the parent cell, and marking them unresolved makes every glyph fall back to Normal fg (a uniform grey block).
 - **Text style**: the protocol's per-hl `italic`/`bold` flags are parsed into the `Hl` record and applied at draw time. A text run breaks on a style change as well as a color/font change, so mixed-style lines render correctly; italic uses DirectWrite oblique synthesis (true italic face when the family has one), bold maps to weight 700.
 
+## API coverage (nvim 0.12.5, `--api-info`: 261 functions / 10 ui_options / 69 ui_events)
+- **attach options**: `rgb`, `ext_linegrid`, `ext_multigrid`. The cmdline, completion menu, tabline and
+  messages are deliberately NOT externalized (no `ext_cmdline` / `ext_popupmenu` / `ext_tabline` /
+  `ext_messages`), so nvim draws them into the grid and they need no widget code.
+- **ui events handled**: the 14 grid/multigrid/highlight events (`grid_resize`, `grid_line`,
+  `grid_clear`, `grid_scroll`, `grid_cursor_goto`, `hl_attr_define`, `default_colors_set`,
+  `mode_change`, `mode_info_set`, `win_pos`, `win_float_pos`, `win_hide`, `win_close`, `msg_set_pos`)
+  plus `flush` and `option_set`.
+- **flush-gated rendering**: nvim may send several `redraw` batches before the screen is consistent
+  and marks only the last with `flush` (api-ui-events.txt), so `HandleNotification` paints on flush
+  rather than after every batch. A 250 ms watchdog (`FLUSH-WATCHDOG`) forces a paint if no flush
+  arrives, so the screen can never go stale.
+- **`option_set`** is the live path for `:set guifont` / `guifontwide`: those trigger a font
+  re-measure (not just a repaint), while `linespace`/`showtabline` only need a repaint or grid resync.
+- **`nvim_set_client_info`** announces `name=nvim-winui-gui type=ui` after connect, so
+  `nvim_get_chan_info().client` identifies this frontend.
+- `cursor_position` was removed from the redraw handler: it is not in nvim's `ui_events` (it belonged
+  to the legacy cell-based grid) and is never sent when `ext_linegrid` is on.
+- Mouse events use `grid_id=0`, which means SCREEN coordinates ("0 to let Nvim decide positioning of
+  windows"), so clicks resolve to the right split/float even though `ext_multigrid` is active.
+- `nvim_ui_attach` is sent as a notification purely to avoid blocking startup on a round-trip. It is
+  NOT a void function — nvim 0.12.5 declares no `void` returns in `--api-info`, and sending it as a
+  request returns `error=null` and attaches identically.
+
 ## Verification status
 - Decoder covers the full msgpack spec used by nvim: fixints, ints/uints all widths, str/bin 8/16/32, ext 8/16/32, float32/64 (big-endian), arrays/maps. Live capture of a full session replays through the C# decoder with 0 pending bytes.
 - `:checkhealth blink.cmp` rendering matches neovide pixel-for-pixel on the reference case: row 1 explicit bg band (`0x44495E`) and row 2 `reverse` band (Normal fg `#63718B`), verified by protocol capture + screenshot pixel sampling (2026-09-26).
 - Italic/bold/bold-italic rendering verified on a live session: whole-line and mixed-span highlight groups render with the correct slant/weight per span, confirmed by full-canvas snapshot inspection (2026-09-26).
+- API-coverage work verified against live nvim 0.12.5 (2026-09-29): `:set guifont=Consolas:h20` now
+  reaches the app as `option_set` and is applied (font size 21.33 → 26.67 in the log); 191 `flush`
+  events handled with 0 watchdog trips and 0 criticals across a scroll/split/input stress run; the
+  rendered canvas measured 19.5% non-background pixels with correctly aligned glyphs.

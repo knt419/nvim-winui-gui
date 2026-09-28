@@ -9,10 +9,14 @@ namespace NvimWinUIGui;
 public partial class MainWindow
 {
     // ---- Mouse -> nvim_input_mouse ---------------------------------------------------------
-    // WinUI pointer events on the glyph canvas are converted to grid cell coordinates and sent as
-    // nvim_input_mouse(button, action, modifier, grid_id=0, row, col) — same scheme as neovide's
-    // mouse_manager.rs: "press"/"release"/"drag" for buttons, button="wheel" with action up/down
-    // for scrolling. The call is a REQUEST (nvim replies with the number of characters consumed),
+    // WinUI pointer events on the glyph canvas are converted to screen-cell coordinates and sent
+    // as nvim_input_mouse(button, action, modifier, grid_id=0, row, col) — same scheme as
+    // neovide's mouse_manager.rs: "press"/"release"/"drag" for buttons, button="wheel" with action
+    // up/down for scrolling. grid_id=0 means SCREEN coordinates (not "grid 1"), which is what we
+    // want with ext_multigrid on: nvim picks the window/float under the point. MouseModifiers()
+    // emits neovide's order S- C- M- (D- = super, unused); nvim accepts the trailing dash and the
+    // empty string (verified against 0.12.5).
+    // The call is a REQUEST (nvim replies with the number of characters consumed),
     // sent fire-and-forget like key input so a slow reply can't stall pointer handling; writes
     // serialize on NvimClient's write semaphore, so ordering vs nvim_input is preserved.
 
@@ -107,7 +111,15 @@ public partial class MainWindow
         LogStartup($"MOUSE {button} {action} pos=({pos.X:F0},{pos.Y:F0}) -> cell ({row},{col}) mod={MouseModifiers()}");
         try
         {
-            // grid_id=0: the main (and only) grid — we attach with ext_linegrid, not ext_multigrid.
+            // grid_id=0 = SCREEN coordinates: "0 to let Nvim decide positioning of windows"
+            // (api.txt nvim_input_mouse). This is correct even though we attach WITH ext_multigrid
+            // and there are many grids — 0 is not "the main grid", it means screen-space, and nvim
+            // resolves it to whichever window/float is under that point. Verified against live
+            // nvim 0.12.5: a click inside a split and a click inside a float each moved
+            // nvim_get_current_win() to the clicked window. (Corrected 2026-09-29: this comment
+            // previously claimed we attach with ext_linegrid only and have a single grid, which is
+            // false — ext_multigrid is on and per-window grids exist. The CODE was right; only the
+            // stated reasoning was wrong.)
             await _client.CallAsync("nvim_input_mouse", button, action, MouseModifiers(), 0, row, col);
         }
         catch (Exception ex) { SetStatus($"mouse error: {ex.Message}"); LogCritical("MOUSE RPC FAILED: " + ex.Message); }
