@@ -37,6 +37,11 @@ The design merges both parents: the **Neovim "N"** (blue left stem + green body,
 | `v4` | **WinUI hexagon tile** (flat top/bottom, pointed sides, radial `#5AA5E8` → `#0B47A5`), white N |
 | `v5` | WinUI hexagon tile: the reference's `< >` chevrons + the N's diagonal as the green slash |
 | `v6` | squircle tile in the WinUI reference's radial blue gradient (no green), white N |
+| `v7` | v5 palette + the **Neovim N**: white stems, green diagonal band |
+| `v8` | v5 palette + the Neovim N in Neovim's own colour placement: green left stem, white rest |
+| `v9` | v5 palette + the Neovim N as a **hollow outline** (white stroke, green diagonal inside) |
+
+`v7`/`v8`/`v9` reuse v5's tile and split the N into its parts along the measured lines: the green diagonal is the band between L1 (`(57,105)`→`(409,641)`) and L2 (`(155,5)`→`(407,390)`), clipped at the right stem's left edge `x=407` so stems and diagonal never overlap; the hollow variant strokes the union silhouette `N_OUTLINE`.
 
 The hexagon geometry and its gradient come from measuring the supplied WinUI reference image: total aspect 357:311, flat edges 49.8 % of the width, slanted sides and chevron arms both at `dx/dy = 0.591`, chevron stroke 14.3 % of the width horizontally and its arms ±40.5 % of the tile height, brightest gradient sample `#519FE6` (upper-left/centre) falling to `#0C48A5` navy at the right/bottom edges.
 

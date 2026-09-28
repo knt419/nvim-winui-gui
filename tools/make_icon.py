@@ -206,6 +206,33 @@ def ref_chevron_mask(size, width_frac=0.92, ss=SS):
     return m
 
 
+# ---- Neovim N split into its parts (same measured geometry) ----------------
+# The N's diagonal band, clipped at the right stem's left edge (x=407):
+#   L1 = its left edge (the blue stem's right edge in the upper half)
+#   L2 = its right edge (from the top vertex down to the stem)
+DIAG_BAND = [(57, 105), (155, 5), (407, 390), (407, 637.5)]
+# The N's outer silhouette (union of stem + body), for outline/stroke rendering.
+N_OUTLINE = [(19, 143), (155, 5), (407, 390), (407, 4), (543, 141), (544, 505),
+             (409, 641), (155, 254), (155, 641), (19, 505)]
+
+
+def _poly_mask(size, scale_h, poly, dx=0.0, dy=0.0, ss=SS):
+    S, T = _mapper(size, scale_h, dx, dy, ss)
+    m = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(m).polygon([T(pt) for pt in poly], fill=255)
+    return m
+
+
+def diag_mask(size, scale_h, dx=0.0, dy=0.0, ss=SS):
+    return _poly_mask(size, scale_h, DIAG_BAND, dx, dy, ss)
+
+
+def stroke_mask(mask, k):
+    """Ring of `k` supersampled pixels inside the mask's silhouette."""
+    from PIL import ImageFilter
+    return ImageChops.subtract(mask, mask.filter(ImageFilter.MinFilter(2 * k + 1)))
+
+
 def n_scale(size):
     """Optical sizing: enlarge the N on small raster sizes so the strokes stay legible."""
     return 0.60 if size >= 64 else (0.68 if size >= 32 else 0.76)
@@ -236,8 +263,21 @@ def build(variant, size):
     elif variant == "v6":     # proven squircle tile, but in the reference's radial blue gradient
         img = tile_base(size, REF_IN, REF_OUT, inset=0.055, angle=45.0)
         img = over(img, WHITE, down(n_mask(size, n_scale(size)), size))
+    elif variant == "v7":     # v5 palette + the Neovim N outline: white stems, green diagonal
+        img = hex_tile_base(size)
+        img = over(img, WHITE, down(n_mask(size, n_scale(size)), size))
+        img = over(img, NV_GREEN, down(diag_mask(size, n_scale(size)), size))
+    elif variant == "v8":     # v5 palette, Neovim's own colour placement: green left stem
+        img = hex_tile_base(size)
+        img = over(img, WHITE, down(n_mask(size, n_scale(size)), size))
+        img = over(img, NV_GREEN, down(stem_mask(size, n_scale(size)), size))
+    elif variant == "v9":     # v5 palette, the Neovim N as a hollow outline (green diagonal inside)
+        img = hex_tile_base(size)
+        img = over(img, NV_GREEN, down(diag_mask(size, n_scale(size)), size))
+        ring = stroke_mask(n_mask(size, n_scale(size)), max(3, int(0.028 * size * SS)))
+        img = over(img, WHITE, down(ring, size))
     else:
-        raise SystemExit("variant must be v1..v6")
+        raise SystemExit("variant must be v1..v9")
     return img
 
 
@@ -285,6 +325,36 @@ def contact_sheet(variants, path, bg=(0x2B, 0x2F, 0x36)):
 
 
 def svg_for(variant, path, s=512):
+    if variant in ("v7", "v8", "v9"):
+        def pp(pts):
+            return "M " + " L ".join("%.2f %.2f" % pt for pt in pts) + " Z"
+        w = 0.92 * s
+        tile = pp(hexagon_pts(s / 2, s / 2, w, w / HEX_ASPECT))
+        grad = ('<radialGradient id="g" cx="0.58" cy="0.34" r="1.05">'
+                '<stop offset="0" stop-color="#5AA5E8"/><stop offset="1" stop-color="#0B47A5"/></radialGradient>')
+        c = s / 2.0
+        x0, y0, x1, y1 = BOX
+        k = n_scale(s) * s / (y1 - y0)
+        mcx, mcy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+
+        def np(poly):
+            return "M " + " L ".join("%.2f %.2f" % (c + (pt[0] - mcx) * k, c + (pt[1] - mcy) * k)
+                                     for pt in poly) + " Z"
+
+        body = '<path d="%s" fill="url(#g)"/>' % tile
+        n_white = '<path d="%s" fill="#FFFFFF"/>' % np(P_GREEN) + '<path d="%s" fill="#FFFFFF"/>' % np(P_BLUE)
+        if variant == "v7":
+            body += n_white + '<path d="%s" fill="#57A143"/>' % np(DIAG_BAND)
+        elif variant == "v8":
+            body += n_white + '<path d="%s" fill="#57A143"/>' % np(P_BLUE)
+        else:
+            body += ('<path d="%s" fill="#57A143"/>' % np(DIAG_BAND)
+                     + '<path d="%s" fill="none" stroke="#FFFFFF" stroke-width="%.1f" stroke-linejoin="miter"/>'
+                     % (np(N_OUTLINE), 0.056 * s))
+        open(path, "w", encoding="utf-8", newline="\n").write(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d">\n'
+            '  <defs>%s</defs>\n  %s\n</svg>\n' % (s, s, s, s, grad, body))
+        return path
     if variant in ("v4", "v5", "v6"):
         def pp(pts):
             return "M " + " L ".join("%.2f %.2f" % pt for pt in pts) + " Z"
@@ -358,11 +428,11 @@ def main():
     a = ap.parse_args()
 
     if a.ascii:
-        for v in ("v1", "v2", "v3", "v4", "v5", "v6"):
+        for v in ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9"):
             ascii_preview(build(v, 64), v)
     if a.preview:
         os.makedirs(a.preview, exist_ok=True)
-        vs = ("v1", "v2", "v3", "v4", "v5", "v6")
+        vs = ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9")
         print("preview:", contact_sheet(vs, os.path.join(a.preview, "icon_variants.png")))
         for v in vs:
             build(v, 512).save(os.path.join(a.preview, "%s_512.png" % v))
