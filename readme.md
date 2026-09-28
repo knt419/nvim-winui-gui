@@ -42,11 +42,16 @@ The design merges both parents: the **Neovim "N"** (blue left stem + green body,
 | `v7` **(installed)** | v5 palette + the **Neovim N**: white stems, green diagonal band |
 | `v8` | v5 palette + the Neovim N in Neovim's own colour placement: green left stem, white rest |
 | `v9` | v5 palette + the Neovim N as a **hollow outline** (white stroke, green diagonal inside) |
-| `v10` | **v1 + white `< >` brackets** flanking the N (WinUI reference's arm slope 0.591; vertex at ±0.415 of the tile, arms ±0.145 tall, 0.075 of the tile thick) |
+| `v10` | **v1 + white `< >` brackets** flanking the N (arm slope 0.591 from the WinUI reference; vertex at ±0.400, arms ±0.150 tall, 0.075 thick, **arm ends cut vertically**) |
 | `v11` | v10 with bigger brackets that tuck into/overlap the N |
 | `v12` | v10's proportions kept at every size (no optical drop of the brackets) |
+| `v13` | vertical ends, thinner stroke (0.050 thick, arms ±0.150) — the tip's cut is shorter |
+| `v14` | vertical ends, longer arms (0.065 thick, arms ±0.220) — the cut is half the arm, most bracket-like |
+| `v15` | vertical ends with 45° arms (0.075 thick, arms ±0.135) — same thickness, much shorter cut |
 
-`v10` uses optical sizing: at ≤24px the brackets only add mush, so they are dropped and the N is enlarged (0.68 vs 0.54 of the tile height) — `v12` is the same design with the brackets kept at every size for comparison. Measured at 256px, each bracket is 19px wide × 74px tall with a 31px clearance to the N on both sides (no touching).
+`v10` uses optical sizing: at ≤24px the brackets only add mush, so they are dropped and the N is enlarged (0.68 vs 0.54 of the tile height) — `v13`–`v15` follow the same rule, while `v12` keeps the brackets at every size for comparison.
+
+With **vertical** arm ends the cut's height is `thickness / slope` (0.075 / 0.591 ≈ 0.13 of the tile in `v10`), so a thick, short arm tapers towards it; `v13`–`v15` trade thickness against arm length to keep the bracket reading. Measured at 256px: 0 white pixels outside the tile, 0 N/bracket overlap pixels, N↔bracket clearance 23px (`v10`) / 13px (`v14`) at the closest point, and ≥2px at 32px.
 
 `v7`/`v8`/`v9` reuse v5's tile and split the N into its parts along the measured lines: the green diagonal is the band between L1 (`(57,105)`→`(409,641)`) and L2 (`(155,5)`→`(407,390)`), clipped at the right stem's left edge `x=407` so stems and diagonal never overlap; the hollow variant strokes the union silhouette `N_OUTLINE`.
 

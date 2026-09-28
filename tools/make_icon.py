@@ -233,17 +233,28 @@ def stroke_mask(mask, k):
     return ImageChops.subtract(mask, mask.filter(ImageFilter.MinFilter(2 * k + 1)))
 
 
-def bracket_mask(size, side, vx_frac, half_h_frac, th_frac, slope=HEX_SLOPE, ss=SS):
-    """One WinUI-style white angle bracket: vertex at vx_frac, arms at `slope`, flat ends."""
+def bracket_mask(size, side, vx_frac, half_h_frac, th_frac, slope=HEX_SLOPE, cap="h", ss=SS):
+    """One WinUI-style white angle bracket: vertex at vx_frac, arms at `slope`.
+
+    cap="h" -> arm ends cut horizontally (as in the WinUI reference image);
+    cap="v" -> arm ends cut vertically, so the tip is a vertical edge of `th/slope` height
+               and the arm's reach inward ends at the outer corner instead of th further in.
+    """
     S = size * ss
     c = S / 2.0
     vx = c + side * vx_frac * S
     hh = half_h_frac * S
     th = th_frac * S
     dx = -side * slope * hh
+    if cap == "v":
+        dy = th / slope
+        pts = [(vx, c), (vx + dx, c - hh), (vx + dx, c - hh + dy),
+               (vx - side * th, c), (vx + dx, c + hh - dy), (vx + dx, c + hh)]
+    else:
+        pts = [(vx, c), (vx + dx, c - hh), (vx + dx - side * th, c - hh),
+               (vx - side * th, c), (vx + dx - side * th, c + hh), (vx + dx, c + hh)]
     m = Image.new("L", (S, S), 0)
-    ImageDraw.Draw(m).polygon([(vx, c), (vx + dx, c - hh), (vx + dx - side * th, c - hh),
-                               (vx - side * th, c), (vx + dx - side * th, c + hh), (vx + dx, c + hh)], fill=255)
+    ImageDraw.Draw(m).polygon(pts, fill=255)
     return m
 
 
@@ -297,11 +308,13 @@ def build(variant, size):
             img = over(img, WHITE, down(n_mask(size, 0.68), size))
         else:
             img = over(img, WHITE, down(n_mask(size, 0.54 if size >= 64 else 0.58), size))
-            # brackets: thicker + shorter than the first pass (th 0.075, arms +-0.145 of the tile)
-            hh = 0.145 if size >= 64 else 0.150
+            # brackets: arm ends cut VERTICALLY (cap="v"), so the tip's vertical edge is
+            # th/slope ~= 0.13 of the tile tall; vertex pulled in to 0.400 to rebalance the position
+            # (a vertical cap shortens the arm's inward reach by th).
+            hh = 0.150 if size >= 64 else 0.155
             th = 0.075 if size >= 64 else 0.082
             for side in (-1, 1):
-                img = over(img, WHITE, down(bracket_mask(size, side, 0.415, hh, th), size))
+                img = over(img, WHITE, down(bracket_mask(size, side, 0.400, hh, th, cap="v"), size))
     elif variant == "v11":    # v1 tile + full-size white N, larger brackets tucked behind it
         img = tile_base(size, FLUENT_A, NV_GREEN, inset=0.055, angle=45.0)
         img = over(img, WHITE, down(n_mask(size, 0.60), size))
@@ -311,9 +324,27 @@ def build(variant, size):
         img = tile_base(size, FLUENT_A, NV_GREEN, inset=0.055, angle=45.0)
         img = over(img, WHITE, down(n_mask(size, 0.54), size))
         for side in (-1, 1):
-            img = over(img, WHITE, down(bracket_mask(size, side, 0.415, 0.145, 0.075), size))
+            img = over(img, WHITE, down(bracket_mask(size, side, 0.400, 0.150, 0.075, cap="v"), size))
+    elif variant in ("v13", "v14", "v15"):
+        # vertical caps, three tuned readings of the same idea.  16-24px: same optical rule as v10
+        # (drop the brackets, bolden the N) -- otherwise the 1-2px gap between N and brackets mushes.
+        img = tile_base(size, FLUENT_A, NV_GREEN, inset=0.055, angle=45.0)
+        if size <= 24:
+            img = over(img, WHITE, down(n_mask(size, 0.68), size))
+        else:
+            img = over(img, WHITE, down(n_mask(size, 0.54 if size >= 64 else 0.58), size))
+            if variant == "v13":      # thinner stroke: the tip's cut is shorter (th/slope)
+                vx, hh, th, sl = 0.400, 0.150, 0.050, HEX_SLOPE
+            elif variant == "v14":    # longer arms: the cut is a smaller share of the arm
+                vx, hh, th, sl = 0.400, 0.220, 0.065, HEX_SLOPE
+            else:  # v15            # 45-degree arms: same thickness, much shorter vertical cut
+                vx, hh, th, sl = 0.425, 0.135, 0.075, 1.0
+            if size < 64:
+                th += 0.008            # keep the sub-64px strokes readable
+            for side in (-1, 1):
+                img = over(img, WHITE, down(bracket_mask(size, side, vx, hh, th, slope=sl, cap="v"), size))
     else:
-        raise SystemExit("variant must be v1..v12")
+        raise SystemExit("variant must be v1..v15")
     return img
 
 
@@ -391,6 +422,41 @@ def svg_for(variant, path, s=512):
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d">\n'
             '  <defs>%s</defs>\n  %s\n</svg>\n' % (s, s, s, s, grad, body))
         return path
+    if variant in ("v10", "v11", "v12", "v13", "v14", "v15"):
+        # bracketed variants: squircle tile + white N + white chevrons.
+        # the vertical-cut polygon here must stay identical to bracket_mask(cap="v").
+        prm = {"v10": (0.400, 0.150, 0.075, HEX_SLOPE, "v"), "v11": (0.40, 0.24, 0.075, HEX_SLOPE, "h"),
+               "v12": (0.400, 0.150, 0.075, HEX_SLOPE, "v"), "v13": (0.400, 0.150, 0.050, HEX_SLOPE, "v"),
+               "v14": (0.400, 0.220, 0.065, HEX_SLOPE, "v"), "v15": (0.425, 0.135, 0.075, 1.0, "v")}
+        vx_f, hh_f, th_f, sl, cap = prm[variant]
+        nsc = 0.60 if variant == "v11" else 0.54
+        c = s / 2.0
+        x0, y0, x1, y1 = BOX
+        k = nsc * s / (y1 - y0)
+        hh, th = hh_f * s, th_f * s
+        grad = ('<linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'
+                '<stop offset="0" stop-color="#0F6CBD"/><stop offset="1" stop-color="#57A143"/></linearGradient>')
+        body = '<path d="%s" fill="url(#g)"/>' % ("M " + " L ".join(
+            "%.2f %.2f" % pt for pt in squircle_pts(s / 2, s / 2, s / 2 - 0.055 * s, 4.0, 192)) + " Z")
+        mcx, mcy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        for poly in (P_GREEN, P_BLUE):
+            body += '<path d="%s" fill="#FFFFFF"/>' % ("M " + " L ".join(
+                "%.2f %.2f" % (c + (pt[0] - mcx) * k, c + (pt[1] - mcy) * k) for pt in poly) + " Z")
+        for side in (-1, 1):
+            vx = c + side * vx_f * s
+            dx = -side * sl * hh
+            if cap == "v":
+                dy = th / sl
+                poly = [(vx, c), (vx + dx, c - hh), (vx + dx, c - hh + dy), (vx - side * th, c),
+                        (vx + dx, c + hh - dy), (vx + dx, c + hh)]
+            else:
+                poly = [(vx, c), (vx + dx, c - hh), (vx + dx - side * th, c - hh), (vx - side * th, c),
+                        (vx + dx - side * th, c + hh), (vx + dx, c + hh)]
+            body += '<path d="%s" fill="#FFFFFF"/>' % ("M " + " L ".join("%.2f %.2f" % pt for pt in poly) + " Z")
+        open(path, "w", encoding="utf-8", newline="\n").write(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d">\n'
+            '  <defs>%s</defs>\n  %s\n</svg>\n' % (s, s, s, s, grad, body))
+        return path
     if variant in ("v4", "v5", "v6"):
         def pp(pts):
             return "M " + " L ".join("%.2f %.2f" % pt for pt in pts) + " Z"
@@ -447,9 +513,13 @@ def svg_for(variant, path, s=512):
                 + '<path d="%s" fill="#0674B3"/>' % path_of(P_BLUE)
                 + '<path d="%s" fill="#57A143"/>' % path_of(P_GREEN))
     else:
+        # v1/v3 fallback: the squircle tile + the white N silhouette.  (v3's SVG still draws the N
+        # rather than its code chevrons -- no vector output for those yet.)
         grad = ('<linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'
                 '<stop offset="0" stop-color="#0F6CBD"/><stop offset="1" stop-color="#57A143"/></linearGradient>')
-        body = '<path d="%s" fill="url(#g)"/>' % sq + '<path d="%s" fill="#FFFFFF"/>' % path_of(P_GREEN)
+        body = '<path d="%s" fill="url(#g)"/>' % sq
+        for poly in (P_GREEN, P_BLUE):
+            body += '<path d="%s" fill="#FFFFFF"/>' % path_of(poly)
     svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d">\n'
            '  <defs>%s</defs>\n  %s\n</svg>\n' % (s, s, s, s, grad, body))
     open(path, "w", encoding="utf-8", newline="\n").write(svg)
@@ -464,11 +534,11 @@ def main():
     a = ap.parse_args()
 
     if a.ascii:
-        for v in ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12"):
+        for v in ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15"):
             ascii_preview(build(v, 64), v)
     if a.preview:
         os.makedirs(a.preview, exist_ok=True)
-        vs = ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12")
+        vs = ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15")
         print("preview:", contact_sheet(vs, os.path.join(a.preview, "icon_variants.png")))
         for v in vs:
             build(v, 512).save(os.path.join(a.preview, "%s_512.png" % v))
