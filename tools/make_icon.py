@@ -143,6 +143,69 @@ def down(mask, size):
     return mask.resize((size, size), Image.LANCZOS)
 
 
+# ---- WinUI reference tile (hexagon) measured from image_0b53b2 -------------
+# flat top/bottom edges + pointed left/right vertices at mid height, radial blue gradient,
+# white "<" ">" chevrons whose arms run parallel to the hexagon's slanted sides.
+HEX_ASPECT = 357.0 / 311.0          # width : height
+REF_IN = (0x5A, 0xA5, 0xE8)         # brightest gradient sample (#519FE6)
+REF_OUT = (0x0B, 0x47, 0xA5)        # navy edge (#0C48A5)
+HEX_SLOPE = 0.591                   # dx/dy of the slanted sides and of the chevron arms
+
+
+def hexagon_pts(cx, cy, w, h):
+    ew = 0.249 * w
+    eh = 0.5 * h
+    return [(cx - ew, cy - eh), (cx + ew, cy - eh), (cx + 0.5 * w, cy),
+            (cx + ew, cy + eh), (cx - ew, cy + eh), (cx - 0.5 * w, cy)]
+
+
+def hexagon_mask(size, width_frac=0.92, ss=SS):
+    S = size * ss
+    w = width_frac * S
+    m = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(m).polygon(hexagon_pts(S / 2, S / 2, w, w / HEX_ASPECT), fill=255)
+    return m
+
+
+def radial_gradient(size, c_in, c_out, center=(0.58, 0.34), gamma=1.1):
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    x = xx / max(1, size - 1) - center[0]
+    y = yy / max(1, size - 1) - center[1]
+    d = np.sqrt(x * x + y * y) / math.hypot(max(center[0], 1 - center[0]), max(center[1], 1 - center[1]))
+    t = np.clip(d, 0, 1) ** gamma
+    img = np.zeros((size, size, 3), np.float32)
+    for i in range(3):
+        img[..., i] = c_in[i] + (c_out[i] - c_in[i]) * t
+    return img
+
+
+def hex_tile_base(size, width_frac=0.92, c_in=REF_IN, c_out=REF_OUT):
+    g = radial_gradient(size, c_in, c_out)
+    alpha = np.asarray(hexagon_mask(size, width_frac).resize((size, size), Image.LANCZOS))
+    out = np.zeros((size, size, 4), np.uint8)
+    out[..., :3] = g.astype(np.uint8)
+    out[..., 3] = alpha
+    return Image.fromarray(out, "RGBA")
+
+
+def ref_chevron_mask(size, width_frac=0.92, ss=SS):
+    """The reference's white "<" ">" pair (arms parallel to the hexagon sides, flat ends)."""
+    S = size * ss
+    w = width_frac * S
+    h = w / HEX_ASPECT
+    th = 0.143 * w
+    hh = 0.405 * h
+    cx = cy = S / 2.0
+    m = Image.new("L", (S, S), 0)
+    d = ImageDraw.Draw(m)
+    for side in (-1, 1):
+        vx = cx + side * (0.5 * w - 0.064 * w)
+        dx = -side * HEX_SLOPE * hh
+        d.polygon([(vx, cy), (vx + dx, cy - hh), (vx + dx - side * th, cy - hh),
+                   (vx - side * th, cy), (vx + dx - side * th, cy + hh), (vx + dx, cy + hh)], fill=255)
+    return m
+
+
 def n_scale(size):
     """Optical sizing: enlarge the N on small raster sizes so the strokes stay legible."""
     return 0.60 if size >= 64 else (0.68 if size >= 32 else 0.76)
@@ -163,8 +226,18 @@ def build(variant, size):
         img = over(img, NV_GREEN, down(diagonal_mask(size, 0.200, 0.090), size))
         img = over(img, WHITE, down(chevron_mask(size, -1, 0.200, 0.175, 0.065), size))
         img = over(img, WHITE, down(chevron_mask(size, +1, 0.800, 0.175, 0.065), size))
+    elif variant == "v4":     # WinUI reference hexagon tile, white N
+        img = hex_tile_base(size)
+        img = over(img, WHITE, down(n_mask(size, n_scale(size)), size))
+    elif variant == "v5":     # hexagon tile: reference "< >" tag + the N's diagonal as a green slash
+        img = hex_tile_base(size)
+        img = over(img, NV_GREEN, down(diagonal_mask(size, 0.245, 0.135), size))
+        img = over(img, WHITE, down(ref_chevron_mask(size), size))
+    elif variant == "v6":     # proven squircle tile, but in the reference's radial blue gradient
+        img = tile_base(size, REF_IN, REF_OUT, inset=0.055, angle=45.0)
+        img = over(img, WHITE, down(n_mask(size, n_scale(size)), size))
     else:
-        raise SystemExit("variant must be v1/v2/v3")
+        raise SystemExit("variant must be v1..v6")
     return img
 
 
@@ -212,6 +285,42 @@ def contact_sheet(variants, path, bg=(0x2B, 0x2F, 0x36)):
 
 
 def svg_for(variant, path, s=512):
+    if variant in ("v4", "v5", "v6"):
+        def pp(pts):
+            return "M " + " L ".join("%.2f %.2f" % pt for pt in pts) + " Z"
+        grad = ('<radialGradient id="g" cx="0.58" cy="0.34" r="1.05">'
+                '<stop offset="0" stop-color="#5AA5E8"/><stop offset="1" stop-color="#0B47A5"/></radialGradient>')
+        if variant == "v6":
+            tile = pp(squircle_pts(s / 2, s / 2, s / 2 - 0.055 * s, 4.0, 192))
+        else:
+            w = 0.92 * s
+            tile = pp(hexagon_pts(s / 2, s / 2, w, w / HEX_ASPECT))
+        body = '<path d="%s" fill="url(#g)"/>' % tile
+        c = s / 2.0
+        if variant == "v5":
+            w = 0.92 * s
+            h = w / HEX_ASPECT
+            th, hh = 0.143 * w, 0.405 * h
+            h2, wd = 0.245 * s, 0.135 * s
+            tx, bx = c - SLOPE * h2, c + SLOPE * h2
+            body += '<path d="%s" fill="#57A143"/>' % pp([(tx - wd / 2, c - h2), (tx + wd / 2, c - h2),
+                                                          (bx + wd / 2, c + h2), (bx - wd / 2, c + h2)])
+            for side in (-1, 1):
+                vx = c + side * (0.5 * w - 0.064 * w)
+                dx = -side * HEX_SLOPE * hh
+                body += '<path d="%s" fill="#FFFFFF"/>' % pp([(vx, c), (vx + dx, c - hh), (vx + dx - side * th, c - hh),
+                                                              (vx - side * th, c), (vx + dx - side * th, c + hh), (vx + dx, c + hh)])
+        else:
+            x0, y0, x1, y1 = BOX
+            k = n_scale(s) * s / (y1 - y0)
+            mcx, mcy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+            for poly in ((P_GREEN, P_BLUE) if variant == "v4" else (P_GREEN,)):
+                body += '<path d="%s" fill="#FFFFFF"/>' % ("M " + " L ".join(
+                    "%.2f %.2f" % (c + (pt[0] - mcx) * k, c + (pt[1] - mcy) * k) for pt in poly) + " Z")
+        open(path, "w", encoding="utf-8", newline="\n").write(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d">\n'
+            '  <defs>%s</defs>\n  %s\n</svg>\n' % (s, s, s, s, grad, body))
+        return path
     inset = 0.055
     r = s / 2 - inset * s
     pts = squircle_pts(s / 2, s / 2, r, 4.0, 192)
@@ -249,12 +358,13 @@ def main():
     a = ap.parse_args()
 
     if a.ascii:
-        for v in ("v1", "v2", "v3"):
+        for v in ("v1", "v2", "v3", "v4", "v5", "v6"):
             ascii_preview(build(v, 64), v)
     if a.preview:
         os.makedirs(a.preview, exist_ok=True)
-        print("preview:", contact_sheet(("v1", "v2", "v3"), os.path.join(a.preview, "icon_variants.png")))
-        for v in ("v1", "v2", "v3"):
+        vs = ("v1", "v2", "v3", "v4", "v5", "v6")
+        print("preview:", contact_sheet(vs, os.path.join(a.preview, "icon_variants.png")))
+        for v in vs:
             build(v, 512).save(os.path.join(a.preview, "%s_512.png" % v))
             build(v, 256).save(os.path.join(a.preview, "%s_256.png" % v))
     if a.install:

@@ -34,6 +34,11 @@ The design merges both parents: the **Neovim "N"** (blue left stem + green body,
 | `v1` (installed) | Fluent blue → Neovim green gradient squircle, white N |
 | `v2` | dark squircle + hairline border, authentic two-tone N (blue stem `#0674B3`, green `#57A143`) |
 | `v3` | Windows-blue squircle: the WinUI `</>` code tag with the N's diagonal as the green slash |
+| `v4` | **WinUI hexagon tile** (flat top/bottom, pointed sides, radial `#5AA5E8` → `#0B47A5`), white N |
+| `v5` | WinUI hexagon tile: the reference's `< >` chevrons + the N's diagonal as the green slash |
+| `v6` | squircle tile in the WinUI reference's radial blue gradient (no green), white N |
+
+The hexagon geometry and its gradient come from measuring the supplied WinUI reference image: total aspect 357:311, flat edges 49.8 % of the width, slanted sides and chevron arms both at `dx/dy = 0.591`, chevron stroke 14.3 % of the width horizontally and its arms ±40.5 % of the tile height, brightest gradient sample `#519FE6` (upper-left/centre) falling to `#0C48A5` navy at the right/bottom edges.
 
 Regenerate or switch variant (Pillow + numpy via `uv`; no other toolchain needed):
 ```sh
