@@ -1,115 +1,173 @@
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
+# Builds nvim-winui-gui: a WinUI 3 (Windows App SDK) app that hosts nvim over msgpack-RPC.
+#
+# This is deliberately NOT the stock ".NET Core Desktop" template that ships with a fresh
+# Windows desktop repo. That one packages an MSIX and expects a signing certificate, neither of
+# which applies here: src/App/NvimWinUIGui.csproj sets WindowsPackageType=None, so the app is
+# unpackaged, self-contained (WindowsAppSDKSelfContained), and pinned to win-x64. There is no
+# MSIX to package and nothing to sign, so the workflow builds the project, smoke-tests it against
+# a real Neovim, and uploads the publish output.
+#
+# The build does not need Visual Studio, matching how the app is developed locally: the project
+# is pure C# with no XAML markup, so the Windows App SDK's in-proc MarkupCompilePass2 is used and
+# setup-msbuild is not required.
 
-# This workflow will build, test, sign and package a WPF or Windows Forms desktop application
-# built on .NET Core.
-# To learn how to migrate your existing application to .NET Core,
-# refer to https://docs.microsoft.com/en-us/dotnet/desktop-wpf/migration/convert-project-from-net-framework
-#
-# To configure this workflow:
-#
-# 1. Configure environment variables
-# GitHub sets default environment variables for every workflow run.
-# Replace the variables relative to your project in the "env" section below.
-#
-# 2. Signing
-# Generate a signing certificate in the Windows Application
-# Packaging Project or add an existing signing certificate to the project.
-# Next, use PowerShell to encode the .pfx file using Base64 encoding
-# by running the following Powershell script to generate the output string:
-#
-# $pfx_cert = Get-Content '.\SigningCertificate.pfx' -Encoding Byte
-# [System.Convert]::ToBase64String($pfx_cert) | Out-File 'SigningCertificate_Encoded.txt'
-#
-# Open the output file, SigningCertificate_Encoded.txt, and copy the
-# string inside. Then, add the string to the repo as a GitHub secret
-# and name it "Base64_Encoded_Pfx."
-# For more information on how to configure your signing certificate for
-# this workflow, refer to https://github.com/microsoft/github-actions-for-desktop-apps#signing
-#
-# Finally, add the signing certificate password to the repo as a secret and name it "Pfx_Key".
-# See "Build the Windows Application Packaging project" below to see how the secret is used.
-#
-# For more information on GitHub Actions, refer to https://github.com/features/actions
-# For a complete CI/CD sample to get started with GitHub Action workflows for Desktop Applications,
-# refer to https://github.com/microsoft/github-actions-for-desktop-apps
-
-name: .NET Core Desktop
+name: Build
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  # The app spawns nvim --headless; keep a predictable config for the smoke test.
+  NVIM_WINUI_ARGS: -u NONE
 
 jobs:
-
   build:
-
     strategy:
+      fail-fast: false
       matrix:
-        configuration: [Debug, Release]
+        configuration: [ Debug, Release ]
 
-    runs-on: windows-latest  # For a list of available runner types, refer to
-                             # https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idruns-on
-
-    env:
-      Solution_Name: your-solution-name                         # Replace with your solution name, i.e. MyWpfApp.sln.
-      Test_Project_Path: your-test-project-path                 # Replace with the path to your test project, i.e. MyWpfApp.Tests\MyWpfApp.Tests.csproj.
-      Wap_Project_Directory: your-wap-project-directory-name    # Replace with the Wap project directory relative to the solution, i.e. MyWpfApp.Package.
-      Wap_Project_Path: your-wap-project-path                   # Replace with the path to your Wap project, i.e. MyWpf.App.Package\MyWpfApp.Package.wapproj.
+    runs-on: windows-2022
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
 
-    # Install the .NET Core workload
-    - name: Install .NET Core
+    # net8.0-windows10.0.22621.0 needs the Windows App SDK 2.x runtime, which
+    # setup-dotnet installs alongside the .NET SDK.
+    - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 8.0.x
 
-    # Add  MSBuild to the PATH: https://github.com/microsoft/setup-msbuild
-    - name: Setup MSBuild.exe
-      uses: microsoft/setup-msbuild@v2
+    # NvimCore has no package references, so it restores on its own; the app pulls
+    # Microsoft.WindowsAppSDK and Microsoft.Graphics.Win2D. Restore the app directly rather than
+    # the solution: NvimWinUISolution.sln also references tools/rpc-test, which is a diagnostic
+    # harness (see the smoke-test job) and not part of the shipping build.
+    - name: Restore
+      run: dotnet restore src/App/NvimWinUIGui.csproj
 
-    # Execute all unit tests in the solution
-    - name: Execute unit tests
-      run: dotnet test
-
-    # Restore the application to populate the obj folder with RuntimeIdentifiers
-    - name: Restore the application
-      run: msbuild $env:Solution_Name /t:Restore /p:Configuration=$env:Configuration
-      env:
-        Configuration: ${{ matrix.configuration }}
-
-    # Decode the base 64 encoded pfx and save the Signing_Certificate
-    - name: Decode the pfx
+    # The smoke test below attaches the app to a real Neovim, so nvim has to exist first.
+    # windows-2022 does not ship it (checked the runner image's installed-software list).
+    #
+    # Version is pinned to 0.12.5 — the release the ext_linegrid/ext_multigrid handling is written
+    # and verified against — because the chocolatey default moves and 0.12.6-beta is currently
+    # listed, so an unpinned install could silently start testing a build nobody verified.
+    #
+    # /NeovimOnPathForAll is explicit because the package does not add nvim to PATH by default, and
+    # the app resolves nvim from PATH unless NVIM_WINUI_NVIM is set. Without it the smoke test
+    # would fail on `Get-Command nvim` for a reason that has nothing to do with the app.
+    - name: Install Neovim
       run: |
-        $pfx_cert_byte = [System.Convert]::FromBase64String("${{ secrets.Base64_Encoded_Pfx }}")
-        $certificatePath = Join-Path -Path $env:Wap_Project_Directory -ChildPath GitHubActionsWorkflow.pfx
-        [IO.File]::WriteAllBytes("$certificatePath", $pfx_cert_byte)
+        $ErrorActionPreference = 'Stop'
+        choco install neovim --version=0.12.5 --params '"/NeovimOnPathForAll"' `
+          --yes --no-progress --limit-output
+        if ($LASTEXITCODE -ne 0) { throw "choco install neovim failed with $LASTEXITCODE" }
+        # choco updates the machine PATH, but this step's shell already inherited the old one, so
+        # refresh it or the next step cannot see nvim.
+        $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+                    [System.Environment]::GetEnvironmentVariable('Path', 'User')
+        $v = nvim --version | Select-Object -First 1
+        Write-Host "installed: $v"
+        if ($v -notmatch '0\.12\.') { throw "expected Neovim 0.12.x, got: $v" }
 
-    # Create the app package by building and packaging the Windows Application Packaging project
-    - name: Create the app package
-      run: msbuild $env:Wap_Project_Path /p:Configuration=$env:Configuration /p:UapAppxPackageBuildMode=$env:Appx_Package_Build_Mode /p:AppxBundle=$env:Appx_Bundle /p:PackageCertificateKeyFile=GitHubActionsWorkflow.pfx /p:PackageCertificatePassword=${{ secrets.Pfx_Key }}
+    # --no-incremental so a cached obj/ from the restore step can never produce a build that
+    # silently skipped recompiling a changed source file.
+    - name: Build
+      run: >
+        dotnet build src/App/NvimWinUIGui.csproj
+        --configuration ${{ matrix.configuration }}
+        --no-restore
+        --no-incremental
       env:
-        Appx_Bundle: Always
-        Appx_Bundle_Platforms: x86|x64
-        Appx_Package_Build_Mode: StoreUpload
         Configuration: ${{ matrix.configuration }}
 
-    # Remove the pfx
-    - name: Remove the pfx
-      run: Remove-Item -path $env:Wap_Project_Directory\GitHubActionsWorkflow.pfx
+    # Prove the app actually attaches to a real Neovim and renders, rather than only compiling.
+    # Requires nvim on the runner image; a failure here means the RPC/UI path is broken.
+    - name: Smoke test against a live Neovim
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $exe = "src/App/bin/x64/${{ matrix.configuration }}/net8.0-windows10.0.22621.0/win-x64/NvimWinUIGui.exe"
+        if (-not (Test-Path $exe)) { throw "build output missing: $exe" }
 
-    # Upload the MSIX package: https://github.com/marketplace/actions/upload-a-build-artifact
+        $logDir = Join-Path $env:LOCALAPPDATA 'NvimWinUIGui'
+        $logFile = Join-Path $logDir 'startup.log'
+        Remove-Item -Recurse -Force $logDir -ErrorAction SilentlyContinue
+
+        # NVIM_WINUI_DIAG makes the app log what it did, so the assertions below read it instead
+        # of guessing. NVIM_WINUI_SELFTEST is deliberately left off: it types text into the session.
+        $env:NVIM_WINUI_DIAG = '1'
+        $env:NVIM_WINUI_NVIM = (Get-Command nvim -ErrorAction Stop).Source
+        $env:NVIM_WINUI_ARGS = '-u NONE'
+        Write-Host "using nvim: $env:NVIM_WINUI_NVIM ($((nvim --version | Select-Object -First 1)))"
+
+
+        $proc = Start-Process -FilePath $exe -PassThru
+        try {
+          # Wait for the first flush, not merely for the spawn line. Spawning proves the process
+          # started; a flush proves the msgpack-RPC handshake completed, nvim_ui_attach was
+          # accepted and the grid came back. Without the flush this check would pass on a build
+          # that starts and then fails to talk to nvim, which is the failure that actually happens.
+          $deadline = (Get-Date).AddSeconds(90)
+          $ok = $false
+          $body = ''
+          while ((Get-Date) -lt $deadline) {
+            if (Test-Path $logFile) {
+              $body = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+              if ($body -match 'spawned nvim pid=\d+ port=\d+') {
+                $spawn = $Matches[0]
+                if ($body -match 'tcp connect OK' -and $body -match 'DISPATCH event=flush') {
+                  $ok = $true
+                  break
+                }
+              }
+              # Surface a hard failure immediately instead of burning the whole timeout.
+              if ($body -match 'CRITICAL|LogCritical|Exception') {
+                throw "app reported a critical error during startup:`n$body"
+              }
+            }
+            if ($proc.HasExited) {
+              throw "app exited early with code $($proc.ExitCode). Log:`n$(if (Test-Path $logFile) { Get-Content $logFile -Raw })"
+            }
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not $ok) { throw "app did not reach a flushed grid within 90s. Log:`n$body" }
+
+          Write-Host "spawned : $spawn"
+          Write-Host "attached: RPC handshake + nvim_ui_attach + first flush OK"
+          Write-Host "--- log head ---"
+          Get-Content $logFile -TotalCount 25
+        }
+        finally {
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          Get-Process nvim -ErrorAction SilentlyContinue | Stop-Process -Force
+        }
+
+    # Publish a self-contained win-x64 build so the artifact runs with no .NET runtime and no
+    # Windows App SDK package installed. This is the same deployment mode the app uses locally.
+    - name: Publish (win-x64, self-contained)
+      run: >
+        dotnet publish src/App/NvimWinUIGui.csproj
+        --configuration ${{ matrix.configuration }}
+        --runtime win-x64
+        --self-contained true
+        --no-restore
+        --output publish/${{ matrix.configuration }}
+
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: MSIX Package
-        path: ${{ env.Wap_Project_Directory }}\AppPackages
+        name: nvim-winui-gui-${{ matrix.configuration }}-${{ github.sha }}
+        path: publish/${{ matrix.configuration }}
+        if-no-files-found: error
+        retention-days: 14
