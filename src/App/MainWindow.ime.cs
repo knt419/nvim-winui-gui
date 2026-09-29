@@ -189,16 +189,11 @@ public partial class MainWindow
         internal delegate IntPtr ImmAssociateContextFn(IntPtr hWnd, IntPtr hIMC);
         internal delegate bool ImmReleaseContextFn(IntPtr hIMC);
         internal delegate int ImmGetCompositionStringWFn(IntPtr hIMC, int index, StringBuilder? buf, int len);
-        // NotifyIME: the documented way for an app to drive the IME directly. Needed to abandon a
-        // composition, because there is no message for "cancel" — the IME only learns a composition
-        // ended when the app says so or when it commits.
-        internal delegate bool ImmNotifyIMEFn(IntPtr hWnd, uint dwAction, IntPtr dwIndex, IntPtr dwValue);
 
         internal static readonly ImmGetContextFn? GetContext;
         internal static readonly ImmAssociateContextFn? AssociateContext;
         internal static readonly ImmReleaseContextFn? ReleaseContext;
         internal static readonly ImmGetCompositionStringWFn? GetCompositionStringW;
-        internal static readonly ImmNotifyIMEFn? NotifyIME;
         internal static readonly bool Available;
 
         static Ime32()
@@ -217,16 +212,6 @@ public partial class MainWindow
                     System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmReleaseContext"));
                 GetCompositionStringW = Marshal.GetDelegateForFunctionPointer<ImmGetCompositionStringWFn>(
                     System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmGetCompositionStringW"));
-                // ImmNotifyIME lives in imm32.dll, not ime32.dll, so a missing ime32 must not make
-                // this whole probe fail — that is exactly the regression the lazy load fixed.
-                try
-                {
-                    IntPtr himm = System.Runtime.InteropServices.NativeLibrary.Load("imm32.dll");
-                    _immModule = himm;
-                    NotifyIME = Marshal.GetDelegateForFunctionPointer<ImmNotifyIMEFn>(
-                        System.Runtime.InteropServices.NativeLibrary.GetExport(himm, "ImmNotifyIME"));
-                }
-                catch { /* no NotifyIME: composition cancel degrades to clearing the control */ }
                 Available = true;
             }
             catch
@@ -237,7 +222,6 @@ public partial class MainWindow
 
         // Intentionally never freed: the delegates above are only valid while the module is loaded.
         private static IntPtr _module;
-        private static IntPtr _immModule;
     }
 
     // Create the hidden EDIT the IME composes into and subclass it. Called once the window is
@@ -512,31 +496,60 @@ public partial class MainWindow
         try
         {
             if (_imeEdit == IntPtr.Zero || !IsWindow(_imeEdit)) return;
-            if (Ime32.NotifyIME is not null)
+            // NOTE: do NOT call ImmNotifyIME here. ImmNotifyIME posts the composition string
+            // INTO the control, so it synchronously re-enters this very subclass proc for the
+            // EDIT we are already inside. That re-entrant call is what stopped the IME coming on
+            // at all: after cancelling through ImmNotifyIME the control would no longer accept a
+            // composition, so the IME could not be switched on again. Nothing may call back into
+            // the control from inside its own proc.
+            //
+            // Cancelling needs no message at all, and this is the reasoning:
+            //   - _imeComposing is ALREADY false (the Esc branch cleared it before calling here)
+            //   - the EDIT is a scratch buffer, so there is no preedit text in it to remove
+            //   - the only IME-owned state is the input context, and releasing it is what makes
+            //     the next composition start fresh
+            // So: empty the control (defensive, and free) and drop the input context.
+            ImeEditClear();
+            if (Ime32.GetContext is not null && Ime32.ReleaseContext is not null)
             {
                 try
                 {
-                    // IMC_SETCOMPOSITIONWSTRING: an empty string cancels without committing.
-                    Ime32.NotifyIME(_imeEdit, 0x0002 /* IMC_SETCOMPOSITIONWSTRING */, IntPtr.Zero, 0);
+                    IntPtr himc = Ime32.GetContext(_imeEdit);
+                    if (himc != IntPtr.Zero)
+                    {
+                        Ime32.ReleaseContext(himc);
+                        // The control no longer holds a context. ImmReleaseContext only drops the
+                        // app's reference — the control's own association is what ImeFocusTarget
+                        // has to re-take, otherwise the next composition finds no context and the
+                        // IME looks like it cannot be switched on.
+                        _imeContextAssociated = false;
+                        _imeContextWanted = true;
+                    }
                 }
                 catch { }
             }
-            if (Ime32.GetContext is not null && Ime32.ReleaseContext is not null)
+            if (_diagEnabled) LogStartup("IME: composition cancelled");
+            // Re-take the context NOW rather than waiting for the next activation: the user is
+            // still typing, and a keystroke that arrives before the context is back would find no
+            // context to compose into — which is the "IME will not turn on" symptom.
+            _imeContextTried = false;   // force one fresh association attempt on the next focus
+            try
             {
-                IntPtr himc = Ime32.GetContext(_imeEdit);
-                if (himc != IntPtr.Zero)
+                if (Ime32.Available && Ime32.AssociateContext is not null)
                 {
-                    try
-                    {
-                        if (Ime32.NotifyIME is not null)
-                            Ime32.NotifyIME(_imeEdit, 0x0005 /* IMC_CLEARCANDIDATE */, IntPtr.Zero, 0);
-                    }
-                    catch { }
-                    try { Ime32.ReleaseContext(himc); } catch { }
+                    IntPtr himc = Ime32.AssociateContext(_imeEdit, IntPtr.Zero);
+                    _imeContextAssociated = himc != IntPtr.Zero;
+                    _imeContextTried = true;
+                    _imeContextWanted = !_imeContextAssociated;
+                    if (_diagEnabled)
+                        LogStartup("IME: context re-taken after cancel -> 0x" + himc.ToString("X") +
+                                   (_imeContextAssociated ? " OK" : " NULL"));
                 }
             }
-            ImeEditClear();
-            if (_diagEnabled) LogStartup("IME: composition cancelled");
+            catch (Exception ex)
+            {
+                if (_diagEnabled) LogStartup("IME: context re-take failed: " + ex.GetType().Name);
+            }
         }
         catch (Exception ex) { if (_diagEnabled) LogStartup("IME cancel failed: " + ex.Message); }
     }
@@ -688,12 +701,25 @@ public partial class MainWindow
             // is not working at all. Re-associating the DEFAULT context (the real OS IME) is what
             // actually enables IME composition for this control.
             //
+            // This must be re-doable, not one-shot. Cancelling a composition releases the input
+            // context, and a released context is not restored by the IME on its own — the next
+            // composition then has no context at all and the IME looks like it cannot be switched
+            // on. So the association is re-applied whenever it is not currently held, which is
+            // what _imeContextAssociated tracks.
+            //
             // This is best-effort and MUST NOT be able to break input: on a system without
-            // ime32.dll the DllImport throws EntryPointNotFoundException/DllNotFoundException, and
-            // losing focus handling entirely because of it would be far worse than no IME. So the
-            // association is attempted inside its own try, and the diagnostic says which way it
-            // went — a silently skipped call is exactly the bug being fixed here.
-            if (!_imeContextTried)
+            // ime32.dll the loader reports unavailable, and losing focus handling entirely
+            // because of it would be far worse than no IME. So the association is attempted inside
+            // its own try, and the diagnostic says which way it went — a silently skipped call is
+            // exactly the bug being fixed here.
+            bool needContext = !_imeContextTried;
+            if (!needContext && _imeContextWanted && !_imeContextAssociated)
+            {
+                // A cancel released it; take it back before the next keystroke arrives.
+                needContext = true;
+                if (_diagEnabled) LogStartup("IME: re-associating input context after a cancel");
+            }
+            if (needContext)
             {
                 _imeContextTried = true;
                 if (Ime32.Available && Ime32.AssociateContext is not null)
@@ -702,11 +728,13 @@ public partial class MainWindow
                     {
                         IntPtr himc = Ime32.AssociateContext(_imeEdit, IntPtr.Zero); // NULL = default IME
                         _imeContextAssociated = himc != IntPtr.Zero;
+                        if (_imeContextAssociated) _imeContextWanted = false;
                         if (_diagEnabled) LogStartup("IME: ImmAssociateContext(default) -> 0x" +
                                                      himc.ToString("X") + (_imeContextAssociated ? " OK" : " NULL"));
                     }
                     catch (Exception ex)
                     {
+                        _imeContextAssociated = false;
                         if (_diagEnabled) LogStartup("IME: ImmAssociateContext failed: " + ex.GetType().Name);
                     }
                 }
@@ -727,8 +755,11 @@ public partial class MainWindow
         }
         catch (Exception ex) { if (_diagEnabled) LogStartup("IME focus failed: " + ex.Message); }
     }
-    private bool _imeContextTried;
-    private bool _imeContextAssociated;
+    private bool _imeContextTried;       // an association has been attempted at least once
+    private bool _imeContextAssociated;  // the control currently HOLDS an input context
+    // True when a context is wanted but not currently held, so ImeFocusTarget re-takes it. Set by
+    // ImeCancelComposition (which releases the context) and cleared once one is held again.
+    private bool _imeContextWanted = true;
 
     // True while composing: OnKeyDown must swallow those keystrokes so the romaji that drove the
     // IME is not inserted into nvim as plain input alongside the committed result.
