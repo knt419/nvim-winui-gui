@@ -65,6 +65,7 @@ public partial class MainWindow
     // Win32 messages / notifications / styles.
     private const int WM_SETTEXT = 0x000C;
     private const int WM_CHAR = 0x0102;
+    private const int VK_ESCAPE = 0x1B;
     private const int WM_KEYDOWN = 0x0100;
     private const int WM_NCDESTROY = 0x0082;
     private const int WM_IME_COMPOSITION = 0x0284;
@@ -188,11 +189,16 @@ public partial class MainWindow
         internal delegate IntPtr ImmAssociateContextFn(IntPtr hWnd, IntPtr hIMC);
         internal delegate bool ImmReleaseContextFn(IntPtr hIMC);
         internal delegate int ImmGetCompositionStringWFn(IntPtr hIMC, int index, StringBuilder? buf, int len);
+        // NotifyIME: the documented way for an app to drive the IME directly. Needed to abandon a
+        // composition, because there is no message for "cancel" — the IME only learns a composition
+        // ended when the app says so or when it commits.
+        internal delegate bool ImmNotifyIMEFn(IntPtr hWnd, uint dwAction, IntPtr dwIndex, IntPtr dwValue);
 
         internal static readonly ImmGetContextFn? GetContext;
         internal static readonly ImmAssociateContextFn? AssociateContext;
         internal static readonly ImmReleaseContextFn? ReleaseContext;
         internal static readonly ImmGetCompositionStringWFn? GetCompositionStringW;
+        internal static readonly ImmNotifyIMEFn? NotifyIME;
         internal static readonly bool Available;
 
         static Ime32()
@@ -211,6 +217,16 @@ public partial class MainWindow
                     System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmReleaseContext"));
                 GetCompositionStringW = Marshal.GetDelegateForFunctionPointer<ImmGetCompositionStringWFn>(
                     System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmGetCompositionStringW"));
+                // ImmNotifyIME lives in imm32.dll, not ime32.dll, so a missing ime32 must not make
+                // this whole probe fail — that is exactly the regression the lazy load fixed.
+                try
+                {
+                    IntPtr himm = System.Runtime.InteropServices.NativeLibrary.Load("imm32.dll");
+                    _immModule = himm;
+                    NotifyIME = Marshal.GetDelegateForFunctionPointer<ImmNotifyIMEFn>(
+                        System.Runtime.InteropServices.NativeLibrary.GetExport(himm, "ImmNotifyIME"));
+                }
+                catch { /* no NotifyIME: composition cancel degrades to clearing the control */ }
                 Available = true;
             }
             catch
@@ -221,6 +237,7 @@ public partial class MainWindow
 
         // Intentionally never freed: the delegates above are only valid while the module is loaded.
         private static IntPtr _module;
+        private static IntPtr _immModule;
     }
 
     // Create the hidden EDIT the IME composes into and subclass it. Called once the window is
@@ -344,23 +361,33 @@ public partial class MainWindow
                     // ordinary nvim key would be lost. Non-printable keys are handled here; printable
                     // ones are NOT, because Windows pairs every WM_KEYDOWN with a WM_CHAR carrying the
                     // same character -- forwarding both would send each keystroke to nvim twice.
-                    // While the IME is composing, keys belong to the IME and nothing is forwarded.
+                    //
+                    // While the IME is composing, keys belong to the IME — EXCEPT Esc, which is how a
+                    // composition is abandoned. Swallowing it left the composition open and nothing
+                    // forwarded: measured, Esc during an open composition left nvim in insert mode
+                    // and the app stayed wedged in "composing" afterwards, so the IME never came
+                    // back. Esc is forwarded and the composition is torn down here instead.
+                    if ((int)wParam == VK_ESCAPE)
+                    {
+                        bool wasComposing = _imeComposing;
+                        _imeComposing = false;
+                        ForwardToNvim("<Esc>");
+                        // Cancel the IME's own composition, or the IME keeps a preedit it believes
+                        // is still open and swallows the next keystrokes.
+                        if (wasComposing) ImeCancelComposition();
+                        // Consumed: the EDIT is empty, so it can only refuse the key and ring.
+                        suppressOriginal = true;
+                        break;
+                    }
                     if (!_imeComposing)
                     {
-                        // Two keys are the exception, and they are the whole bug. Windows sends BOTH
-                        // WM_KEYDOWN and WM_CHAR for one physical press, and for these two the char
-                        // maps to the same command as the virtual key:
+                        // Two keys are the exception, and they are the whole double-send bug.
+                        // Windows sends BOTH WM_KEYDOWN and WM_CHAR for one physical press, and for
+                        // these two the char maps to the same command as the virtual key:
                         //   VK_RETURN (0x0D) -> "<CR>"   and  WM_CHAR 0x0D/0x0A -> "<CR>"
                         //   VK_TAB    (0x09) -> "<Tab>"  and  WM_CHAR 0x09     -> "<Tab>"
-                        // So each press was forwarded twice, and one Enter split the line twice
-                        // (measured: 1 press -> 2 INPUT lines -> 3 buffer lines, while nvim on its own
-                        // turns a single <CR> into exactly one line).
-                        //
-                        // WM_CHAR is the single delivery point for text and the only place a
-                        // character-shaped command may be sent, so these two are not mapped from
-                        // their virtual key. Every other command key (<BS>, <Esc>, arrows, <Home>,
-                        // <End>, <F1>...) has no WM_CHAR carrying a command, so it stays on this
-                        // path and still arrives exactly once.
+                        // So each press was forwarded twice, and one Enter split the line twice.
+                        // WM_CHAR is the single delivery point for them, so they are not mapped here.
                         int vki = (int)wParam;
                         if (vki == 0x0D || vki == 0x09) { suppressOriginal = true; break; }
                         ForwardNvimKey(wParam, lParam, printable: false);
@@ -393,8 +420,8 @@ public partial class MainWindow
                         break;
                     }
                     // Every other control char (^H/BS, ^G, ^C, DEL...) was already forwarded from
-                    // WM_KEYDOWN. Forwarding here too would double it, so only consume: the EDIT is
-                    // empty and single-line, so it would refuse the char and ring the bell.
+                    // WM_KEYDOWN. Forwarding here too would double it, so only consume: the EDIT is a
+                    // scratch buffer, so it would refuse the char and ring the bell.
                     if (wParam < 0x20 || wParam == 0x7F)
                     {
                         suppressOriginal = true;
@@ -464,6 +491,54 @@ public partial class MainWindow
 
         if (clearAfter) ImeEditClear();
         return result;
+    }
+
+    // Abandon an in-flight composition. Forwarding <Esc> to nvim is only half of leaving a
+    // composition: the IME also holds an open preedit, and if that stays open it swallows the
+    // next keystrokes and never presents a candidate window again — the reported "Esc severs the
+    // IME". The three steps below are what a client app is expected to do, and each is best-effort
+    // because the system IME is not always reachable (no ime32 on some installs).
+    //
+    //   1. tell the IME the composition is finished with no result string (GCS_RESULTSTR with a
+    //      zero result size, which is how "cancelled" is spelled)
+    //   2. clear the input context, which drops any preedit the IME cached for this control
+    //   3. empty the control, so the next composition starts from a known-empty state
+    //
+    // Failing all of that is not fatal: the EDIT is empty, so the IME has nothing stale to work
+    // from even if the calls do nothing. That is the case on a box without ime32, where the
+    // synthetic WM_CHAR path is used and there is no IME-owned preedit to begin with.
+    private void ImeCancelComposition()
+    {
+        try
+        {
+            if (_imeEdit == IntPtr.Zero || !IsWindow(_imeEdit)) return;
+            if (Ime32.NotifyIME is not null)
+            {
+                try
+                {
+                    // IMC_SETCOMPOSITIONWSTRING: an empty string cancels without committing.
+                    Ime32.NotifyIME(_imeEdit, 0x0002 /* IMC_SETCOMPOSITIONWSTRING */, IntPtr.Zero, 0);
+                }
+                catch { }
+            }
+            if (Ime32.GetContext is not null && Ime32.ReleaseContext is not null)
+            {
+                IntPtr himc = Ime32.GetContext(_imeEdit);
+                if (himc != IntPtr.Zero)
+                {
+                    try
+                    {
+                        if (Ime32.NotifyIME is not null)
+                            Ime32.NotifyIME(_imeEdit, 0x0005 /* IMC_CLEARCANDIDATE */, IntPtr.Zero, 0);
+                    }
+                    catch { }
+                    try { Ime32.ReleaseContext(himc); } catch { }
+                }
+            }
+            ImeEditClear();
+            if (_diagEnabled) LogStartup("IME: composition cancelled");
+        }
+        catch (Exception ex) { if (_diagEnabled) LogStartup("IME cancel failed: " + ex.Message); }
     }
 
     // Clear the EDIT without forwarding the change to nvim.
