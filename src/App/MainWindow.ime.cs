@@ -66,6 +66,8 @@ public partial class MainWindow
     private const int WM_SETTEXT = 0x000C;
     private const int WM_CHAR = 0x0102;
     private const int WM_KEYDOWN = 0x0100;
+    private const int WM_KEYUP = 0x0101;
+    private const int WM_SYSKEYUP = 0x0105;
     private const int WM_NCDESTROY = 0x0082;
     private const int WM_IME_COMPOSITION = 0x0284;
     private const int WM_IME_CHAR = 0x0286;
@@ -296,6 +298,11 @@ public partial class MainWindow
         // Backspace/Enter/Tab/Esc/Delete/arrows: Windows rings the bell for a keystroke a control
         // refuses. Consuming them here keeps the beep out while nvim still gets the key.
         bool suppressOriginal = false;
+        // When non-zero, the message is forwarded to the ORIGINAL EDIT proc under a DIFFERENT id.
+        // That is how WM_IME_CHAR gets the EDIT to synthesize its WM_CHAR (the single delivery
+        // point for committed text) without also letting the EDIT perform the insert — the insert
+        // is what made a control that is cleared immediately afterwards ring the bell.
+        int translated = 0;
         try
         {
             switch (msg)
@@ -331,6 +338,13 @@ public partial class MainWindow
                     // It must NOT be suppressed either: the original proc is exactly what SYNTHESIZES
                     // that WM_CHAR, so consuming it here would silently drop every committed
                     // character. Unlike the command keys, this message has to reach the EDIT.
+                    //
+                    // But the character it carries must never be INSERTED: the WM_CHAR branch now
+                    // forwards-and-consumes, so letting the EDIT also insert it would double the
+                    // text and ring on a control whose text is cleared moments later. Translating
+                    // the message to WM_CHAR and forwarding to the ORIGINAL proc is what generates
+                    // the synthetic WM_CHAR we want, while skipping the EDIT's own edit handling.
+                    translated = WM_CHAR;
                     break;
                 }
                 case WM_KEYDOWN:
@@ -380,7 +394,21 @@ public partial class MainWindow
                         break;
                     }
                     if (wParam >= 1 && wParam <= 0xFFFF && (wParam & 0xF800) != 0xD800)
-                        clearAfter = CommitImeText(((char)wParam).ToString());
+                    {
+                        string ch = ((char)wParam).ToString();
+                        // Forward it, then CONSUME the message instead of letting the EDIT insert
+                        // it. The EDIT is a permanent scratch buffer that we clear after every
+                        // keystroke, so its only possible reaction to an insert is to ring: the
+                        // measured stream for a plain 'a' was
+                        //   KEYDOWN -> IME-COMMIT 'a' -> CHAR(0x08) -> CHAR('a') -> KEYUP
+                        // where the synthetic CHAR(0x08) is the EDIT clearing its own text and the
+                        // CHAR('a') is the insert. Both reach the EDIT proc, and a proc that is
+                        // handed an insert it will immediately have erased is exactly the
+                        // "refused keystroke" case Windows bells on. Forwarding here (not on
+                        // WM_KEYDOWN) keeps WM_CHAR the single delivery point, so no duplicate.
+                        clearAfter = CommitImeText(ch);
+                        suppressOriginal = true;
+                    }
                     break;
                 }
                 case WM_NCDESTROY:
@@ -395,15 +423,22 @@ public partial class MainWindow
 
         // Chain to the original proc, or DefWindowProc if the chain was torn down (e.g. the control
         // is being destroyed). Calling a null prev-proc would jump to address 0 and hard-crash.
-        // A key we already handled above is NOT chained: the EDIT is permanently empty and
-        // single-line, so it can only refuse the keystroke, and Windows rings the bell for a
-        // refused keystroke. Consuming it here is what silences the buzzer.
+        //
+        // Nothing is chained any more. The EDIT is a scratch buffer that we clear after every
+        // keystroke, so its proc can never usefully act on anything we send it, and Windows rings
+        // the bell for a keystroke a control refuses. The measured message stream for a plain 'a'
+        // was the whole story, and every one of these was still reaching the EDIT:
+        //   KEYDOWN 'a' | CHAR(0x08) synthetic backspace | CHAR('a') insert | KEYUP 'a'
+        // The key-down half and the command chars were consumed by an earlier fix, which is why
+        // the beep became intermittent instead of constant; the key-up pair and the text insert
+        // were the remainder. Consuming WM_KEYUP/WM_SYSKEYUP and the WM_CHAR insert closes it.
         IntPtr result;
-        if (suppressOriginal) result = IntPtr.Zero;
+        if (suppressOriginal || msg == WM_KEYUP || msg == WM_SYSKEYUP)
+            result = IntPtr.Zero;
         else
             result = _imeEditPrevProc != IntPtr.Zero
-                ? CallWindowProcW(_imeEditPrevProc, hWnd, msg, wParam, lParam)
-                : DefWindowProcW(hWnd, msg, wParam, lParam);
+                ? CallWindowProcW(_imeEditPrevProc, hWnd, translated != 0 ? translated : msg, wParam, lParam)
+                : DefWindowProcW(hWnd, translated != 0 ? translated : msg, wParam, lParam);
 
         if (clearAfter) ImeEditClear();
         return result;
