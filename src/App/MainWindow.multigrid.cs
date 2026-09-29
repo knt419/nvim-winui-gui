@@ -419,6 +419,9 @@ public partial class MainWindow
     // A non-zero `blend` attribute (winblend/pumblend) modulates the alpha: blend=0 -> opaque
     // (A=255), blend=100 -> fully transparent (A=0, the parent shows exactly). The stored hl color
     // is left untouched so the same attr id keeps rendering correctly on non-floating surfaces.
+    // The float-wide NVIM_WINUI_FLOAT_OPACITY then MULTIPLIES that alpha, so the two settings
+    // compose (winblend=0 with float opacity 0.9 still shows 10% of the parent) instead of one
+    // overriding the other.
     private Color? GetRawHlBg(Cell cell)
     {
         if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h))
@@ -427,9 +430,19 @@ public partial class MainWindow
             if (b is null) return null; // no explicit bg and not reversed -> transparent surface
             if (h.Blend > 0 && !h.Reverse && b.Value.A > 0)
                 b = Color.FromArgb((byte)(255 * (100 - h.Blend) / 100), b.Value.R, b.Value.G, b.Value.B);
-            return b;
+            return ScaleAlpha(b.Value, _floatOpacity);
         }
         return null;
+    }
+
+    // Multiply a color's alpha by `k` (0..1), rounding rather than truncating so a float opacity
+    // of 0.9 does not quietly become 229/255. A no-op at 1.0 keeps the fast path byte-identical.
+    private static Color ScaleAlpha(Color c, double k)
+    {
+        if (k >= 1.0) return c;
+        if (k <= 0.0) return Color.FromArgb(0, c.R, c.G, c.B);
+        int a = (int)Math.Clamp(Math.Round(c.A * k), 0, 255);
+        return Color.FromArgb((byte)a, c.R, c.G, c.B);
     }
 
     // Return the hl id to store in a scratch cell for `top` composited over base color `baseBg`.
@@ -443,7 +456,8 @@ public partial class MainWindow
         var key = (top.Hl, PackColor(baseBg), PackColor(rawFg), parentGlyph);
         if (_blendCache.TryGetValue(key, out var id)) return id;
         id = _nextBlendHlId++;
-        // Alpha from the float's own blend (already applied by GetRawHlBg for the bg).
+        // Alpha from the float's own blend (already applied by GetRawHlBg for the bg), then
+        // scaled by the float-wide opacity so both settings compose rather than override.
         int blend = _hlDefs.TryGetValue(top.Hl, out var th) ? th.Blend : 0;
         Color blendedFg;
         if (blend > 0 && rawFg.A > 0)

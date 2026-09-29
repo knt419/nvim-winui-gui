@@ -104,6 +104,56 @@ public partial class MainWindow
     [DllImport("user32.dll")]
     private static extern IntPtr SetFocus(IntPtr hWnd);
 
+    // --- Opacity ------------------------------------------------------------------------------
+    // Two Win32 details decide whether this works at all, and both were found by measurement:
+    //
+    //  1. WS_EX_LAYERED must be set BEFORE SetLayeredWindowAttributes. Without it the call
+    //     succeeds but does nothing: the window stays non-layered and fully opaque
+    //     (GetLayeredWindowAttributes then fails outright). Verified on the live window —
+    //     adding the style first made alpha 230/200/128 all read back exactly.
+    //  2. SetLayeredWindowAttributes is the supported knob even though the window is a
+    //     DirectComposition target. The compositor path (ICompositorInterop::SetWindowAlpha) is
+    //     NOT reachable from here: DCompositionCreateDevice rejects that IID with E_NOINTERFACE
+    //     (0x80004002), so it can never be used from an unpackaged app.
+    //
+    // LWA_ALPHA scales the whole window's alpha. LWA_COLORKEY is only paired in at alpha 0, where
+    // a 0-alpha window would otherwise still show its non-transparent pixels.
+    private const uint LWA_COLORKEY = 0x00000001;
+    private const uint LWA_ALPHA = 0x00000002;
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_LAYERED = 0x00080000;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetLayeredWindowAttributes(IntPtr hWnd, int crKey, byte bAlpha, uint dwFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int SetWindowLongPtr(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    // Set the whole window's opacity (0..1).
+    private bool SetWindowAlphaSafe(IntPtr hwnd, double alpha)
+    {
+        try
+        {
+            if (hwnd == IntPtr.Zero) return false;
+            int a = (int)Math.Clamp(Math.Round(alpha * 255.0), 0, 255);
+            // Step 1: the window must be layered, or the attribute below is a no-op.
+            int ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+            if ((ex & WS_EX_LAYERED) == 0)
+            {
+                SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+                _parentLayered = true;
+            }
+            // Step 2: now the attribute sticks. At alpha 0, also color-key so the window really
+            // disappears instead of leaving a ghost of its own pixels.
+            return SetLayeredWindowAttributes(hwnd, 0, (byte)a, LWA_ALPHA | (a == 0 ? LWA_COLORKEY : 0));
+        }
+        catch (Exception ex) { if (_diagEnabled) LogStartup("opacity: SetWindowAlpha failed: " + ex.Message); return false; }
+    }
+    private bool _parentLayered;
+
     [DllImport("user32.dll")]
     private static extern IntPtr GetFocus();
 

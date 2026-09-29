@@ -476,6 +476,85 @@ private static double ParseFloatBlur()
     return double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d) && d >= 0 ? d : 6.0;
 }
 
+// --- Opacity ---------------------------------------------------------------------------------
+// Two independent multipliers, both 0..1 (1 = fully opaque, 0 = invisible):
+//
+//   NVIM_WINUI_OPACITY        the PARENT window as a whole. Applied at the Win32 level with
+//                             SetLayeredWindowAttributes so the desktop behind the window shows
+//                             through; 1.0 (the default) leaves the window unlayered, which costs
+//                             nothing and keeps the surface opaque.
+//   NVIM_WINUI_FLOAT_OPACITY  floating windows only. Applied per PIXEL as the float's cells are
+//                             composited, so a float is translucent against its parent grid
+//                             without making the whole window see-through. Default 0.9 (10% see-
+//                             through), matching the 10% peeking through a plain float in
+//                             neovide's defaults.
+//
+// Both MULTIPLY whatever nvim already asked for: winblend (per float, 0..100) is applied on top
+// of the float multiplier, and the parent multiplier scales the final composed window. Neither
+// setting discards nvim's intent, it only scales it.
+private double _parentOpacity = ParseOpacity("NVIM_WINUI_OPACITY", 1.0);
+private double _floatOpacity = ParseOpacity("NVIM_WINUI_FLOAT_OPACITY", 0.9);
+
+// Clamp to 0..1; fall back to `def` when unset or unparseable.
+private static double ParseOpacity(string name, double def)
+{
+    var v = Environment.GetEnvironmentVariable(name);
+    if (string.IsNullOrWhiteSpace(v)) return def;
+    // Accept a bare percentage too (e.g. "90" == 0.9) — less surprising than silently
+    // clamping it to 1.0, which would look like the setting was ignored.
+    if (double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d))
+    {
+        if (d > 1.0 && d <= 100.0) d /= 100.0;   // "90" -> 0.9
+        return Math.Clamp(d, 0.0, 1.0);
+    }
+    return def;
+}
+
+// Push the parent opacity to the compositor. Idempotent: only touches the window when the value
+// changed, because a COM round-trip on every render is pure overhead.
+private void ApplyParentOpacity()
+{
+    try
+    {
+        if (Math.Abs(_parentOpacity - 1.0) < 1e-6) return;   // 1.0 == default: nothing to do
+        IntPtr hwnd = GetTopLevelHwnd();
+        if (hwnd == IntPtr.Zero) return;
+        if (_lastParentAlpha == _parentOpacity && _lastParentHwnd == hwnd) return;
+        if (SetWindowAlphaSafe(hwnd, _parentOpacity))
+        {
+            _lastParentAlpha = _parentOpacity;
+            _lastParentHwnd = hwnd;
+            if (_diagEnabled) LogStartup($"opacity: parent alpha={_parentOpacity:F2} applied");
+        }
+    }
+    catch (Exception ex) { if (_diagEnabled) LogStartup("opacity: parent apply failed: " + ex.Message); }
+}
+private double _lastParentAlpha = -1.0;
+private IntPtr _lastParentHwnd;
+
+// Restore the window to fully opaque on close, so a killed session does not leave a
+// see-through window shell behind for the next launch. Also clears WS_EX_LAYERED, because a
+// layered window that is torn down while translucent can ghost the frame on the next launch.
+private void ResetParentOpacity()
+{
+    try
+    {
+        IntPtr hwnd = _lastParentHwnd != IntPtr.Zero ? _lastParentHwnd : GetTopLevelHwnd();
+        if (hwnd != IntPtr.Zero)
+        {
+            SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+            if (_parentLayered)
+            {
+                int ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+                SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex & ~WS_EX_LAYERED);
+                _parentLayered = false;
+            }
+        }
+        _lastParentAlpha = -1.0;
+    }
+    catch { }
+}
+
 // Shared render body — also used by the DIAG snapshot path (offscreen CanvasRenderTarget).
 // cellsOverride: draw this exact buffer (base-only during the blur split) instead of compositing
 // fresh. blurLayerPass: marks the recursive render of the parent layer into the offscreen target
@@ -498,6 +577,9 @@ private static double ParseFloatBlur()
     }
     // Measure the window's DPI scale once — needed to snap cell boundaries to whole DEVICE pixels.
     if (_dpiScale < 1.0) { try { IntPtr dh = FindWindow(null, Title); uint d = GetDpiForWindow(dh); if (d > 0) _dpiScale = d / 96.0; } catch { } }
+    // Parent opacity is a Win32 window attribute, not a drawing op, but this is the first point
+    // where a real top-level HWND is guaranteed — same moment ImeAttach uses.
+    if (outer) ApplyParentOpacity();
     ds.Clear(_defBg);
 
     // Multigrid: composite outer frame (grid 1) + window grids into the draw buffer, and resolve
@@ -1709,6 +1791,9 @@ private void OnClosed(object sender, object e)
 {
     try { _blinkTimer?.Dispose(); } catch { }
     try { _flushWatchdogTimer?.Dispose(); } catch { }
+    // Restore the window to fully opaque BEFORE the HWND dies: a layered window that is killed
+    // while translucent can leave the frame's window shell see-through for the next launch.
+    try { ResetParentOpacity(); } catch { }
     try { ImeDetach(); } catch { }
     try { _client?.Dispose(); } catch { }
     try { if (_nvimProc is not null && !_nvimProc.HasExited) _nvimProc.Kill(true); } catch { }

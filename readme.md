@@ -81,6 +81,8 @@ Diagnostic helpers kept out of version control; they live in this working copy o
 | `NVIM_WINUI_LINESPACE` | 0 | Pixels trimmed from each row's vertical pitch (tighter line spacing). `0` keeps the natural box height. |
 | `NVIM_WINUI_STATUSBAR` | off | Show the app status bar row (hidden by default; set to `1`). |
 | `NVIM_WINUI_FLOAT_BLUR` | 6.0 | Gaussian blur radius (DIP) applied to the parent layer while a floating window is up, so the float reads as focused foreground. `0` disables. |
+| `NVIM_WINUI_OPACITY` | 1.0 | Opacity of the whole parent window, 0..1 (`1` = fully opaque, `0` = invisible). Applied at the Win32 level, so the desktop shows through. Accepts a bare percentage too (`90` = `0.9`). The default `1.0` leaves the window unlayered, costing nothing. |
+| `NVIM_WINUI_FLOAT_OPACITY` | 0.9 | Opacity of floating windows only, 0..1. Default `0.9` = 10% see-through. **Multiplies** nvim's `winblend`: a float with `winblend=0` still shows 10% of the parent, and `winblend=100` stays fully transparent. Applied per cell during compositing, so the parent grid stays opaque. |
 | `NVIM_LOG_BYTES` / `NVIM_LOG_FILE` | off | Dump every received socket byte to a hex file for stream forensics. |
 
 ## Highlight model
