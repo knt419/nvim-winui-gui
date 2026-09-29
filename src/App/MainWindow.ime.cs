@@ -347,9 +347,25 @@ public partial class MainWindow
                     // While the IME is composing, keys belong to the IME and nothing is forwarded.
                     if (!_imeComposing)
                     {
+                        // Two keys are the exception, and they are the whole bug. Windows sends BOTH
+                        // WM_KEYDOWN and WM_CHAR for one physical press, and for these two the char
+                        // maps to the same command as the virtual key:
+                        //   VK_RETURN (0x0D) -> "<CR>"   and  WM_CHAR 0x0D/0x0A -> "<CR>"
+                        //   VK_TAB    (0x09) -> "<Tab>"  and  WM_CHAR 0x09     -> "<Tab>"
+                        // So each press was forwarded twice, and one Enter split the line twice
+                        // (measured: 1 press -> 2 INPUT lines -> 3 buffer lines, while nvim on its own
+                        // turns a single <CR> into exactly one line).
+                        //
+                        // WM_CHAR is the single delivery point for text and the only place a
+                        // character-shaped command may be sent, so these two are not mapped from
+                        // their virtual key. Every other command key (<BS>, <Esc>, arrows, <Home>,
+                        // <End>, <F1>...) has no WM_CHAR carrying a command, so it stays on this
+                        // path and still arrives exactly once.
+                        int vki = (int)wParam;
+                        if (vki == 0x0D || vki == 0x09) { suppressOriginal = true; break; }
                         ForwardNvimKey(wParam, lParam, printable: false);
-                        // Every non-printable key is consumed here: the EDIT is empty and single-line,
-                        // so it can only refuse it, and a refused key rings the bell.
+                        // Every non-printable key is consumed here: the EDIT is empty, so it can only
+                        // refuse it, and a refused key rings the bell.
                         suppressOriginal = true;
                     }
                     break;
@@ -554,7 +570,8 @@ public partial class MainWindow
             }
             string? nvim = ImeKeyToNvim((int)vk, ctrl, alt);
             if (nvim == null) { if (_diagEnabled) LogStartup($"IME-KEY skip vk=0x{vk:X}"); return; }
-            if (_diagEnabled) LogStartup($"IME-KEY '{nvim}' ctrl={ctrl} alt={alt}");
+            // No log here: ForwardToNvim traces every nvim_input from the single exit point, and
+            // logging at both would make a doubled key look like two separate events.
             ForwardToNvim(nvim);
         }
         catch (Exception ex) { if (_diagEnabled) LogStartup("IME key fwd failed: " + ex.Message); }
@@ -649,6 +666,12 @@ public partial class MainWindow
         {
             var client = _client;
             if (client == null) return;
+            // Every nvim_input leaves through here, so this is the only place that can prove a key
+            // reached nvim exactly once. It has to be here and not at the call sites: WM_CHAR's own
+            // <CR>/<Tab> branches call ForwardToNvim directly, so call-site logging missed them
+            // entirely and a key forwarded twice from those two branches was invisible — which is
+            // exactly the bug the Enter double-newline was. Gated on NVIM_WINUI_DIAG like the rest.
+            if (_diagEnabled) LogStartup("INPUT " + text);
             _ = client.CallAsync("nvim_input", text);
         }
         catch (Exception ex) { if (_diagEnabled) LogStartup("IME forward failed: " + ex.Message); }
