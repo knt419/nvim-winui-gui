@@ -64,22 +64,55 @@ jobs:
     # and verified against — because the chocolatey default moves and 0.12.6-beta is currently
     # listed, so an unpinned install could silently start testing a build nobody verified.
     #
-    # /NeovimOnPathForAll is explicit because the package does not add nvim to PATH by default, and
-    # the app resolves nvim from PATH unless NVIM_WINUI_NVIM is set. Without it the smoke test
-    # would fail on `Get-Command nvim` for a reason that has nothing to do with the app.
+    # Two PATH traps, both of which bite here:
+    #   1. Every `run` is a separate process, so $env:Path set in this step does NOT reach the
+    #      next one. A PATH addition has to go through $GITHUB_PATH.
+    #   2. The neovim package adds nvim to the user's PATH by default, and to the machine PATH
+    #      only with /NeovimOnPathForAll — and the install directory has moved between
+    #      C:\tools\neovim\Neovim and C:\Program Files\Neovim. So locate the binary and export
+    #      the path explicitly instead of depending on either behaviour.
     - name: Install Neovim
       run: |
         $ErrorActionPreference = 'Stop'
-        choco install neovim --version=0.12.5 --params '"/NeovimOnPathForAll"' `
-          --yes --no-progress --limit-output
+        choco install neovim --version=0.12.5 --yes --no-progress --limit-output
         if ($LASTEXITCODE -ne 0) { throw "choco install neovim failed with $LASTEXITCODE" }
-        # choco updates the machine PATH, but this step's shell already inherited the old one, so
-        # refresh it or the next step cannot see nvim.
-        $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
-                    [System.Environment]::GetEnvironmentVariable('Path', 'User')
-        $v = nvim --version | Select-Object -First 1
-        Write-Host "installed: $v"
-        if ($v -notmatch '0\.12\.') { throw "expected Neovim 0.12.x, got: $v" }
+
+        $candidates = @(
+          (Join-Path $env:ProgramFiles 'Neovim\bin\nvim.exe'),
+          (Join-Path $env:ProgramFiles 'Neovim\nvim.exe'),
+          (Join-Path $env:ChocolateyInstall 'bin\nvim.exe'),
+          (Join-Path $env:ChocolateyInstall 'lib\neovim\tools\Neovim\bin\nvim.exe'),
+          (Join-Path $env:ChocolateyInstall 'lib\neovim\tools\nvim.exe'),
+          'C:\tools\neovim\Neovim\bin\nvim.exe',
+          'C:\tools\neovim\nvim.exe'
+        )
+        $nvim = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $nvim) {
+          $hit = Get-ChildItem -Path $env:ProgramFiles, $env:ChocolateyInstall, 'C:\tools' `
+                      -Filter nvim.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($hit) { $nvim = $hit.FullName }
+        }
+        if (-not $nvim) {
+          throw "nvim.exe not found after choco install; tried: $($candidates -join ', ')"
+        }
+
+        $version = (& $nvim --version | Select-Object -First 1)
+        Write-Host "installed: $nvim ($version)"
+        if ($version -notmatch '0\.12\.') { throw "expected Neovim 0.12.x, got: $version" }
+
+        # Persist to the NEXT steps, not just this one: each `run` is a separate process, so
+        # $env:Path and $env:NVIM_WINUI_NVIM set here would not survive into the smoke test.
+        #
+        # Written through [IO.File] rather than Out-File/Add-Content, because every -Encoding utf8
+        # in Windows PowerShell 5.1 (what the windows runners run) emits a BOM, and there is no
+        # utf8NoBOM in 5.1. A BOM on the first $GITHUB_PATH line would prepend U+FEFF to that
+        # directory and make nvim unresolvable again — the same failure, one step later.
+        [IO.File]::AppendAllText($env:GITHUB_PATH,
+            (Split-Path -Parent $nvim) + [Environment]::NewLine,
+            (New-Object System.Text.UTF8Encoding $false))
+        [IO.File]::AppendAllText($env:GITHUB_ENV,
+            "NVIM_WINUI_NVIM=$nvim" + [Environment]::NewLine,
+            (New-Object System.Text.UTF8Encoding $false))
 
     # --no-incremental so a cached obj/ from the restore step can never produce a build that
     # silently skipped recompiling a changed source file.
@@ -107,10 +140,16 @@ jobs:
         # NVIM_WINUI_DIAG makes the app log what it did, so the assertions below read it instead
         # of guessing. NVIM_WINUI_SELFTEST is deliberately left off: it types text into the session.
         $env:NVIM_WINUI_DIAG = '1'
-        $env:NVIM_WINUI_NVIM = (Get-Command nvim -ErrorAction Stop).Source
-        $env:NVIM_WINUI_ARGS = '-u NONE'
-        Write-Host "using nvim: $env:NVIM_WINUI_NVIM ($((nvim --version | Select-Object -First 1)))"
-
+        # NVIM_WINUI_NVIM comes from the Install Neovim step via $GITHUB_ENV. Fall back to PATH so
+        # the test still works if that export is ever removed, but do not depend on PATH alone:
+        # that is what failed before.
+        if (-not $env:NVIM_WINUI_NVIM) {
+          $env:NVIM_WINUI_NVIM = (Get-Command nvim -ErrorAction Stop).Source
+        }
+        if (-not (Test-Path $env:NVIM_WINUI_NVIM)) {
+          throw "NVIM_WINUI_NVIM is not a file: $env:NVIM_WINUI_NVIM"
+        }
+        Write-Host "using nvim: $env:NVIM_WINUI_NVIM ($((& $env:NVIM_WINUI_NVIM --version | Select-Object -First 1)))"
 
         $proc = Start-Process -FilePath $exe -PassThru
         try {
