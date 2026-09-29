@@ -75,6 +75,9 @@ public partial class MainWindow
     private const uint WS_CHILD = 0x40000000;
     private const uint WS_VISIBLE = 0x10000000;
     private const uint WS_TABSTOP = 0x00010000;
+    // ES_MULTILINE (0x0004): see ImeAttach — a single-line EDIT bells on the IME's commit Enter.
+    private const int ES_MULTILINE = 0x0004;
+    private const int EM_SETLIMITTEXT = 0x00C5;   // (WM_USER + 45)
     private const uint SWP_NOZORDER = 0x0004;   // keep the EDIT behind the canvas, not reordered
     private const uint SWP_NOACTIVATE = 0x0010; // moving it must not steal/steal-back focus
     private const int GWLP_WNDPROC = -4;
@@ -167,14 +170,58 @@ public partial class MainWindow
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr GetModuleHandleW(string? lpModuleName);
 
-    [DllImport("ime32.dll")]
-    private static extern IntPtr ImmGetContext(IntPtr hWnd);
+    // --- IME input context (OPTIONAL, loaded dynamically) ---------------------------------
+    // ime32.dll is ABSENT on some Windows installs (verified on this box: not in System32 nor
+    // SysWOW64). A static [DllImport] then throws DllNotFoundException on FIRST USE — which, in
+    // the original code, happened inside the focus path and silently skipped SetFocus entirely,
+    // leaving the app with no IME target at all. Worse, the exception was swallowed, so the only
+    // symptom was "the IME does not work".
+    //
+    // So ime32 is loaded LAZILY and probed once. When it is missing, the app says so and keeps
+    // working: the synthetic WM_CHAR that the EDIT generates for a committed character is the
+    // single delivery point to nvim, so committed text still arrives even without the context.
+    // Only the preedit/result-string read (WM_IME_COMPOSITION GCS_RESULTSTR) degrades.
+    private static class Ime32
+    {
+        // ImmGetContext / ImmAssociateContext / ImmReleaseContext / ImmGetCompositionStringW
+        internal delegate IntPtr ImmGetContextFn(IntPtr hWnd);
+        internal delegate IntPtr ImmAssociateContextFn(IntPtr hWnd, IntPtr hIMC);
+        internal delegate bool ImmReleaseContextFn(IntPtr hIMC);
+        internal delegate int ImmGetCompositionStringWFn(IntPtr hIMC, int index, StringBuilder? buf, int len);
 
-    [DllImport("ime32.dll")]
-    private static extern bool ImmReleaseContext(IntPtr hIMC);
+        internal static readonly ImmGetContextFn? GetContext;
+        internal static readonly ImmAssociateContextFn? AssociateContext;
+        internal static readonly ImmReleaseContextFn? ReleaseContext;
+        internal static readonly ImmGetCompositionStringWFn? GetCompositionStringW;
+        internal static readonly bool Available;
 
-    [DllImport("ime32.dll")]
-    private static extern int ImmGetCompositionStringW(IntPtr hIMC, int index, StringBuilder? buf, int len);
+        static Ime32()
+        {
+            try
+            {
+                IntPtr h = System.Runtime.InteropServices.NativeLibrary.Load("ime32.dll");
+                // Hold the module handle for the process lifetime: the delegates below point INTO
+                // it, so unloading it would leave them jumping into freed memory.
+                _module = h;
+                GetContext = Marshal.GetDelegateForFunctionPointer<ImmGetContextFn>(
+                    System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmGetContext"));
+                AssociateContext = Marshal.GetDelegateForFunctionPointer<ImmAssociateContextFn>(
+                    System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmAssociateContext"));
+                ReleaseContext = Marshal.GetDelegateForFunctionPointer<ImmReleaseContextFn>(
+                    System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmReleaseContext"));
+                GetCompositionStringW = Marshal.GetDelegateForFunctionPointer<ImmGetCompositionStringWFn>(
+                    System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmGetCompositionStringW"));
+                Available = true;
+            }
+            catch
+            {
+                Available = false;   // no ime32 on this system; the app still works without it
+            }
+        }
+
+        // Intentionally never freed: the delegates above are only valid while the module is loaded.
+        private static IntPtr _module;
+    }
 
     // Create the hidden EDIT the IME composes into and subclass it. Called once the window is
     // realized, the first point a top-level HWND exists. Runs at most once per process: retrying
@@ -188,13 +235,21 @@ public partial class MainWindow
             IntPtr owner = GetTopLevelHwnd();
             if (owner == IntPtr.Zero) { if (_diagEnabled) LogStartup("IME: no top-level HWND yet"); return; }
 
-            _imeEdit = CreateWindowExW(0, "EDIT", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            // ES_MULTILINE matters for two reasons, both observed:
+            //  - A single-line EDIT refuses the Enter that an IME sends to commit, and Windows
+            //    rings the bell for a refused keystroke. Multiline accepts it.
+            //  - Multiline also makes the control accept text at any caret position instead of
+            //    belling when a commit would not fit, which is what made the beep intermittent:
+            //    it rang only for the commits that happened to overflow.
+            // EM_SETLIMITTEXT to 64 keeps the clear cheap regardless.
+            _imeEdit = CreateWindowExW(0, "EDIT", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | (uint)ES_MULTILINE,
                 0, 0, 1, 1, owner, (IntPtr)ImeEditId, GetModuleHandleW(null), IntPtr.Zero);
             if (_imeEdit == IntPtr.Zero)
             {
                 if (_diagEnabled) LogStartup("IME: CreateWindowExW(EDIT) failed err=" + Marshal.GetLastWin32Error());
                 return;
             }
+            SendMessageW(_imeEdit, EM_SETLIMITTEXT, new IntPtr(64), IntPtr.Zero);
 
             // Subclass so the IME/char messages reach us. The delegate is held in a field: the
             // window references only the thunk, and a collected delegate means the next message
@@ -272,6 +327,10 @@ public partial class MainWindow
                     // WM_IME_CHAR into a synthetic WM_CHAR carrying the same character, so handling
                     // both would send every committed character to nvim twice (observed: '日' twice).
                     // The WM_CHAR below is the single delivery point, so there is nothing to send here.
+                    //
+                    // It must NOT be suppressed either: the original proc is exactly what SYNTHESIZES
+                    // that WM_CHAR, so consuming it here would silently drop every committed
+                    // character. Unlike the command keys, this message has to reach the EDIT.
                     break;
                 }
                 case WM_KEYDOWN:
@@ -368,17 +427,22 @@ public partial class MainWindow
         try
         {
             if (_imeEdit == IntPtr.Zero) return "";
-            IntPtr himc = ImmGetContext(_imeEdit);
+            if (Ime32.GetContext is null || Ime32.GetCompositionStringW is null || Ime32.ReleaseContext is null)
+                return "";   // no ime32 on this system; the WM_CHAR path still delivers the commit
+            IntPtr himc = Ime32.GetContext(_imeEdit);
+            // NULL context means the control has no IME at all. Returning "" here is safe: the
+            // synthetic WM_CHAR the EDIT generates still carries the commit, and WM_CHAR is the
+            // single delivery point — so the text is not lost.
             if (himc == IntPtr.Zero) return "";
             try
             {
-                int len = ImmGetCompositionStringW(himc, GCS_RESULTSTR, null, 0);
+                int len = Ime32.GetCompositionStringW(himc, GCS_RESULTSTR, null, 0);
                 if (len <= 0) return "";
                 var sb = new StringBuilder(len);
-                ImmGetCompositionStringW(himc, GCS_RESULTSTR, sb, len);
+                Ime32.GetCompositionStringW(himc, GCS_RESULTSTR, sb, len);
                 return sb.ToString();
             }
-            finally { ImmReleaseContext(himc); }
+            finally { Ime32.ReleaseContext(himc); }
         }
         catch { return ""; }
     }
@@ -486,15 +550,52 @@ public partial class MainWindow
         {
             if (_imeEdit == IntPtr.Zero) return;
             if (!IsWindow(_imeEdit)) return;
+            // A freshly created EDIT has NO input context: Windows leaves the default IME context
+            // disabled on it, so composition silently does nothing and the app looks like the IME
+            // is not working at all. Re-associating the DEFAULT context (the real OS IME) is what
+            // actually enables IME composition for this control.
+            //
+            // This is best-effort and MUST NOT be able to break input: on a system without
+            // ime32.dll the DllImport throws EntryPointNotFoundException/DllNotFoundException, and
+            // losing focus handling entirely because of it would be far worse than no IME. So the
+            // association is attempted inside its own try, and the diagnostic says which way it
+            // went — a silently skipped call is exactly the bug being fixed here.
+            if (!_imeContextTried)
+            {
+                _imeContextTried = true;
+                if (Ime32.Available && Ime32.AssociateContext is not null)
+                {
+                    try
+                    {
+                        IntPtr himc = Ime32.AssociateContext(_imeEdit, IntPtr.Zero); // NULL = default IME
+                        _imeContextAssociated = himc != IntPtr.Zero;
+                        if (_diagEnabled) LogStartup("IME: ImmAssociateContext(default) -> 0x" +
+                                                     himc.ToString("X") + (_imeContextAssociated ? " OK" : " NULL"));
+                    }
+                    catch (Exception ex)
+                    {
+                        if (_diagEnabled) LogStartup("IME: ImmAssociateContext failed: " + ex.GetType().Name);
+                    }
+                }
+                else if (_diagEnabled)
+                {
+                    LogStartup("IME: ime32.dll unavailable — composing falls back to the synthetic WM_CHAR path");
+                }
+            }
             SetFocus(_imeEdit);
             // Log what actually holds focus: SetFocus can silently fail (e.g. the window is not the
             // foreground window), and then the IME has no target and composing does nothing.
             if (_diagEnabled)
+            {
+                IntPtr focus = GetFocus();
                 LogStartup("IME: focus -> edit=0x" + _imeEdit.ToString("X") + " getfocus=0x" +
-                           GetFocus().ToString("X") + (GetFocus() == _imeEdit ? " OK" : " MISMATCH"));
+                           focus.ToString("X") + (focus == _imeEdit ? " OK" : " MISMATCH"));
+            }
         }
         catch (Exception ex) { if (_diagEnabled) LogStartup("IME focus failed: " + ex.Message); }
     }
+    private bool _imeContextTried;
+    private bool _imeContextAssociated;
 
     // True while composing: OnKeyDown must swallow those keystrokes so the romaji that drove the
     // IME is not inserted into nvim as plain input alongside the committed result.
