@@ -298,11 +298,6 @@ public partial class MainWindow
         // Backspace/Enter/Tab/Esc/Delete/arrows: Windows rings the bell for a keystroke a control
         // refuses. Consuming them here keeps the beep out while nvim still gets the key.
         bool suppressOriginal = false;
-        // When non-zero, the message is forwarded to the ORIGINAL EDIT proc under a DIFFERENT id.
-        // That is how WM_IME_CHAR gets the EDIT to synthesize its WM_CHAR (the single delivery
-        // point for committed text) without also letting the EDIT perform the insert — the insert
-        // is what made a control that is cleared immediately afterwards ring the bell.
-        int translated = 0;
         try
         {
             switch (msg)
@@ -335,16 +330,15 @@ public partial class MainWindow
                     // both would send every committed character to nvim twice (observed: '日' twice).
                     // The WM_CHAR below is the single delivery point, so there is nothing to send here.
                     //
-                    // It must NOT be suppressed either: the original proc is exactly what SYNTHESIZES
-                    // that WM_CHAR, so consuming it here would silently drop every committed
-                    // character. Unlike the command keys, this message has to reach the EDIT.
+                    // It MUST reach the original proc under its OWN id. The IME state machine keys
+                    // off the message id: relaying it as WM_CHAR (tried in 9eeda33) leaves the IME
+                    // believing the commit was never acknowledged, so the first composition never
+                    // reaches nvim and the IME then stops responding altogether.
                     //
-                    // But the character it carries must never be INSERTED: the WM_CHAR branch now
-                    // forwards-and-consumes, so letting the EDIT also insert it would double the
-                    // text and ring on a control whose text is cleared moments later. Translating
-                    // the message to WM_CHAR and forwarding to the ORIGINAL proc is what generates
-                    // the synthetic WM_CHAR we want, while skipping the EDIT's own edit handling.
-                    translated = WM_CHAR;
+                    // Remember that this is the source, so the WM_CHAR it generates below is known
+                    // to be an IME commit and may be inserted (the EDIT is how the IME keeps its
+                    // composition state); we only clear it afterwards.
+                    _imePendingImeChar = true;
                     break;
                 }
                 case WM_KEYDOWN:
@@ -396,18 +390,18 @@ public partial class MainWindow
                     if (wParam >= 1 && wParam <= 0xFFFF && (wParam & 0xF800) != 0xD800)
                     {
                         string ch = ((char)wParam).ToString();
-                        // Forward it, then CONSUME the message instead of letting the EDIT insert
-                        // it. The EDIT is a permanent scratch buffer that we clear after every
-                        // keystroke, so its only possible reaction to an insert is to ring: the
-                        // measured stream for a plain 'a' was
-                        //   KEYDOWN -> IME-COMMIT 'a' -> CHAR(0x08) -> CHAR('a') -> KEYUP
-                        // where the synthetic CHAR(0x08) is the EDIT clearing its own text and the
-                        // CHAR('a') is the insert. Both reach the EDIT proc, and a proc that is
-                        // handed an insert it will immediately have erased is exactly the
-                        // "refused keystroke" case Windows bells on. Forwarding here (not on
-                        // WM_KEYDOWN) keeps WM_CHAR the single delivery point, so no duplicate.
+                        // Forward it, then decide whether the EDIT may also insert it.
+                        //
+                        // From the IME: the char is what the IME committed. The EDIT is how the
+                        // IME carries its own composition state, so the insert MUST happen — but we
+                        // clear it right after, so the text never lingers.
+                        //
+                        // Not from the IME: a plain keystroke on an empty EDIT. Letting the EDIT
+                        // insert is what rang the bell (it is handed an insert whose text is erased
+                        // moments later), so we forward the text and consume the insert instead.
                         clearAfter = CommitImeText(ch);
-                        suppressOriginal = true;
+                        if (!_imePendingImeChar) suppressOriginal = true;
+                        _imePendingImeChar = false;
                     }
                     break;
                 }
@@ -437,8 +431,8 @@ public partial class MainWindow
             result = IntPtr.Zero;
         else
             result = _imeEditPrevProc != IntPtr.Zero
-                ? CallWindowProcW(_imeEditPrevProc, hWnd, translated != 0 ? translated : msg, wParam, lParam)
-                : DefWindowProcW(hWnd, translated != 0 ? translated : msg, wParam, lParam);
+                ? CallWindowProcW(_imeEditPrevProc, hWnd, msg, wParam, lParam)
+                : DefWindowProcW(hWnd, msg, wParam, lParam);
 
         if (clearAfter) ImeEditClear();
         return result;
@@ -631,6 +625,10 @@ public partial class MainWindow
     }
     private bool _imeContextTried;
     private bool _imeContextAssociated;
+    // Set by WM_IME_CHAR so the WM_CHAR it synthesizes is recognized as an IME commit. The IME
+    // must be allowed to insert that one (it is how the IME keeps composition state); a plain
+    // keystroke's char must not be. Cleared on every WM_CHAR, so a missed pair cannot leak.
+    private bool _imePendingImeChar;
 
     // True while composing: OnKeyDown must swallow those keystrokes so the romaji that drove the
     // IME is not inserted into nvim as plain input alongside the committed result.
