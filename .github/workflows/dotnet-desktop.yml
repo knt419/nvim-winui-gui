@@ -51,9 +51,12 @@ jobs:
         dotnet-version: 8.0.x
 
     # NvimCore has no package references, so it restores on its own; the app pulls
-    # Microsoft.WindowsAppSDK and Microsoft.Graphics.Win2D. Restore the app directly rather than
-    # the solution: NvimWinUISolution.sln also references tools/rpc-test, which is a diagnostic
-    # harness (see the smoke-test job) and not part of the shipping build.
+    # Microsoft.WindowsAppSDK and Microsoft.Graphics.Win2D.
+    #
+    # The csproj is restored directly rather than NvimWinUISolution.sln: the solution also
+    # builds tools/rpc-test, a diagnostic harness that needs a real nvim to be useful and is
+    # not part of the shipping build. It is checked in, so this is a scoping choice, not a
+    # workaround for a missing file.
     - name: Restore
       run: dotnet restore src/App/NvimWinUIGui.csproj
 

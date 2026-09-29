@@ -153,12 +153,15 @@ uv run --with pillow --with numpy --python 3.12 python tools/make_icon.py --inst
 uv run --with pillow --with numpy --python 3.12 python tools/make_icon.py --preview ./out   # contact sheet, all variants
 ```
 
-`tools/` is git-ignored, so the generator is force-added (`git add -f`).
+The generator is tracked in git, so a fresh clone can regenerate the icon assets. Only its
+build output is ignored (`bin/`, `obj/`, `__pycache__/`).
 
-## Local-only tools (`tools/`, git-ignored)
+## Development tools (`tools/`)
 
-Diagnostic helpers kept out of version control; they live in this working copy only and
-are not needed to run the app:
+Diagnostic helpers kept in version control. None of them are needed to build or run the
+app, and none of them are referenced by the app itself — `NvimWinUISolution.sln` does
+reference `rpc-test`, so building the solution builds it too. Their `bin/`, `obj/` and
+`__pycache__` output is git-ignored:
 
 - `rpc-test/` — console harness that proves NvimCore against a **real** nvim: handshake +
   `nvim_get_api_info`, `nvim_eval`, `nvim_ui_attach` with redraw notification capture.
@@ -167,7 +170,9 @@ are not needed to run the app:
   `[rpc-test] DONE: SUCCESS`.
 - `hl-probe/` — highlight probe: attaches to a live session, captures `grid_line` events
   and reports per-row hl spans (colStart..lastCol, trailing-blank bg ids) to decide
-  whether full-width bands come from nvim or need GUI-side extension.
+  whether full-width bands come from nvim or need GUI-side extension. Tracked, but not
+  listed in the solution — build it directly with
+  `dotnet run --project tools/hl-probe/HlProbe.csproj`.
 - `CheckExeTimestamp.ps1` — one-off check that the built exe is newer than the sources it
   was compiled from (stale-exe diagnosis).
 

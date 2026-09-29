@@ -18,8 +18,12 @@ dotnet build src/App/NvimWinUIGui.csproj --nologo
 ./src/App/bin/x64/Debug/net8.0-windows10.0.22621.0/win-x64/NvimWinUIGui.exe
 ```
 
-`NvimWinUISolution.sln` additionally references the local-only `tools/rpc-test`
-harness; on a fresh clone build the csproj directly, or restore `tools/` first.
+To build everything, including the `tools/rpc-test` diagnostic harness, build the
+solution instead — every project it references is checked in:
+
+```sh
+dotnet build NvimWinUISolution.sln --nologo
+```
 
 ## Fonts
 
