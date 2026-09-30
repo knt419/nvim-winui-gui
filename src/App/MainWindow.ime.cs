@@ -160,6 +160,15 @@ public partial class MainWindow
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetFocus();
+    // Used by the activation trace: when the app is being deactivated, the new foreground window's
+    // process tells us whether the cause was something in OUR process (a floating window taking
+    // activation) or a genuinely different application. Only the former may be fought back.
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentProcessId();
 
     [DllImport("user32.dll")]
     private static extern bool IsWindow(IntPtr hWnd);
@@ -281,10 +290,75 @@ public partial class MainWindow
     // Top-level HWND for this Window. WinUI 3's Window exposes no Handle; the interop helper is
     // the supported way to reach it, and it only works once the window is realized.
     private IntPtr GetTopLevelHwnd()
-    {
-        try { return WinRT.Interop.WindowNative.GetWindowHandle(this); }
-        catch { return IntPtr.Zero; }
-    }
+        {
+            try { return WinRT.Interop.WindowNative.GetWindowHandle(this); }
+            catch { return IntPtr.Zero; }
+        }
+
+        // ---- Window activation trace (diagnostic) ------------------------------------------------
+        // A plain Win32 subclass of the top-level HWND, the same mechanism the IME target uses.
+        // WPF's HwndSource is not available in a WinUI 3 project, and this app has no XAML markup, so
+        // subclassing the HWND directly is the only way to observe activation.
+        //
+        // Why it exists: only the Activated event was logged before, so a floating window that took the
+        // app's activation left NO trace — the only record was the re-activation after a user click.
+        // That made "input stopped working until I clicked the window" impossible to diagnose from the
+        // log. WM_ACTIVATEAPP is the signal that covers it: it fires for the whole process, and its
+        // wParam is the HWND gaining activation, 0 when this app is losing it.
+        private delegate IntPtr ActivationProc(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        private ActivationProc? _activationProcKeepAlive;   // the HWND only holds the thunk pointer
+        private IntPtr _activationPrevProc;
+        private bool _activationTraced;
+
+        private void ImeAttachActivationTrace()
+        {
+            if (_activationTraced) return;
+            try
+            {
+                IntPtr h = GetTopLevelHwnd();
+                if (h == IntPtr.Zero) { if (_diagEnabled) LogStartup("ACT: no top-level HWND yet"); return; }
+                _activationProcKeepAlive = ActivationThunk;
+                _activationPrevProc = SetWindowLongPtrW(h, GWLP_WNDPROC,
+                    Marshal.GetFunctionPointerForDelegate(_activationProcKeepAlive));
+                _activationTraced = _activationPrevProc != IntPtr.Zero;
+                if (_diagEnabled)
+                    LogStartup("ACT: activation trace attached" + (_activationTraced ? "" : " FAILED"));
+            }
+            catch (Exception ex) { if (_diagEnabled) LogStartup("ACT: attach failed: " + ex.Message); }
+        }
+
+        private IntPtr ActivationThunk(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam)
+        {
+            if (msg == 0x001C /* WM_ACTIVATEAPP */)
+            {
+                // wParam == 0 means THIS app stopped being the foreground app.
+                string what = wParam == IntPtr.Zero
+                    ? "WINDOW DEACTIVATED (app lost foreground)"
+                    : "WINDOW activated (foreground -> 0x" + wParam.ToString("X") + ")";
+                if (_diagEnabled) LogStartup("ACT: " + what);
+                // If the app is being deactivated by something in our own process (a floating window
+                // taking activation), the IME target loses the foreground input queue with it. Take the
+                // focus back so typing continues without a click. Doing it on the DEACTIVATION path is
+                // deliberate: by the time Activated fires, the app is already not foreground and
+                // SetFocus on the target would be a no-op.
+                if (wParam == IntPtr.Zero && _imeEdit != IntPtr.Zero)
+                {
+                    try
+                    {
+                        IntPtr fg = GetForegroundWindow();
+                        // Only reclaim if the new foreground belongs to THIS process (a float in our own
+                        // window); never fight another application for the foreground.
+                        uint fgPid;
+                        GetWindowThreadProcessId(fg, out fgPid);
+                        if (fgPid == GetCurrentProcessId()) ImeFocusTarget();
+                    }
+                    catch { }
+                }
+            }
+            return _activationPrevProc != IntPtr.Zero
+                ? CallWindowProcW(_activationPrevProc, hWnd, msg, wParam, lParam)
+                : DefWindowProcW(hWnd, msg, wParam, lParam);
+        }
 
     private IntPtr ImeEditProcThunk(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam)
     {

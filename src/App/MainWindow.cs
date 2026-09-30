@@ -240,6 +240,9 @@ public partial class MainWindow : Window
         _root.Loaded += (s, e) => ImeAttach();
         Activated += (s, e) => ImeFocusTarget();
         Closed += OnClosed;
+        // Subclass the top-level HWND to see WM_ACTIVATEAPP. Without it a deactivation leaves no
+        // trace in the log at all, so "input stopped until I clicked" has nothing to point at.
+        ImeAttachActivationTrace();
     }
 
     // Win2D renders the whole grid every frame (GPU), so no per-cell last-rendered cache is needed.
