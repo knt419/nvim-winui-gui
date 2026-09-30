@@ -36,6 +36,7 @@ public partial class MainWindow
     // boundary and no further sync fires (no feedback loop). Defaults 9x18 = old constant; replaced
     // by real measurement once the font is known.
     private double _refCellW = 9, _refCellH = 18;
+    private double _lastLoggedCanvasW = -1, _lastLoggedCanvasH = -1;   // diag: log geometry only on change
 
     // The row pitch both directions agree on. SendNvimResize counts rows with
     // floor((H - chromeH - status) / _rowPitch) and UpdateWindowSize sets the height with
@@ -434,8 +435,17 @@ private void RenderNow()
         GlyphCanvas.Width = Math.Round(fillW);
         GlyphCanvas.Height = Math.Round(fillH);
     }
+    // Log the canvas/root geometry on EVERY size change, not every 25th render. The 25-render
+    // cadence meant a window move or snap produced no diagnostic at all, which is exactly when the
+    // canvas-vs-content-area relationship is the thing being questioned (a FancyZones snap leaves
+    // the grid narrower than the window, and Center alignment then splits the remainder).
     if (_diagEnabled && Interlocked.Increment(ref _invalidateCount) % 25 == 1)
         LogStartup($"INVALIDATE #{_invalidateCount} canvas={GlyphCanvas.Width:F0}x{GlyphCanvas.Height:F0} root={_root.ActualWidth:F0}x{_root.ActualHeight:F0}");
+    else if (_diagEnabled && (GlyphCanvas.Width != _lastLoggedCanvasW || GlyphCanvas.Height != _lastLoggedCanvasH))
+    {
+        _lastLoggedCanvasW = GlyphCanvas.Width; _lastLoggedCanvasH = GlyphCanvas.Height;
+        LogStartup($"CANVAS-GEOM canvas={GlyphCanvas.Width:F0}x{GlyphCanvas.Height:F0} root={_root.ActualWidth:F0}x{_root.ActualHeight:F0} slackW={_root.ActualWidth - GlyphCanvas.Width:F0} slackH={_root.ActualHeight - GlyphCanvas.Height:F0}");
+    }
     GlyphCanvas.Invalidate(); // the Draw handler does the real (GPU) render this frame
 
     // Measure the non-client frame (first layout pass) and snap to exact fit. No-op once stable.
