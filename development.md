@@ -108,6 +108,35 @@ WinUI has no IME story of its own. The rules that matter, each learned from a bu
   `--api-info`, and sending it as a request returns `error=null` and attaches
   identically.
 
+## Window sizing
+
+The window and the grid convert through two formulas that have to agree, or the window creeps by a
+fraction of a pixel on every drag instead of settling:
+
+- `SendNvimResize` counts the grid: `cols = floor((W - chromeW) / cellWidth)`,
+  `rows = floor((H - chromeH - statusRow) / rowPitch)`
+- `UpdateWindowSize` sets the window: `ceil(cols * cellWidth + chromeW)` x
+  `ceil(rows * rowPitch + statusRow + chromeH)`
+
+Three things about that are load-bearing:
+
+- **One cell height.** Both directions use `_rowPitch`. They used to share the *name* `_refCellH`
+  while it was re-measured independently for each, so the round trip did not close: solving the
+  logged numbers showed the implied per-row height drifting between 29.25 and 30.50 px within a
+  single drag. `_refCellH` (the raw measured font box) only seeds `_rowPitch`.
+- **The chrome is fractional.** `_chromeW`/`_chromeH` are doubles. At 100% the frame is 16.0 DIP,
+  but at 150% it is 13.33, and rounding it to 13 cost a third of a DIP on every width and height
+  computation. It is also added *before* the ceiling, not after: `Ceil(cols*cw) + 16.0` and
+  `Ceil(cols*cw + 16.0)` agree at 100% and differ as soon as the frame is a fraction.
+- **`ceil`, not `round`, when snapping.** A `cols*cw` that rounds down reads back as `cols-1`
+  through the `floor` above, and each `grid_resize` reply then shrinks the window by one more cell.
+
+Snapping itself is off by default (`NVIM_WINUI_SNAP=1` turns it on). With it off,
+`UpdateWindowSize` never resizes the window and the canvas is sized to the content area instead of
+the grid, so the cells past the end of the grid are simply unpainted. With it on, the window is
+forced to the nearest cell boundary, which means a drag to 1060x430 lands on 1053x414 — 81 columns
+plus the 16px frame. That is the snap working, not a shrink.
+
 ## Opacity
 
 Two independent multipliers, both read once at startup:

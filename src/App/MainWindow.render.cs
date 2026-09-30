@@ -228,11 +228,11 @@ private void EnsureScreen(int rows, int cols)
 
 private void UpdateWindowSize(int cols, int rows)
 {
-    // Snap the window to a whole number of cells.
+    // Resize the window to match the grid — or deliberately not, which is the default.
     //
-    // With NVIM_WINUI_SNAP=0 the window is left exactly as the user dragged it and the grid
-    // simply reflows to the new size: SendNvimResize's floor() gives the cell count that fits,
-    // and the canvas is sized to the content area instead of the grid, so the leftover is
+    // With snapping off (the default) the window is left exactly as the user dragged it and the
+    // grid simply reflows to the new size: SendNvimResize's floor() gives the cell count that
+    // fits, and the canvas is sized to the content area instead of the grid, so the leftover is
     // padding rather than a gap. The window is never moved, so there is no snap-back at all.
     //
     // Why the snapped path uses Ceil and not Round: the width must round-trip through
@@ -270,10 +270,17 @@ private void UpdateWindowSize(int cols, int rows)
     LogStartup($"RESIZE-DBG UpdateWindowSize req={width}x{height} actual={(AppWindow.Size.Width)}x{(AppWindow.Size.Height)}");
 }
 
-// NVIM_WINUI_SNAP=0 leaves the window at whatever size the user dragged it to, and the grid
-// fills it instead of the window being resized to fit the grid. Default stays on, because the
-// snapped window is what keeps the last cell's right edge flush with the canvas.
-private static bool SnapToCells => Environment.GetEnvironmentVariable("NVIM_WINUI_SNAP") != "0";
+// Whether the window is forced to a whole number of cells.
+//
+// Default is OFF: the window stays where the user put it and the grid reflows to fit, so a drag
+// lands on the size that was asked for. Snapping is still available (NVIM_WINUI_SNAP=1) for anyone
+// who wants the window to track the grid exactly, which is what keeps the last cell's right edge
+// flush with the canvas.
+//
+// The two differ only by the sub-cell remainder: cols is floor((W-chrome)/cellWidth), so the
+// grid is at most one cell narrower than the window and that leftover shows as background at the
+// right and bottom edges.
+private static bool SnapToCells => Environment.GetEnvironmentVariable("NVIM_WINUI_SNAP") == "1";
 
 // Measure the non-client frame once via Win32 (synchronous + timing-independent, unlike reading a
 // XAML ActualWidth that lags one layout pass). border = outer window rect - client rect, in DIP.

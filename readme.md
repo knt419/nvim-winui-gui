@@ -79,7 +79,7 @@ own `linespace`, which is reported to the UI and reflected in the grid geometry.
 | `NVIM_WINUI_NVIM` | — | Explicit path to `nvim.exe`. If unset, nvim is resolved from `PATH`, then the default install dir. |
 | `NVIM_WINUI_ARGS` | — | Extra arguments appended to the nvim command line (e.g. `+checkhealth blink.cmp`). |
 | `NVIM_WINUI_LINESPACE` | 0 | Pixels trimmed from each row's vertical pitch (tighter line spacing). `0` keeps the natural box height. |
-| `NVIM_WINUI_SNAP` | on | Snap the window to a whole number of cells. Set `0` to leave the window at whatever size you drag it to and let the grid reflow to fit; up to one cell of background then shows at the right/bottom edge. |
+| `NVIM_WINUI_SNAP` | off | Set `1` to force the window to a whole number of cells. By default the window stays at whatever size you drag it to and the grid reflows to fit, so up to one cell of background shows at the right/bottom edge. |
 | `NVIM_WINUI_STATUSBAR` | off | Show the app status bar row (hidden by default; set to `1`). |
 | `NVIM_WINUI_OPACITY` | 1.0 | Opacity of the whole parent window, 0..1 (`1` = fully opaque, `0` = invisible). Applied at the Win32 level, so the desktop shows through. Accepts a bare percentage too (`90` = `0.9`). The default `1.0` leaves the window unlayered, costing nothing. |
 | `NVIM_WINUI_FLOAT_OPACITY` | 0.9 | Opacity of floating windows only, 0..1. Default `0.9` = 10% see-through. **Multiplies** nvim's `winblend`: a float with `winblend=0` still shows 10% of the parent, and `winblend=100` stays fully transparent. |
