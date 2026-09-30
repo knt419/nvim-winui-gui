@@ -1116,6 +1116,13 @@ private void ResetParentOpacity()
             ds.FillRectangle(new Windows.Foundation.Rect(x2, rowTop[cr2] + rh2 - Math.Max(1f, (float)rh2 * _cursorCellPct / 100f), w2, Math.Max(1f, (float)rh2 * _cursorCellPct / 100f)), GetW2dBrush(rc, _defFg));
     }
 
+    // Inline IME preedit (option-2 IMM32 target): the composition string is drawn HERE, in our
+    // own font at the exact cursor cell — the feature the hidden EDIT target could not do (it
+    // showed the IME's own floating composition window instead). Drawn after the cursor so it
+    // sits on top, like Windows composition UI does.
+    if (outer && ImeIsComposing())
+        DrawImePreedit(ds, rc, curIdx, cols, rowTop, colLeft);
+
     double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
     _renderMsTotal += ms; int rcc = Interlocked.Increment(ref _renderCount);
 
@@ -1894,4 +1901,39 @@ private void OnClosed(object sender, object e)
     try { _client?.Dispose(); } catch { }
     try { if (_nvimProc is not null && !_nvimProc.HasExited) _nvimProc.Kill(true); } catch { }
 }
+    // Draw the in-flight IME composition string at the cursor cell: text in the grid font plus
+    // the standard composition underline, and a caret at GCS_CURSORPOS when known. Width is the
+    // measured layout width, so wide (kana/kanji) preedit extends past one cell naturally —
+    // exactly like every other inline-preedit client (Windows Terminal, neovide).
+    private void DrawImePreedit(Microsoft.Graphics.Canvas.CanvasDrawingSession ds,
+        Microsoft.Graphics.Canvas.ICanvasResourceCreator rc, int curIdx, int cols,
+        double[] rowTop, double[] colLeft)
+    {
+        string pre = _imePreedit;
+        if (curIdx < 0 || pre.Length == 0) return;
+        int cr = curIdx / cols, cc = curIdx % cols;
+        if (cr + 1 >= rowTop.Length || cc >= colLeft.Length) return;
+        try
+        {
+            double rh = rowTop[cr + 1] - rowTop[cr];
+            var tf = Tf(false, false, false);   // narrow chain: its fallbacks cover kana/kanji
+            var layout = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, pre, tf, float.MaxValue, float.MaxValue);
+            float w = (float)layout.LayoutBounds.Width;
+            float x = (float)colLeft[cc];
+            float y = (float)(rowTop[cr] + rh / 2 - _liftNarrow);
+            ds.DrawTextLayout(layout, x, y, GetW2dBrush(rc, _defFg));
+            // Composition underline: the Windows convention for uncommitted text.
+            ds.FillRectangle(new Windows.Foundation.Rect(x, (float)(rowTop[cr + 1] - 2.0), Math.Max(w, 1f), 1.5f), GetW2dBrush(rc, _defFg));
+            // Caret inside the preedit at GCS_CURSORPOS (character index). Measured from the
+            // prefix rather than a caret API — CanvasTextLayout has no GetCaretPosition.
+            int cp = _imePreeditCursor;
+            if (cp > 0 && cp < pre.Length)
+            {
+                using var preL = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, pre.Substring(0, cp), tf, float.MaxValue, float.MaxValue);
+                ds.FillRectangle(new Windows.Foundation.Rect(x + (float)preL.LayoutBounds.Width, (float)rowTop[cr], 1.5f, (float)rh), GetW2dBrush(rc, _defFg));
+            }
+            layout.Dispose();
+        }
+        catch (Exception ex) { if (_diagEnabled) LogStartup("PREEDIT draw failed: " + ex.Message); }
+    }
 }
