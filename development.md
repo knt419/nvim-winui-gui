@@ -29,8 +29,9 @@ variables, see the README.
   - `MainWindow.notify.cs` — RPC notification handling, nvim spawn (`--headless
     --listen`), guifont load at startup + re-read after ~1 s (lazy-loaded plugins),
     self-test.
-  - `MainWindow.ime.cs` — hidden `EDIT` IME target: create/subclass, input-context
-    association, key forwarding, composition handling.
+  - `MainWindow.ime.cs` — IME composition target: a child window of our own registered
+    class (`NvimImeHost`), input-context association, key forwarding, commit delivery,
+    preedit harvesting.
 
 ## Highlight model
 
@@ -59,24 +60,66 @@ applied. `_curLocalRow`/`_curLocalCol` are deliberately not used for the lookup:
 `ext_multigrid` they can name a different grid than the one being drawn, which is what
 made the cursor pick up the previous cell's or previous row's colors.
 
-## Input
+## Input and IME
 
-Keyboard focus lives on a hidden native `EDIT` created in `MainWindow.ime.cs`, because
-WinUI has no IME story of its own. The rules that matter, each learned from a bug:
+The grid is a Win2D surface with no text-input concept, so the OS IME needs a real target
+window. Keyboard focus lives on a 1x1 child of the top-level HWND belonging to a window class
+this project registers itself (`NvimImeHost`), created in `MainWindow.ime.cs`. It is parked at
+the nvim cursor cell so the IME anchors its candidate list there.
+
+It was a hidden native `EDIT` until commit `6894529`. The custom class replaced it because most
+of the old code was mitigating EDIT's own defaults — the bell ringing for keys an always-empty
+control refuses, `ES_MULTILINE` to accept the IME's commit Enter, and chaining `WM_IME_CHAR` to
+the original proc because that proc synthesized the `WM_CHAR` carrying committed text. Our class
+has no defaults to refuse anything, so that machinery is gone.
+
+The rules that remain are IME state-machine facts, not control facts:
 
 - **One delivery point.** Windows sends both `WM_KEYDOWN` and `WM_CHAR` for a single
   physical press. Forward from exactly one. `VK_RETURN` and `VK_TAB` are the two keys
   where the character maps to the same command as the virtual key, so those are not
   mapped from `WM_KEYDOWN`; every other command key stays on that path.
-- **Consume, don't suppress the bell.** Windows rings for a keystroke a control refuses,
-  and an `EDIT` emptied after every keystroke can never usefully act on one. Processed
-  keys are not chained to the original proc. `WM_IME_CHAR` is the sole exception: it
-  passes through under its own id because the IME state machine keys off the message id.
-- **Never call back into the control from inside its own proc.** `ImmNotifyIME` posts
-  the composition string *into* the control and so re-enters the subclass proc; doing
-  that made the control stop accepting compositions entirely.
-- **`ime32.dll` may be absent.** It is loaded lazily and probed once; the risky call
-  lives in its own `try` so a missing DLL cannot skip the `SetFocus` that the IME needs.
+- **Committed text comes from `GCS_RESULTSTR`, never from the `WM_CHAR` that
+  `DefWindowProc` derives from `WM_IME_CHAR`.** Measured against the live window, that
+  derived char carries only the **high byte** of the committed code point: posted
+  U+3042 / U+65E5 / U+3044 arrived as 0x30 / 0x65 / 0x30. Those are printable ASCII, so the
+  corruption reads as plausible text in a log rather than as an obvious failure. The derived
+  echo char is consumed (`_imeCommitEcho`) so a commit lands exactly once.
+- **`WM_IME_CHAR` must chain under its own id.** The IME state machine keys off the message
+  id and concludes a commit was never acknowledged if it is re-labelled or dropped.
+- **Esc must abandon a composition.** It is forwarded to nvim *and* the IME's composition is
+  torn down: the input context is released and immediately re-taken, because a released context
+  is not restored by the IME and the user's next keystroke arrives before any activation would.
+- **Never call back into the target from inside its own proc.** `ImmNotifyIME` posts the
+  composition string *into* the window and so re-enters the proc; doing that made the target
+  stop accepting compositions entirely.
+- **The input context must be associated and re-doable.** A window created by
+  `CreateWindowExW` has none, and the IME then does nothing with no error anywhere.
+- **`imm32.dll` is loaded, not `ime32.dll`.** The composition readers live in `imm32.dll`,
+  which exists on every install; `ime32.dll` is optional and verified absent on this box. The
+  old code loaded `ime32.dll`, so its commit-harvest path was silently dead and every commit
+  went through the truncated char path instead. Both are loaded lazily and probed once, and the
+  risky call lives in its own `try` so a missing DLL cannot skip the `SetFocus` the IME needs.
+
+### Inline preedit
+
+`WM_IME_COMPOSITION` is harvested for `GCS_COMPSTR` and `GCS_CURSORPOS`, and
+`DrawImePreedit` (in `MainWindow.render.cs`, called from `RenderCore`) paints the composition
+string at the cursor cell in the grid's own font, with the standard composition underline and a
+caret at the reported cursor offset. This is what the `EDIT` target could not do: it showed the
+IME's own floating composition window instead. Painted after the cursor so it sits on top.
+
+### Verification status
+
+Composition could not be exercised on the build machine: only the US layout (`00000411`) is
+preloaded in `HKCU\Keyboard Layout\Preload`, `ime32.dll` is absent, and `Ctrl+Space` passes a
+plain space through, so no IME produces preedit or a result string. Verified instead, against the
+live window: the target attaches with an input context associated and focus held
+(`getfocus == host`); plain `WM_CHAR` typing arrives exactly once per key; a posted
+`WM_IME_CHAR` produces exactly one consumed echo and no corrupted `INPUT`; three consecutive
+posted commits behave identically; keystrokes via `SendInput` reach nvim; and no exceptions or
+`bell`-triggering paths appear in the log. **The preedit render and the `GCS_RESULTSTR` commit
+path still need a session on a machine with a Japanese IME configured.**
 
 ## API coverage (nvim 0.12.5, `--api-info`: 261 functions / 10 ui_options / 69 ui_events)
 
