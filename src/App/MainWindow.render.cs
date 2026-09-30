@@ -37,6 +37,13 @@ public partial class MainWindow
     // by real measurement once the font is known.
     private double _refCellW = 9, _refCellH = 18;
 
+    // The row pitch both directions agree on. SendNvimResize counts rows with
+    // floor((H - chromeH - status) / _rowPitch) and UpdateWindowSize sets the height with
+    // ceil(rows * _rowPitch + status + chromeH); if those two ever used different cell heights
+    // the round trip would not close and the window would creep by a fraction of a pixel on every
+    // drag. _refCellH (the raw measured font box) only seeds it.
+    private double _rowPitch = 18;
+
     // Vertical pitch reduction (px) applied to the cell height so consecutive text rows pack tightly —
     // the XAML line box (~1.25em) leaves a visible horizontal gap between glyph rows. Read from
     // NVIM_WINUI_LINESPACE (default 0). 0 = keep the box height; a positive value trims that many px
@@ -71,8 +78,16 @@ public partial class MainWindow
             // window and cell height shrink together and the inter-line whitespace disappears.
             // Tunable via NVIM_WINUI_LINESPACE (px, default 0).
             double h = Math.Max(1.0, Math.Ceiling(probe.DesiredSize.Height) - _linePitchReduce);
-            if (w >= 1 && h >= 1) { _refCellW = w; _refCellH = h; }
-            LogStartup($"CELL-METRICS narrow={_narrowFont}@{_narrowSize} -> refcell {_refCellW}x{_refCellH} (linespace-{_linePitchReduce})");
+            if (w >= 1 && h >= 1)
+            {
+                _refCellW = w; _refCellH = h;
+                // Seed the shared row pitch from the same measurement so both directions start
+                // from one number. `h` already has the linespace trim folded in, so no second
+                // subtraction here — subtracting it twice is what would make the snapped window
+                // shorter than the grid it is supposed to contain.
+                _rowPitch = h;
+            }
+            LogStartup($"CELL-METRICS narrow={_narrowFont}@{_narrowSize} -> refcell {_refCellW}x{_refCellH} rowPitch={_rowPitch:F3} (linespace-{_linePitchReduce})");
         }
         catch (Exception ex) { LogCritical("MeasureRefCell failed: " + ex.Message); }
     }
@@ -229,8 +244,17 @@ private void UpdateWindowSize(int cols, int rows)
     int width, height;
     if (SnapToCells)
     {
-        int gridW = (int)Math.Ceiling(cols * cw) + _chromeW;
-        int gridH = (int)(rows * _refCellH + StatusTextHeight) + _chromeH;
+        // The chrome is a double, so it is added BEFORE the ceiling: Ceil(cols*cw) + 16.0 and
+        // Ceil(cols*cw + 16.0) are the same at 100% but differ whenever the frame is a fraction
+        // (150%: 13.33), which is exactly the "a few pixels short" case.
+        //
+        // The height MUST round-trip through SendNvimResize's floor((H - chromeH - status)/rowPitch).
+        // That means the cell height used here has to be the SAME one used to count rows, or the
+        // window comes back a fraction of a pixel short on every cycle and the user watches the
+        // window creep smaller with each drag. _rowPitch is that shared value; _refCellH (the raw
+        // measured box) is only the starting estimate for it.
+        int gridW = (int)Math.Ceiling(cols * cw + _chromeW);
+        int gridH = (int)Math.Ceiling(rows * _rowPitch + StatusTextHeight + _chromeH);
         width = gridW; height = gridH;
     }
     else
@@ -254,7 +278,9 @@ private static bool SnapToCells => Environment.GetEnvironmentVariable("NVIM_WINU
 // Measure the non-client frame once via Win32 (synchronous + timing-independent, unlike reading a
 // XAML ActualWidth that lags one layout pass). border = outer window rect - client rect, in DIP.
 private bool _chromeMeasured;
-private int _chromeW, _chromeH;
+// Fractions, not integers: see MeasureChromeAndSnap. Whole-DIP rounding costs up to half a
+// DIP on every width/height computation at a fractional display scale.
+private double _chromeW, _chromeH;
 [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr FindWindow(string? c, string? t);
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
 private struct RECT { public int L, T, R, B; }
@@ -268,10 +294,15 @@ private void MeasureChromeAndSnap(int rows, int cols)
     if (h == IntPtr.Zero) return;
     if (!GetWindowRect(h, out RECT w) || !GetClientRect(h, out RECT c)) return;
     double scale = GetDpiForWindow(h) / 96.0; // Win32 rects are physical px; AppWindow.Resize takes DIPs
-    _chromeW = (int)Math.Round(((w.R - w.L) - (c.R - c.L)) / scale);   // total left+right border
-    _chromeH = (int)Math.Round(((w.B - w.T) - (c.B - c.T)) / scale);   // top+bottom border (title bar is content, so just frame)
+    // Keep the FRACTION. Rounding the chrome to whole DIPs is a real source of a window that is
+    // a few pixels short: at 125% a 20px border is 16.0 DIP, but at 150% it is 13.33, and Round
+    // turns that into 13 — a 0.33 DIP error on every single width computation, which shows up as
+    // the window being visibly narrower than the user dragged it to. The arithmetic downstream
+    // only ever needs a double.
+    _chromeW = ((w.R - w.L) - (c.R - c.L)) / scale;   // total left+right border
+    _chromeH = ((w.B - w.T) - (c.B - c.T)) / scale;   // top+bottom border (title bar is content, so just frame)
     _chromeMeasured = true;
-    LogStartup($"RESIZE-DBG chrome={_chromeW}x{_chromeH}");
+    LogStartup($"RESIZE-DBG chrome={_chromeW:F3}x{_chromeH:F3} (dpi scale {scale:F3})");
     UpdateWindowSize(cols, rows); // snap to exact fit now that the frame size is known
 }
 
@@ -295,21 +326,28 @@ private void SendNvimResize()
     // Derive cols/rows from AppWindow.Size (synchronous, always current), NOT XAML Actual* values —
     // those lag one layout pass behind a programmatic window resize, which made this read a stale
     // (smaller) height and shrink nvim by a row every cycle.
+    //
+    // _root.Actual* is still logged, but ONLY as a diagnostic: it is one layout pass behind, so
+    // comparing it against AppWindow.Size shows a mismatch that is the log being early, not the
+    // window being wrong. Do not size anything from it.
     int outerW = AppWindow.Size.Width;
     int outerH = AppWindow.Size.Height;
     double cw = _fontAdvance > 0 ? _fontAdvance : _refCellW;
     int cols = Math.Clamp((int)((outerW - _chromeW) / cw), 2, MaxGridCols);
     // Content height = outer - frame border - fixed status row; that's the grid area.
-    int rows = Math.Clamp((int)((outerH - _chromeH - StatusTextHeight) / _refCellH), 1, MaxGridRows);
-    LogStartup($"RESIZE-DBG appwin={outerW}x{outerH} chrome={_chromeW}x{_chromeH} -> {cols}x{rows}");
+    // Row pitch is the SAME value UpdateWindowSize inverts, so a snapped window round-trips.
+    int rows = Math.Clamp((int)((outerH - _chromeH - StatusTextHeight) / _rowPitch), 1, MaxGridRows);
+    LogStartup($"RESIZE-DBG appwin={outerW}x{outerH} chrome={_chromeW}x{_chromeH} -> {cols}x{rows}"
+               + (Math.Abs(_root.ActualWidth - (outerW - _chromeW)) > 2
+                  ? $"  [root lags: {_root.ActualWidth:F0}x{_root.ActualHeight:F0}]" : ""));
     if (cols == _lastSentCols && rows == _lastSentRows) return; // no change since last send
     _lastSentCols = cols; _lastSentRows = rows;
-    LogStartup($"RESIZE-REQ {cols}x{rows} root={_root.ActualWidth:F0}x{_root.ActualHeight:F0} appwin={(AppWindow.Size.Width)}x{(AppWindow.Size.Height)}");
+    LogStartup($"RESIZE-REQ {cols}x{rows} appwin={outerW}x{outerH}");
     try
     {
         // nvim_ui_try_resize is a notification (no response). On success nvim answers with
         // grid_resize + grid_line events, which flow through the normal redraw path and
-        // UpdateWindowSize snaps the window to the exact fit size.
+        // UpdateWindowSize applies the (possibly snapped) size.
         _client.NotifyAsync("nvim_ui_try_resize", cols, rows);
     }
     catch (Exception ex) { SetStatus($"resize error: {ex.Message}"); }
