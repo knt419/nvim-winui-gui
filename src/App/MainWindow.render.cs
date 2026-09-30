@@ -213,20 +213,43 @@ private void EnsureScreen(int rows, int cols)
 
 private void UpdateWindowSize(int cols, int rows)
 {
-    // AppWindow.Resize sets the OUTER window size (content + non-client resize border). With
-    // ExtendsContentIntoTitleBar=true there's no title bar in the client area, but the frame
-    // still eats _chromeW x _chromeH pixels (measured at runtime; 16x9 on this box). Add it
-    // back so the content area is exactly grid + status row.
+    // Snap the window to a whole number of cells.
+    //
+    // With NVIM_WINUI_SNAP=0 the window is left exactly as the user dragged it and the grid
+    // simply reflows to the new size: SendNvimResize's floor() gives the cell count that fits,
+    // and the canvas is sized to the content area instead of the grid, so the leftover is
+    // padding rather than a gap. The window is never moved, so there is no snap-back at all.
+    //
+    // Why the snapped path uses Ceil and not Round: the width must round-trip through
+    // SendNvimResize's floor((W-chrome)/cw). With round(), a cols*cw that rounds DOWN makes the
+    // snapped window read back as cols-1, and each nvim grid_resize reply shrank the window by
+    // one more cell (visible shrink after drag). Ceil keeps (width-chrome)/cw in
+    // [cols, cols+1) so floor returns exactly cols — idempotent.
     double cw = _fontAdvance > 0 ? _fontAdvance : _refCellW;
-    // CEIL, not round: the width must round-trip through SendNvimResize's floor((W-chrome)/cw).
-    // With round(), a cols*cw that rounds DOWN makes the snapped window read back as cols-1, and
-    // each nvim grid_resize reply shrank the window by one more cell (visible shrink after drag).
-    // Ceil keeps (width-chrome)/cw in [cols, cols+1) so floor returns exactly cols — idempotent.
-    int width = (int)Math.Ceiling(cols * cw) + _chromeW;
-    int height = (int)(rows * _refCellH + StatusTextHeight) + _chromeH;
+    int width, height;
+    if (SnapToCells)
+    {
+        int gridW = (int)Math.Ceiling(cols * cw) + _chromeW;
+        int gridH = (int)(rows * _refCellH + StatusTextHeight) + _chromeH;
+        width = gridW; height = gridH;
+    }
+    else
+    {
+        // Only ever GROW, never shrink: this is called from the grid_resize handler, so using
+        // the current size here would clamp a user-shrunk window straight back and defeat the
+        // point. A floating window appearing makes nvim shrink the grid, and that must not
+        // shrink the window — hence the max().
+        width = Math.Max(AppWindow.Size.Width, 1);
+        height = Math.Max(AppWindow.Size.Height, 1);
+    }
     try { AppWindow.Resize(new SizeInt32(width, height)); } catch { /* ignore */ }
     LogStartup($"RESIZE-DBG UpdateWindowSize req={width}x{height} actual={(AppWindow.Size.Width)}x{(AppWindow.Size.Height)}");
 }
+
+// NVIM_WINUI_SNAP=0 leaves the window at whatever size the user dragged it to, and the grid
+// fills it instead of the window being resized to fit the grid. Default stays on, because the
+// snapped window is what keeps the last cell's right edge flush with the canvas.
+private static bool SnapToCells => Environment.GetEnvironmentVariable("NVIM_WINUI_SNAP") != "0";
 
 // Measure the non-client frame once via Win32 (synchronous + timing-independent, unlike reading a
 // XAML ActualWidth that lags one layout pass). border = outer window rect - client rect, in DIP.
@@ -343,11 +366,29 @@ private void RenderNow()
     if (availH > 0 && rows > 0) _cellH = Math.Max(1.0, availH / rows);
     ImeTrackCursor(); // cell metrics moved, so the IME candidate anchor is stale
 
-    // Size the canvas to exactly the grid; the ScrollViewer centers it in the content area. The
-    // whole-pixel size lets the last cell edge land on the canvas boundary — no sliver of clear
-    // color beyond the final row/column (interior edges use the rowTop/colLeft spaces above).
-    GlyphCanvas.Width = Math.Round(cols * _cellW);
-    GlyphCanvas.Height = Math.Round(rows * _cellH);
+    // Size the canvas. When the window is snapped to the grid this is exactly cols*cellW x
+    // rows*cellH, and the last cell edge lands on the canvas boundary — no sliver of clear color
+    // beyond the final row/column (interior edges use the rowTop/colLeft spaces above).
+    //
+    // When snapping is off, the window is whatever the user dragged, so the cell count is whatever
+    // fits and cols*cellW can be SHORTER than the content area. The canvas is then sized to the
+    // content area and the unused cells at the end of the grid are simply never painted — which is
+    // what makes the leftover look like padding instead of a gap. The canvas must also fill the
+    // area (not stay Center-aligned at grid width), or the slack would sit split on both sides.
+    if (SnapToCells)
+    {
+        GlyphCanvas.Width = Math.Round(cols * _cellW);
+        GlyphCanvas.Height = Math.Round(rows * _cellH);
+    }
+    else
+    {
+        // Fill the content area. The grid may be narrower than it once snapping is off (the cell
+        // count is whatever fits), and those cells at the end of the grid are simply never painted.
+        double fillW = Math.Max(cols * _cellW, _root.ActualWidth);
+        double fillH = Math.Max(rows * _cellH, Math.Max(0, _root.ActualHeight - StatusTextHeight));
+        GlyphCanvas.Width = Math.Round(fillW);
+        GlyphCanvas.Height = Math.Round(fillH);
+    }
     if (_diagEnabled && Interlocked.Increment(ref _invalidateCount) % 25 == 1)
         LogStartup($"INVALIDATE #{_invalidateCount} canvas={GlyphCanvas.Width:F0}x{GlyphCanvas.Height:F0} root={_root.ActualWidth:F0}x{_root.ActualHeight:F0}");
     GlyphCanvas.Invalidate(); // the Draw handler does the real (GPU) render this frame
