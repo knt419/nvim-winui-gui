@@ -238,7 +238,7 @@ public partial class MainWindow : Window
         // hand it keyboard focus on every activation. `_root.Focus` is deliberately NOT used: the
         // EDIT is a separate top-level window, and focus must belong to it or the IME stops composing.
         _root.Loaded += (s, e) => ImeAttach();
-        Activated += (s, e) => ImeFocusTarget();
+        Activated += (s, e) => ImeFocusTarget("Activated");
         Closed += OnClosed;
         // Subclass the top-level HWND to see WM_ACTIVATEAPP. Without it a deactivation leaves no
         // trace in the log at all, so "input stopped until I clicked" has nothing to point at.
@@ -256,6 +256,14 @@ public partial class MainWindow : Window
 
     private async void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        // The OTHER keyboard path. When the IME host holds focus this never fires (the host is a
+        // real Win32 child that takes the focus); when the XAML island holds focus instead, this
+        // is what handles every key. Tracing which one runs is the only way to tell "the IME host
+        // rejected the hotkey" from "the key never reached the IME host at all" -- and a Ctrl+Space
+        // arriving HERE produces exactly the reported symptom (a literal space in the buffer),
+        // because MapKey maps Space to a plain space with no hotkey concept at all.
+        ImeTrace("XAML-KEYDOWN key=" + e.Key + " composing=" + ImeIsComposing() +
+                 " focusOnHost=" + (ImeHostHasFocus()));
         if (_client == null || _nvimProc == null) return;
         // While the IME is composing, keys belong to the IME (they are shaping the preedit), not
         // to nvim. Forwarding them would insert the romaji keystrokes that drive the IME as if they
@@ -269,6 +277,7 @@ public partial class MainWindow : Window
             return;
         }
         string? kv = MapModifierKey(e.Key) ?? MapKey(e.Key);
+        ImeTrace("XAML-SEND '" + (kv ?? "<null>") + "' for key=" + e.Key);
         if (kv != null)
         {
             e.Handled = true;

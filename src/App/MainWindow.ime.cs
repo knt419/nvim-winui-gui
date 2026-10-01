@@ -313,11 +313,13 @@ public partial class MainWindow
                 return;
             }
 
+            ImeTrace("ATTACH host=0x" + _imeHost.ToString("X") + " owner=0x" + owner.ToString("X") +
+                     " class=" + ImeHostClass);
             if (_diagEnabled) LogStartup("IME: custom-class target attached hwnd=0x" + _imeHost.ToString("X") +
                                           " owner=0x" + owner.ToString("X"));
             // Focus now, not only on Activated: at launch the window is activated BEFORE Loaded, so
             // the Activated handler has already run and the target would never get focus.
-            ImeFocusTarget();
+            ImeFocusTarget("attach");
         }
         catch (Exception ex) { if (_diagEnabled) LogStartup("IME attach failed: " + ex.Message); }
     }
@@ -389,7 +391,7 @@ public partial class MainWindow
                         // window); never fight another application for the foreground.
                         uint fgPid;
                         GetWindowThreadProcessId(fg, out fgPid);
-                        if (fgPid == GetCurrentProcessId()) ImeFocusTarget();
+                        if (fgPid == GetCurrentProcessId()) ImeFocusTarget("reclaim after own-process deactivation");
                     }
                     catch { }
                 }
@@ -444,6 +446,7 @@ public partial class MainWindow
                 case WM_IME_STARTCOMPOSITION:
                 {
                     _imeComposing = true;
+                    ImeTrace("WM_IME_STARTCOMPOSITION");
                     if (_diagEnabled) LogStartup("IME: composition started");
                     break; // chain below
                 }
@@ -458,6 +461,7 @@ public partial class MainWindow
                         _imePreedit = ImeCompositionString(GCS_COMPSTR);
                         int cp = ImeCompositionCursorPos();
                         _imePreeditCursor = cp;
+                        ImeTrace($"PREEDIT '{_imePreedit}' cursor={cp} lParam=0x{lParam:X}");
                         if (_diagEnabled) LogStartup($"IME-PREEDIT '{_imePreedit}' cursor={cp} lParam=0x{lParam:X}");
                         ScheduleRender(); FlushRender();
                     }
@@ -475,6 +479,7 @@ public partial class MainWindow
                         string committed = ImeCompositionString(GCS_RESULTSTR);
                         if (committed.Length > 0)
                         {
+                            ImeTrace("COMMIT '" + committed + "' (" + committed.Length + " chars)");
                             CommitImeText(committed);
                             _imeCommitEcho = true;   // the following WM_CHAR is this commit's echo
                         }
@@ -486,6 +491,7 @@ public partial class MainWindow
                     _imeComposing = false;
                     _imePreedit = "";
                     _imePreeditCursor = -1;
+                    ImeTrace("WM_IME_ENDCOMPOSITION");
                     ScheduleRender(); FlushRender();
                     if (_diagEnabled) LogStartup("IME: composition ended");
                     break; // chain below
@@ -500,6 +506,7 @@ public partial class MainWindow
                     // The flag makes the WM_CHAR DefWindowProc derives from this message a
                     // recognized echo to consume, so a commit is never delivered twice.
                     _imeCommitEcho = true;
+                    ImeTrace("WM_IME_CHAR ack ch=0x" + wParam.ToString("X"));
                     break;
                 }
                 case WM_KEYDOWN:
@@ -510,6 +517,9 @@ public partial class MainWindow
                     // nothing clears it) and then swallow the NEXT ordinary typed space — a
                     // stuck flag that eats the user's spaces.
                     _imeToggleChord = false;
+                    ImeTrace("KEYDOWN vk=0x" + vki.ToString("X2") +
+                             " ctrl=" + ((GetAsyncKeyState(0x11) & 0x8000) != 0) +
+                             " composing=" + _imeComposing);
                     // Esc is carved out of the "composing owns every key" rule: it is how a
                     // composition is ABANDONED. Swallowing it wedges the app in composing forever
                     // (measured with the old target). Forward to nvim, then tear the IME's own
@@ -526,7 +536,7 @@ public partial class MainWindow
                     {
                         // Keys are shaping the preedit. Chain so the system's default IME key
                         // handling still sees them, but forward nothing to nvim.
-                        break;
+                        break; // (open flag already traced on every key-down above)
                     }
                     // Enter/Tab: WM_CHAR is their single delivery point (see map). Handled (0):
                     // nothing to do here, and our class has no default that needs the key.
@@ -545,6 +555,7 @@ public partial class MainWindow
                     if (ctrl && vki == VK_SPACE)
                     {
                         _imeToggleChord = true;   // makes WM_CHAR swallow the matching space
+                        ImeTraceOpen("Ctrl+Space chained to IME");
                         break;                    // chain: let the IME see the hotkey
                     }
                     ForwardNvimKey(wParam, lParam);
@@ -559,6 +570,7 @@ public partial class MainWindow
                     if (_imeCommitEcho)
                     {
                         _imeCommitEcho = false;
+                        ImeTrace("consumed commit echo ch=0x" + wParam.ToString("X"));
                         if (_diagEnabled) LogStartup("IME: consumed commit echo char 0x" + wParam.ToString("X"));
                         return IntPtr.Zero;
                     }
@@ -655,6 +667,7 @@ public partial class MainWindow
     private void CommitImeText(string text)
     {
         if (string.IsNullOrEmpty(text)) return;
+        ImeTrace("SENT-TO-NVIM '" + text + "'");
         if (_diagEnabled) LogStartup($"IME-COMMIT '{text}'");
         _imeComposing = false;
         ForwardToNvim(text);
@@ -698,6 +711,7 @@ public partial class MainWindow
                 }
                 catch { }
             }
+            ImeTrace("CANCEL composition released + context re-taken");
             if (_diagEnabled) LogStartup("IME: composition cancelled");
             ImeAssociateContext();
         }
@@ -742,6 +756,10 @@ public partial class MainWindow
                 if (Ime32.ReleaseContext is not null) Ime32.ReleaseContext(himc);
             }
             _imeContextAssociated = ok && himc != IntPtr.Zero;
+            ImeTrace("ASSOCIATE Ex(IACE_DEFAULT) -> " + (ok ? "OK" : "FAILED") +
+                     " himc=0x" + himc.ToString("X") +
+                     (_imeContextAssociated ? " associated" : " NO CONTEXT") +
+                     " imeOpen=" + (open ? "YES" : "no"));
             if (_diagEnabled) LogStartup("IME: ImmAssociateContextEx(IACE_DEFAULT) -> " + (ok ? "OK" : "FAILED") +
                                           " himc=0x" + himc.ToString("X") +
                                           (_imeContextAssociated ? " associated" : " NO CONTEXT") +
@@ -841,8 +859,10 @@ public partial class MainWindow
 
     // Give the IME host keyboard focus. Called on activation and on every grid click — if focus
     // lands elsewhere the IME has no target and stops composing.
-    private void ImeFocusTarget()
+    private string _imeFocusReason = "?";
+    private void ImeFocusTarget(string reason = "?")
     {
+        _imeFocusReason = reason;
         try
         {
             if (_imeHost == IntPtr.Zero) return;
@@ -866,6 +886,10 @@ public partial class MainWindow
             if (_diagEnabled)
             {
                 IntPtr focus = GetFocus();
+                ImeTrace("FOCUS host=0x" + _imeHost.ToString("X") + " getfocus=0x" +
+                         focus.ToString("X") + (focus == _imeHost ? " OK" : " MISMATCH") +
+                         " imeOpen=" + (ImeOpenStatus() == 1 ? "YES" : "no") +
+                         " reason=" + _imeFocusReason);
                 LogStartup("IME: focus -> host=0x" + _imeHost.ToString("X") + " getfocus=0x" +
                            focus.ToString("X") + (focus == _imeHost ? " OK" : " MISMATCH"));
             }
@@ -876,6 +900,68 @@ public partial class MainWindow
     // True while composing: OnKeyDown must swallow those keystrokes so the romaji that drove the
     // IME is not inserted into nvim as plain input alongside the committed result.
     private bool ImeIsComposing() => _imeComposing;
+
+    // ---- IME trace: ALWAYS on, separate small file -------------------------------------------
+    // Every other diagnostic in this app is gated on NVIM_WINUI_DIAG=1, which means a normal
+    // session produces no IME evidence at all -- and a manual IME test then reports only a
+    // symptom ("the IME stays OFF") with nothing to diagnose from. Three wrong root causes came
+    // out of exactly that gap. So IME state goes to its own file, unconditionally.
+    //
+    // Kept small: key-downs are recorded with the IME open flag, and an unchanged flag is not
+    // re-logged (only transitions), so a typing session produces a few dozen lines.
+    private static string ImeTracePath => System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "NvimWinUIGui", "ime.log");
+
+    // Open/closed state of the IME on our target, or -1 when it cannot be read. Read through the
+    // app's OWN input context (the harness cannot read it cross-process: the IMC is thread-local,
+    // so ImmGetContext on another process's window returns NULL -- same trap as GetFocus).
+    private int ImeOpenStatus()
+    {
+        try
+        {
+            if (_imeHost == IntPtr.Zero || !IsWindow(_imeHost)) return -1;
+            if (Ime32.GetContext is null || Ime32.GetOpenStatus is null || Ime32.ReleaseContext is null)
+                return -1;
+            IntPtr himc = Ime32.GetContext(_imeHost);
+            if (himc == IntPtr.Zero) return -1;
+            try { return Ime32.GetOpenStatus(himc) ? 1 : 0; }
+            finally { Ime32.ReleaseContext(himc); }
+        }
+        catch { return -1; }
+    }
+
+    // True when our IME target HWND currently owns the keyboard focus on this thread. GetFocus is
+    // thread-local, so this must be read on the UI thread (it is) — a cross-process read is always
+    // 0 and can never answer the question.
+    private bool ImeHostHasFocus()
+    {
+        try { return _imeHost != IntPtr.Zero && GetFocus() == _imeHost; }
+        catch { return false; }
+    }
+
+    private int _imeLastLoggedOpen = -2;   // -2 = nothing logged yet
+    private static void ImeTrace(string s)
+    {
+        try
+        {
+            string path = ImeTracePath;
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+            System.IO.File.AppendAllText(path,
+                "[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] " + s + System.Environment.NewLine);
+        }
+        catch { /* tracing must never break input */ }
+    }
+
+    // Log the open flag only when it CHANGES, so the file stays small but always contains the
+    // transition that matters (direct-input -> IME on is the Ctrl+Space event).
+    private void ImeTraceOpen(string what)
+    {
+        int open = ImeOpenStatus();
+        if (open == _imeLastLoggedOpen) return;
+        _imeLastLoggedOpen = open;
+        ImeTrace("OPEN " + (open < 0 ? "unknown" : open == 1 ? "IME-ON" : "IME-OFF") + "  <- " + what);
+    }
 
     private void ForwardToNvim(string text)
     {
