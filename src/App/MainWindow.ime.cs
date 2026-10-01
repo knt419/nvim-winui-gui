@@ -37,10 +37,13 @@
 //     off the message id, and a commit the IME believes was never acknowledged stalls it for the
 //     rest of the session. The derived echo char is then consumed (_imeCommitEcho) so a commit
 //     lands exactly once.
-//   - A window created via CreateWindowExW needs its default input context associated before
-//     the IME will compose into it (ImmAssociateContext(hwnd, NULL) = the default system IME). The
-//     association must be re-doable (a cancel releases it) and must never be gated behind a
-//     one-shot startup flag.
+//   - A window created via CreateWindowExW needs an input context BEFORE the IME will compose
+//     into it, and it must be attached with ImmAssociateContextEx(hwnd, NULL, IACE_DEFAULT) —
+//     NOT ImmAssociateContext(hwnd, NULL), whose NULL argument means DISASSOCIATE. The older
+//     call returns the PREVIOUS handle, so it strips the context while reporting a non-null
+//     result; the window is left with no IME at all and no error anywhere (measured: the IME
+//     stayed OFF and Ctrl+Space had nothing to toggle, while the log read "OK"). The association
+//     must be re-doable (a cancel releases it) and never gated behind a one-shot startup flag.
 //
 // Preedit is harvested from WM_IME_COMPOSITION (GCS_COMPSTR + GCS_CURSORPOS) and drawn INLINE
 // in the grid at the cursor (DrawImePreedit, called from RenderCore) — the point of moving off
@@ -217,13 +220,17 @@ public partial class MainWindow
     {
         internal delegate IntPtr ImmGetContextFn(IntPtr hWnd);
         internal delegate IntPtr ImmAssociateContextFn(IntPtr hWnd, IntPtr hIMC);
+        internal delegate bool ImmAssociateContextExFn(IntPtr hWnd, IntPtr hIMC, uint dwFlags);
         internal delegate bool ImmReleaseContextFn(IntPtr hIMC);
         internal delegate int ImmGetCompositionStringWFn(IntPtr hIMC, int index, StringBuilder? buf, int len);
+        internal delegate bool ImmGetOpenStatusFn(IntPtr hIMC);
 
         internal static readonly ImmGetContextFn? GetContext;
         internal static readonly ImmAssociateContextFn? AssociateContext;
+        internal static readonly ImmAssociateContextExFn? AssociateContextEx;
         internal static readonly ImmReleaseContextFn? ReleaseContext;
         internal static readonly ImmGetCompositionStringWFn? GetCompositionStringW;
+        internal static readonly ImmGetOpenStatusFn? GetOpenStatus;
         internal static readonly bool Available;
 
         static Ime32()
@@ -239,10 +246,14 @@ public partial class MainWindow
                     System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmGetContext"));
                 AssociateContext = Marshal.GetDelegateForFunctionPointer<ImmAssociateContextFn>(
                     System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmAssociateContext"));
+                AssociateContextEx = Marshal.GetDelegateForFunctionPointer<ImmAssociateContextExFn>(
+                    System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmAssociateContextEx"));
                 ReleaseContext = Marshal.GetDelegateForFunctionPointer<ImmReleaseContextFn>(
                     System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmReleaseContext"));
                 GetCompositionStringW = Marshal.GetDelegateForFunctionPointer<ImmGetCompositionStringWFn>(
                     System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmGetCompositionStringW"));
+                GetOpenStatus = Marshal.GetDelegateForFunctionPointer<ImmGetOpenStatusFn>(
+                    System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmGetOpenStatus"));
                 Available = true;
             }
             catch
@@ -693,12 +704,13 @@ public partial class MainWindow
         catch (Exception ex) { if (_diagEnabled) LogStartup("IME cancel failed: " + ex.Message); }
     }
 
-    // Associate the DEFAULT system input context with the host window. Must be re-doable (a
-    // cancel releases it) and never gated behind a one-shot flag. Best-effort: a box without a
-    // working imm32 still gets committed text through the WM_CHAR path.
+    // Associate the DEFAULT system input context with the host window, via
+    // ImmAssociateContextEx(IACE_DEFAULT). Must be re-doable (a cancel releases it) and never
+    // gated behind a one-shot flag. Best-effort: a box without a working imm32 still gets
+    // committed text through the GCS_RESULTSTR/WM_CHAR path.
     private void ImeAssociateContext()
     {
-        if (!Ime32.Available || Ime32.AssociateContext is null)
+        if (!Ime32.Available || Ime32.AssociateContextEx is null)
         {
             if (_diagEnabled && !Ime32.Available)
                 LogStartup("IME: imm32.dll unavailable — no inline preedit; commits still arrive via WM_CHAR");
@@ -706,16 +718,34 @@ public partial class MainWindow
         }
         try
         {
-            // NULL second arg = the real system IME context (same call the EDIT target used,
-            // verified against the live control: a freshly created window has NO input context
-            // and the IME does nothing until one is associated). Non-null return = associated.
-            IntPtr himc = Ime32.AssociateContext(_imeHost, IntPtr.Zero);
-            bool ok = himc != IntPtr.Zero;
+            // ImmAssociateContextEx with IACE_DEFAULT, NOT ImmAssociateContext(hwnd, NULL).
+            // The NULL second argument of the OLDER call does NOT mean "attach the default IME"
+            // — it means DISASSOCIATE: the function removes the window's input context and
+            // returns the PREVIOUS handle. So the old call (inherited from the EDIT target)
+            // actively stripped the context, and because it returned that non-null previous
+            // handle it even logged "OK" while leaving the window with no IME at all — which is
+            // why the IME stayed OFF and Ctrl+Space did nothing: there was nothing to toggle.
+            // IACE_DEFAULT is the documented "give this window the default system IME".
+            bool ok = Ime32.AssociateContextEx(_imeHost, IntPtr.Zero, IACE_DEFAULT);
             _imeContextAssociated = ok;
             _imeContextTried = true;
             _imeContextWanted = !ok;
-            if (_diagEnabled) LogStartup("IME: ImmAssociateContext(default) -> 0x" + himc.ToString("X") +
-                                          (ok ? " OK" : " NULL/FAILED"));
+            // Read the context back and ask whether the IME is actually open on it. A TRUE
+            // ImmGetOpenStatus here would mean we are seeing the user's IME state; the log
+            // records it so a "composing but invisible" bug is distinguishable from
+            // "no context at all".
+            IntPtr himc = Ime32.GetContext is not null ? Ime32.GetContext(_imeHost) : IntPtr.Zero;
+            bool open = false;
+            if (himc != IntPtr.Zero && Ime32.GetOpenStatus is not null)
+            {
+                try { open = Ime32.GetOpenStatus(himc); } catch { }
+                if (Ime32.ReleaseContext is not null) Ime32.ReleaseContext(himc);
+            }
+            _imeContextAssociated = ok && himc != IntPtr.Zero;
+            if (_diagEnabled) LogStartup("IME: ImmAssociateContextEx(IACE_DEFAULT) -> " + (ok ? "OK" : "FAILED") +
+                                          " himc=0x" + himc.ToString("X") +
+                                          (_imeContextAssociated ? " associated" : " NO CONTEXT") +
+                                          " imeOpen=" + (open ? "YES" : "no"));
         }
         catch (Exception ex)
         {
@@ -723,6 +753,7 @@ public partial class MainWindow
             if (_diagEnabled) LogStartup("IME: ImmAssociateContext failed: " + ex.GetType().Name);
         }
     }
+    private const uint IACE_DEFAULT = 0x0010;   // "attach the default system IME"
     private bool _imeContextTried;       // an association has been attempted at least once
     private bool _imeContextAssociated;  // the window currently HOLDS an input context
     // True when a context is wanted but not currently held, so ImeFocusTarget re-takes it.
