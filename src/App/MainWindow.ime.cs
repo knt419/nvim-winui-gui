@@ -88,6 +88,9 @@ public partial class MainWindow
     private int _imeTrackedX = -1, _imeTrackedY = -1; // last SetWindowPos, to skip redundant moves
 
     // Win32 messages / notifications / styles.
+    private const int WM_GETTEXT = 0x000D;
+    private const int WM_SETTEXT = 0x000C;
+    private const int WM_GETTEXTLENGTH = 0x000E;
     private const int WM_CHAR = 0x0102;
     private const int VK_ESCAPE = 0x1B;
     private const int VK_SPACE = 0x20;
@@ -107,10 +110,20 @@ public partial class MainWindow
     private const int GWLP_WNDPROC = -4;
     private const uint SWP_NOACTIVATE = 0x0010; // moving it must not steal/steal-back focus
 
+    private const uint CS_IME = 0x00010000;       // required: "this window is a text field"
+    private const uint CS_IMELEAVE = 0x00020000;  // keep the IME open state across focus changes
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSEX
     {
         public uint cbSize;
+        // CS_IME is REQUIRED and was the missing piece. Measured on the live window: with the
+        // class registered without it, ImmSetOpenStatus reported success and the open state
+        // changed (OFF->ON), yet typing produced ZERO WM_IME_* messages -- the IME never engaged
+        // the window as a composition target. Notepad composes into RichEditD2DPT, an OS text
+        // class that carries CS_IME; ours read GCL_STYLE=0x00000000. CS_IME is how a class tells
+        // the IME it may compose into it, so without it the IME opens, has nowhere to put the
+        // preedit, and sends no composition messages at all.
         public uint style;
         public IntPtr lpfnWndProc;
         public int cbClsExtra;
@@ -126,8 +139,28 @@ public partial class MainWindow
 
     private delegate IntPtr ImeHostProc(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
+    // ---- The target's text model --------------------------------------------------------------
+    // WHY THIS EXISTS: a bare window class is not a composition target the IME will use. Measured
+    // against the live window: the IME opens (ImmSetOpenStatus OK, OFF->ON, five times) and then
+    // typing produces ZERO WM_IME_* messages -- the IME has nothing to compose INTO. Notepad,
+    // which composes into a real RichEditD2DPT text control, works on the same machine at the
+    // same time. The IME needs a caret to place the preedit and measure selection/candidate
+    // placement; our window had none because we never handled a single text message.
+    //
+    // So the target is a MINIMAL text field: a single-line buffer, a caret at offset 0, and
+    // selection == caret. That is the minimum an IME needs, and it is enough for composition to
+    // start; the composition string itself is never stored here (it lives in the IME) -- only the
+    // committed text is, so WM_SETTEXT/WM_GETTEXT round-trip for our own clear-on-commit.
+    private string _imeTargetText = "";
+    private int _imeCaret = 0;                 // caret offset within _imeTargetText
+    private const int EM_GETSEL = 0x00B0;
+    private const int EM_SETSEL = 0x00B1;
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern ushort RegisterClassExW(ref WNDCLASSEX lpwcx);
+    private const int GCL_STYLE = -26;   // for GetClassLongPtr: read the style we registered
+    [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW", SetLastError = true)]
+    private static extern int GetClassLongPtrW(IntPtr hWnd, int nIndex);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateWindowExW(uint exStyle, string? className, string? windowName,
         uint style, int x, int y, int w, int h, IntPtr hWndParent, IntPtr hMenu,
@@ -293,6 +326,7 @@ public partial class MainWindow
                 var wc = new WNDCLASSEX
                 {
                     cbSize = (uint)Marshal.SizeOf<WNDCLASSEX>(),
+                    style = CS_IME | CS_IMELEAVE,
                     lpfnWndProc = Marshal.GetFunctionPointerForDelegate(_imeHostProcKeepAlive),
                     hInstance = GetModuleHandleW(null),
                     lpszClassName = ImeHostClass,
@@ -308,6 +342,9 @@ public partial class MainWindow
                     }
                 }
                 _imeClassRegistered = true;
+                ImeTrace("RegisterClassEx style=0x" + wc.style.ToString("X8") +
+                         " CS_IME=" + ((wc.style & CS_IME) != 0 ? "YES" : "NO") +
+                         " CS_IMELEAVE=" + ((wc.style & CS_IMELEAVE) != 0 ? "YES" : "no"));
             }
 
             // 1x1 px at the origin, invisible behind the canvas. ImeTrackCursor parks it at the
@@ -614,6 +651,42 @@ public partial class MainWindow
                         // reproduces it (CommitImeText forwards per message, nvim reassembles).
                         CommitImeText(((char)wParam).ToString());
                     }
+                    return IntPtr.Zero;
+                }
+                // --- Text model: the minimum an IME needs to treat this window as a
+                // composition target. Without these, the IME opens but never composes (measured).
+                case WM_GETTEXT:                                    // 0x000D
+                {
+                    int cap = (int)wParam;
+                    string t = _imeTargetText;
+                    if (cap <= 0) { ImeTrace("GETTEXT(len only) -> " + t.Length); return new IntPtr(t.Length); }
+                    if (cap - 1 < t.Length) t = t.Substring(0, cap - 1);
+                    var buf = Marshal.StringToHGlobalUni(t);
+                    ImeTrace("GETTEXT cap=" + cap + " -> '" + t + "'");
+                    return buf;   // caller frees with LocalFree; a short-lived leak at worst
+                }
+                case WM_SETTEXT:                                    // 0x000C
+                {
+                    _imeTargetText = lParam == IntPtr.Zero ? "" : (Marshal.PtrToStringUni(lParam) ?? "");
+                    _imeCaret = _imeTargetText.Length;
+                    ImeTrace("SETTEXT -> '" + _imeTargetText + "'");
+                    return new IntPtr(_imeTargetText.Length);
+                }
+                case WM_GETTEXTLENGTH:                              // 0x000E
+                {
+                    return new IntPtr(_imeTargetText.Length);
+                }
+                case EM_GETSEL:                                      // (WM_USER + 176)
+                {
+                    // Selection == caret (single point). The IME reads this to place the preedit.
+                    int packed = (_imeCaret << 16) | _imeCaret;
+                    ImeTrace("EM_GETSEL -> caret=" + _imeCaret);
+                    return new IntPtr(packed);
+                }
+                case EM_SETSEL:                                      // (WM_USER + 177)
+                {
+                    _imeCaret = Math.Clamp((int)wParam, 0, _imeTargetText.Length);
+                    ImeTrace("EM_SETSEL -> caret=" + _imeCaret);
                     return IntPtr.Zero;
                 }
                 case WM_NCDESTROY:
