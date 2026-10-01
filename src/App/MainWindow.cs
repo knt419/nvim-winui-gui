@@ -262,8 +262,13 @@ public partial class MainWindow : Window
         // rejected the hotkey" from "the key never reached the IME host at all" -- and a Ctrl+Space
         // arriving HERE produces exactly the reported symptom (a literal space in the buffer),
         // because MapKey maps Space to a plain space with no hotkey concept at all.
+        bool hostHadFocus = ImeHostHasFocus();
         ImeTrace("XAML-KEYDOWN key=" + e.Key + " composing=" + ImeIsComposing() +
-                 " focusOnHost=" + (ImeHostHasFocus()));
+                 " focusOnHost=" + hostHadFocus);
+        // This path handling a key at all means the XAML island owns the keyboard, so the IME has
+        // no target and cannot compose. Take the target back (measured in ime.log: after a grid
+        // click focused it correctly, the next key still came here with focusOnHost=False).
+        ImeReclaimFocusIfStolen();
         if (_client == null || _nvimProc == null) return;
         // While the IME is composing, keys belong to the IME (they are shaping the preedit), not
         // to nvim. Forwarding them would insert the romaji keystrokes that drive the IME as if they

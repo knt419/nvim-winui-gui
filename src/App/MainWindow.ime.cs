@@ -19,11 +19,14 @@
 //     Text AND the character-shaped commands Enter/Tab (0x0D, 0x09) are forwarded from WM_CHAR
 //     only; other command keys (<BS>, <Esc>, arrows, F-keys, Ctrl-combos) are decided once on
 //     WM_KEYDOWN and their char message is ignored.
-//   - Ctrl+Space (the IME ON/OFF hotkey) must be CHAINED, never swallowed. The IME's hotkey
-//     handling is part of default key processing, so a proc that handles WM_KEYDOWN with a bare
-//     `return 0` makes the IME impossible to switch on from the app — measured: Ctrl+Space did
-//     nothing while the key was consumed. Its WM_CHAR is a PLAIN SPACE (0x20), not a control
-//     code, so the same press would also insert a stray space; the chord flag swallows that.
+//   - The IME ON/OFF hotkey is NOT actioned by DefWindowProc, so the client must do it. Measured
+//     on the live window with the target focused: 28 Ctrl+Space presses, chained every time, and
+//     not one WM_IME_* message of any kind ever arrived — the IME simply never opened. So the
+//     hotkey is handled IN-PROCESS via ImmSetOpenStatus on our own input context (ImeToggleOpenStatus),
+//     which is the only thing that actually opens it. The matching WM_CHAR is a PLAIN SPACE
+//     (0x20), not a control code, so it is swallowed unconditionally — a hotkey press must never
+//     insert a space whether or not the toggle worked. The chord flag is cleared on every
+//     key-down so it cannot outlive its press and eat the next typed space.
 //   - While composing, keys belong to the IME — EXCEPT Esc, which is how a composition is
 //     abandoned. Esc is forwarded to nvim AND the IME's composition is torn down (release the
 //     input context, then re-take it immediately — the user's next keystroke arrives before
@@ -224,6 +227,7 @@ public partial class MainWindow
         internal delegate bool ImmReleaseContextFn(IntPtr hIMC);
         internal delegate int ImmGetCompositionStringWFn(IntPtr hIMC, int index, StringBuilder? buf, int len);
         internal delegate bool ImmGetOpenStatusFn(IntPtr hIMC);
+        internal delegate bool ImmSetOpenStatusFn(IntPtr hIMC, bool open);
 
         internal static readonly ImmGetContextFn? GetContext;
         internal static readonly ImmAssociateContextFn? AssociateContext;
@@ -231,6 +235,7 @@ public partial class MainWindow
         internal static readonly ImmReleaseContextFn? ReleaseContext;
         internal static readonly ImmGetCompositionStringWFn? GetCompositionStringW;
         internal static readonly ImmGetOpenStatusFn? GetOpenStatus;
+        internal static readonly ImmSetOpenStatusFn? SetOpenStatus;
         internal static readonly bool Available;
 
         static Ime32()
@@ -254,6 +259,8 @@ public partial class MainWindow
                     System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmGetCompositionStringW"));
                 GetOpenStatus = Marshal.GetDelegateForFunctionPointer<ImmGetOpenStatusFn>(
                     System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmGetOpenStatus"));
+                SetOpenStatus = Marshal.GetDelegateForFunctionPointer<ImmSetOpenStatusFn>(
+                    System.Runtime.InteropServices.NativeLibrary.GetExport(h, "ImmSetOpenStatus"));
                 Available = true;
             }
             catch
@@ -410,9 +417,9 @@ public partial class MainWindow
     // forwarded EXACTLY once — see the header):
     //
     //   WM_KEYDOWN  Esc            -> forward <Esc> + tear down any composition; handled (0)
-    //               Ctrl+Space     -> CHAIN to DefWindowProc (the IME ON/OFF hotkey; swallowing it
-    //                                 made the IME impossible to turn on) and flag the chord so
-    //                                 WM_CHAR swallows the space instead of inserting it
+    //               Ctrl+Space     -> toggle the IME IN-PROCESS via ImmSetOpenStatus (chaining
+    //                                 to DefWindowProc was measured NOT to open it), flag the
+    //                                 chord so WM_CHAR swallows the space, forward nothing
     //               VK_RETURN/TAB  -> NOT mapped here: WM_CHAR carries the same command, and
     //                                 forwarding from both branches was the doubled-Enter bug
     //               other commands -> ForwardNvimKey once; handled (0)
@@ -554,9 +561,14 @@ public partial class MainWindow
                     bool ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0; // VK_CONTROL
                     if (ctrl && vki == VK_SPACE)
                     {
+                        // The IME ON/OFF hotkey. We perform the toggle ourselves (see
+                        // ImeToggleOpenStatus for why chaining is not enough), then swallow the
+                        // space unconditionally: whether or not the toggle succeeded, a hotkey
+                        // press must never insert a space into the buffer.
                         _imeToggleChord = true;   // makes WM_CHAR swallow the matching space
-                        ImeTraceOpen("Ctrl+Space chained to IME");
-                        break;                    // chain: let the IME see the hotkey
+                        bool nowOpen = ImeToggleOpenStatus();
+                        ImeTraceOpen("Ctrl+Space handled in-app");
+                        break;                    // handled; do NOT also forward to nvim
                     }
                     ForwardNvimKey(wParam, lParam);
                     return IntPtr.Zero; // handled
@@ -901,6 +913,20 @@ public partial class MainWindow
     // IME is not inserted into nvim as plain input alongside the committed result.
     private bool ImeIsComposing() => _imeComposing;
 
+    // Re-assert focus on the IME target after the XAML island has taken it.
+    //
+    // Measured (ime.log, session 1): a grid click correctly focused the target
+    // ("reason=grid click", getfocus == host), yet the very NEXT keystroke was handled by XAML's
+    // OnKeyDown with focusOnHost=False — so keys were bypassing the IME entirely and arriving as
+    // plain text with no IME involved. The canvas/_root are focusable, so anything that gives the
+    // XAML island focus again (a click landing on it, a programmatic focus) silently moves the
+    // keyboard path from the IME host to XAML.
+    //
+    // Taking focus back on the XAML key path is deliberately late (the key is already handled):
+    // the alternative — stealing focus mid-typing on every key — causes visible flicker, and the
+    // IME does not compose until the user presses a real key anyway.
+    public void ImeReclaimFocusIfStolen() => ImeFocusTarget("XAML path took focus");
+
     // ---- IME trace: ALWAYS on, separate small file -------------------------------------------
     // Every other diagnostic in this app is gated on NVIM_WINUI_DIAG=1, which means a normal
     // session produces no IME evidence at all -- and a manual IME test then reports only a
@@ -938,6 +964,48 @@ public partial class MainWindow
     {
         try { return _imeHost != IntPtr.Zero && GetFocus() == _imeHost; }
         catch { return false; }
+    }
+
+    // Is the IME currently OPEN on our target? Read through our own input context; a cross-process
+    // read is impossible (the IMC is thread-local, so ImmGetContext on someone else's window is
+    // NULL). -1 from ImeOpenStatus means "cannot tell".
+    private bool ImeIsOpen() => ImeOpenStatus() == 1;
+
+    // Perform the IME ON/OFF toggle ourselves and return the state afterwards.
+    //
+    // WHY WE DO THIS INSTEAD OF RELYING ON THE OS HOTKEY: chaining Ctrl+Space to DefWindowProc is
+    // NOT sufficient. Measured on the live window with the target focused: 28 Ctrl+Space presses,
+    // the message chained every time, and the IME never opened — not one WM_IME_* message of any
+    // kind arrived. The classic IMM32 open/close hotkey is not actioned by DefWindowProc, so a
+    // client that wants Ctrl+Space to mean "IME ON/OFF" has to ask the IME directly.
+    //
+    // The IME acts on the FOCUSED window's context, so the target is focused first — which is also
+    // the behaviour we want anyway, since the XAML island stealing focus is a separate problem.
+    private bool ImeToggleOpenStatus()
+    {
+        try
+        {
+            if (_imeHost == IntPtr.Zero || !IsWindow(_imeHost)) { ImeTrace("HOTKEY toggle: no target window"); return false; }
+            if (Ime32.GetContext is null || Ime32.GetOpenStatus is null || Ime32.SetOpenStatus is null)
+            { ImeTrace("HOTKEY toggle: imm32 exports unavailable"); return false; }
+            if (!ImeHostHasFocus()) SetFocus(_imeHost);
+            // A released context must be back before the IME can be asked to do anything.
+            if (!_imeContextAssociated) ImeAssociateContext();
+            IntPtr himc = Ime32.GetContext(_imeHost);
+            if (himc == IntPtr.Zero) { ImeTrace("HOTKEY toggle: ImmGetContext NULL"); return false; }
+            try
+            {
+                bool before = Ime32.GetOpenStatus(himc);
+                bool call = Ime32.SetOpenStatus(himc, !before);
+                bool after = Ime32.GetOpenStatus(himc);
+                ImeTrace("HOTKEY toggle: ImmSetOpenStatus(!before=" + (!before ? 1 : 0) + ") call=" +
+                         (call ? "OK" : "FAILED") + " open " + (before ? "ON" : "OFF") + " -> " +
+                         (after ? "ON" : "OFF") + (after == !before ? "" : "  *** STATE DID NOT CHANGE ***"));
+                return after;
+            }
+            finally { Ime32.ReleaseContext(himc); }
+        }
+        catch (Exception ex) { ImeTrace("HOTKEY toggle threw " + ex.GetType().Name); return false; }
     }
 
     private int _imeLastLoggedOpen = -2;   // -2 = nothing logged yet
