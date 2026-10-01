@@ -64,6 +64,11 @@ public partial class MainWindow
     private static readonly Guid IID_ITfInputProcessorProfiles = new Guid("1F02B6C5-7842-4EE6-8A0B-9A24183A95CA");
     private static readonly Guid IID_ITfContextView = new Guid("2433BF8E-0F9B-435C-BA2C-180611978C30");
     private static readonly Guid IID_ITfKeystrokeManager = new Guid("AA80E80D-2021-11D2-93E0-0060B067B86E");
+    // Measured from HKLM\SOFTWARE\Classes\Interface (see the note above the TSF IIDs).
+    private static readonly Guid IID_ITfSource = new Guid("4EA48A35-60AE-446F-8FD6-E6A8D82459F7");
+    private static readonly Guid IID_ITfTextEditSink = new Guid("8127D409-CCD3-4683-967A-B43D5B482BF7");
+    private static readonly Guid IID_ITfLanguageProfileNotifySink = new Guid("43C9FE15-F494-4C17-9DE2-B8A4AC350AA8");
+    private const uint TF_INVALID_COOKIE = 0xFFFFFFFF;
 
     [DllImport("ole32.dll")]
     private static extern int CoCreateInstance(ref Guid rclsid, IntPtr pUnkOuter, uint dwClsContext,
@@ -342,6 +347,18 @@ public partial class MainWindow
         [PreserveSig] int OnCompositionTerminated(uint ecWrite, IntPtr pComposition);
     }
 
+    // ITfTextEditSink has exactly ONE method (measured: msctf.h lists only OnEndEdit after
+    // IUnknown). It is the sink Chromium advises on the CONTEXT via ITfSource, and OnEndEdit is
+    // where a composition that ended is noticed at the document level.
+    [ComImport, Guid("8127D409-CCD3-4683-967A-B43D5B482BF7"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface ITfTextEditSink
+    {
+        [PreserveSig] int QueryInterface(ref Guid riid, out IntPtr ppvObject);
+        [PreserveSig] int AddRef();
+        [PreserveSig] int Release();
+        [PreserveSig] int OnEndEdit(IntPtr ptitContext, IntPtr pEditCookie, IntPtr prgEditCookie);
+    }
+
     // Also read from msctf.idl: OnStartComposition / OnUpdateComposition / OnEndComposition. The
     // method I had written from memory (OnCompositionTerminated with a result string) does not exist.
     [ComImport, Guid("5F20AA40-B57A-4F34-96AB-3576F377CC79"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -384,6 +401,33 @@ public partial class MainWindow
         }
     }
 
+    // The document-level edit sink, advised on the CONTEXT as ITfSource. OnEndEdit fires when an
+    // edit session closes -- which for a composition is the moment the text has landed in the store.
+    private sealed class TsfTextEditSink : ITfTextEditSink
+    {
+        private readonly MainWindow _host;
+        private int _ref = 1;
+        private static readonly List<TsfTextEditSink> Live = new();
+        public TsfTextEditSink(MainWindow host) { _host = host; lock (Live) Live.Add(this); }
+        public static TsfTextEditSink Create(MainWindow host) { return new TsfTextEditSink(host); }
+
+        public int QueryInterface(ref Guid riid, out IntPtr ppv)
+        {
+            if (riid == IID_IUnknownTsfGuid || riid == IID_ITfTextEditSink)
+            { AddRef(); ppv = Marshal.GetComInterfaceForObject(this, typeof(ITfTextEditSink)); return S_OK; }
+            ppv = IntPtr.Zero; return E_NOINTERFACE;
+        }
+        public int AddRef() { Interlocked.Increment(ref _ref); return _ref; }
+        public int Release() { int n = Interlocked.Decrement(ref _ref); return Math.Max(n, 1); }
+
+        public int OnEndEdit(IntPtr ptitContext, IntPtr pEditCookie, IntPtr prgEditCookie)
+        {
+            ImeTrace("TSF OnEndEdit");
+            _host.TsfOnEndEdit();
+            return S_OK;
+        }
+    }
+
     // The owner sink tells the app when a composition starts/updates/ends so the inline preedit can
     // be drawn. It does NOT carry the text; the text is in the store's buffer.
     private sealed class TsfOwnerCompositionSink : ITfContextOwnerCompositionSink
@@ -392,6 +436,7 @@ public partial class MainWindow
         private int _ref = 1;
         private static readonly List<TsfOwnerCompositionSink> Live = new();
         public TsfOwnerCompositionSink(MainWindow host) { _host = host; lock (Live) Live.Add(this); }
+        public static TsfOwnerCompositionSink Create(MainWindow host) { return new TsfOwnerCompositionSink(host); }
 
         public int QueryInterface(ref Guid riid, out IntPtr ppv)
         {
@@ -439,6 +484,8 @@ public partial class MainWindow
     private uint _tsfClientId;
     private bool _tsfActive;
     private TsfTextStore? _tsfStore;
+    private static TsfTextEditSink? _tsfEditSink;
+    private static TsfOwnerCompositionSink? _tsfOwnerSink;
 
     [DllImport("msctf.dll", CallingConvention = CallingConvention.StdCall)]
     private static extern int TF_CreateThreadMgr(out IntPtr pptim);
@@ -455,6 +502,12 @@ public partial class MainWindow
     // what the first attempt measured. Slot 4 (after QueryInterface/AddRef/Release/CreateContext).
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int DmPushFn(IntPtr pThis, IntPtr pContext);
+    // ITfSource::AdviseSink(riid, punk, *pdwCookie) -- slot 3 after IUnknown. The out cookie is what
+    // makes the parameter count easy to get wrong, so it is in the delegate.
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int AdviseSinkFn(IntPtr pThis, Guid riid, IntPtr punk, out uint pdwCookie);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int QueryInterfaceFn(IntPtr pThis, ref Guid riid, out IntPtr ppvObject);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int TimSetFocusFn(IntPtr pThis, IntPtr pdimFocus);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -516,8 +569,40 @@ public partial class MainWindow
             // the document manager, which is how the IME finds a text service, and focus follows
             // the window. Chromium calls SetFocus, but from a long-lived TSF bridge on a thread that
             // set TSF up at startup rather than one activating it mid-frame.
+            // Advise the sinks on the context (as ITfSource) -- Chromium's step, and the one that
+            // actually connects the IME to this store. Without it the context exists but nothing
+            // routes composition callbacks here.
+            uint textEditCookie = TF_INVALID_COOKIE;
+            _tsfEditSink = TsfTextEditSink.Create(this);
+            IntPtr editSinkIface = Marshal.GetComInterfaceForObject(_tsfEditSink, typeof(ITfTextEditSink));
+
+            Guid iidSource = IID_ITfSource;
+            IntPtr source;
+            int hrSrc = VtSlot<QueryInterfaceFn>(_tsfCtx, 0)(_tsfCtx, ref iidSource, out source);
+            ImeTrace("TSF ctx->QI(ITfSource) hr=0x" + hrSrc.ToString("X8"));
+            if (hrSrc == 0 && source != IntPtr.Zero)
+            {
+                // ITfSource::AdviseSink is slot 3 (after IUnknown).
+                int hrAdv = VtSlot<AdviseSinkFn>(source, 3)(source, IID_ITfTextEditSink, editSinkIface, out textEditCookie);
+                ImeTrace("TSF AdviseSink(ITfTextEditSink) hr=0x" + hrAdv.ToString("X8") + " cookie=" + textEditCookie);
+            }
+
+            // The owner composition sink goes on the thread manager's source, so the IME's
+            // start/update/end notifications reach us.
+            uint ownerCookie = TF_INVALID_COOKIE;
+            Guid iidSource2 = IID_ITfSource;
+            IntPtr tsrc;
+            int hrSrc2 = VtSlot<QueryInterfaceFn>(_tsfTim, 0)(_tsfTim, ref iidSource2, out tsrc);
+            if (hrSrc2 == 0 && tsrc != IntPtr.Zero)
+            {
+                _tsfOwnerSink = TsfOwnerCompositionSink.Create(this);
+                IntPtr ownerIface = Marshal.GetComInterfaceForObject(_tsfOwnerSink, typeof(ITfContextOwnerCompositionSink));
+                int hrAdv2 = VtSlot<AdviseSinkFn>(tsrc, 3)(tsrc, IID_ITfContextOwnerCompositionSink, ownerIface, out ownerCookie);
+                ImeTrace("TSF AdviseSink(OwnerComposition) hr=0x" + hrAdv2.ToString("X8") + " cookie=" + ownerCookie);
+            }
+
             _tsfActive = true;
-            ImeTrace("TSF ACTIVE — context pushed, MSIME can now compose into this window");
+            ImeTrace("TSF ACTIVE — context pushed and sinks advised; MSIME can compose here");
         }
         catch (Exception ex)
         {
@@ -575,6 +660,14 @@ public partial class MainWindow
         if (string.IsNullOrEmpty(text)) return;
         ImeTrace("TSF commit (direct) '" + text + "'");
         CommitImeText(text);
+    }
+
+    // OnEndEdit: an edit session closed. If it was a composition, the text is already in the store
+    // and TsfCompositionEnded will pick it up; this just makes the timing visible and covers the
+    // case where the owner sink was not consulted.
+    private void TsfOnEndEdit()
+    {
+        if (_imeComposing) TsfCompositionEnded();
     }
 
     private void TsfSetPreedit(string text, int selStart, int selLen)
