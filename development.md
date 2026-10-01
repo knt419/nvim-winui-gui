@@ -95,6 +95,12 @@ The rules that remain are IME state-machine facts, not control facts:
   stop accepting compositions entirely.
 - **The input context must be associated and re-doable.** A window created by
   `CreateWindowExW` has none, and the IME then does nothing with no error anywhere.
+- **Ctrl+Space is chained, not swallowed.** It is the registered IME ON/OFF hotkey
+  (`HKCU\Control Panel\Input Method\Hot Keys\00000070` = VK 0x20 with modifier 2 = Ctrl).
+  Handling its `WM_KEYDOWN` with a bare `return 0` made the IME impossible to switch on from the
+  app, because the hotkey lives in default key processing. Its `WM_CHAR` is a *plain space*
+  (0x20), not a control code, so the same press also inserted a stray space; the chord flag
+  swallows exactly that char and is cleared on every key-down so it cannot outlive its own press.
 - **`imm32.dll` is loaded, not `ime32.dll`.** The composition readers live in `imm32.dll`,
   which exists on every install; `ime32.dll` is optional and verified absent on this box. The
   old code loaded `ime32.dll`, so its commit-harvest path was silently dead and every commit
@@ -111,15 +117,26 @@ IME's own floating composition window instead. Painted after the cursor so it si
 
 ### Verification status
 
-Composition could not be exercised on the build machine: only the US layout (`00000411`) is
-preloaded in `HKCU\Keyboard Layout\Preload`, `ime32.dll` is absent, and `Ctrl+Space` passes a
-plain space through, so no IME produces preedit or a result string. Verified instead, against the
-live window: the target attaches with an input context associated and focus held
-(`getfocus == host`); plain `WM_CHAR` typing arrives exactly once per key; a posted
-`WM_IME_CHAR` produces exactly one consumed echo and no corrupted `INPUT`; three consecutive
-posted commits behave identically; keystrokes via `SendInput` reach nvim; and no exceptions or
-`bell`-triggering paths appear in the log. **The preedit render and the `GCS_RESULTSTR` commit
-path still need a session on a machine with a Japanese IME configured.**
+A Japanese IME **is** configured on this machine (`Get-WinUserLanguageList` reports `ja` with the
+MSIME TIP, and `msime.dll` is present); the earlier conclusion that no IME was available was wrong.
+The real limit is that **synthetic keyboard input is blocked on this box**: `SendInput` returns 1
+(system accepted) yet no window receives the key — confirmed with Notepad as a known-good IME host,
+which also received nothing. So composition cannot be driven from a harness here, and
+`ImmSetOpenStatus` cannot stand in for it either, because the input context is thread-local and
+`ImmGetContext` on another process's window returns NULL.
+
+Verified against the live window by posting messages at the target HWND (which does exercise the
+real forwarding path): the target attaches with an input context and focus (`getfocus == host`);
+`WM_KEYDOWN` of a command key arrives once as `<F5>`; `WM_CHAR` arrives once as `INPUT Q`; a posted
+`WM_IME_CHAR` yields exactly one consumed echo and no corrupted `INPUT`; three consecutive posted
+commits behave identically; Ctrl+Space is chained to the IME and its space is swallowed with no
+`INPUT` line; and no exceptions or bell-triggering paths appear in the log.
+
+**Still unverified: the inline preedit render and the `GCS_RESULTSTR` commit path**, which need a
+real composition. Either drive it by hand in a foreground session, or run the harness somewhere
+`SendInput` is not blocked. Note also that `Get-WinUserLanguageList` and the `CTF\TIP` registry
+keys return **empty values** on this box while the language list itself is populated — read the
+language list, not those registry keys, when deciding whether an IME exists.
 
 ## API coverage (nvim 0.12.5, `--api-info`: 261 functions / 10 ui_options / 69 ui_events)
 
