@@ -19,6 +19,11 @@
 //     Text AND the character-shaped commands Enter/Tab (0x0D, 0x09) are forwarded from WM_CHAR
 //     only; other command keys (<BS>, <Esc>, arrows, F-keys, Ctrl-combos) are decided once on
 //     WM_KEYDOWN and their char message is ignored.
+//   - Ctrl+Space (the IME ON/OFF hotkey) must be CHAINED, never swallowed. The IME's hotkey
+//     handling is part of default key processing, so a proc that handles WM_KEYDOWN with a bare
+//     `return 0` makes the IME impossible to switch on from the app — measured: Ctrl+Space did
+//     nothing while the key was consumed. Its WM_CHAR is a PLAIN SPACE (0x20), not a control
+//     code, so the same press would also insert a stray space; the chord flag swallows that.
 //   - While composing, keys belong to the IME — EXCEPT Esc, which is how a composition is
 //     abandoned. Esc is forwarded to nvim AND the IME's composition is torn down (release the
 //     input context, then re-take it immediately — the user's next keystroke arrives before
@@ -71,11 +76,15 @@ public partial class MainWindow
     // commit, so the NEXT WM_CHAR after any WM_IME_CHAR is that echo and must be consumed
     // rather than forwarded — otherwise the commit is sent twice.
     private bool _imeCommitEcho;
+    // Set when a Ctrl+Space (IME ON/OFF) key-down was chained to the IME rather than forwarded, so
+    // the WM_CHAR carrying that same press — a plain space — is swallowed instead of inserted.
+    private bool _imeToggleChord;
     private int _imeTrackedX = -1, _imeTrackedY = -1; // last SetWindowPos, to skip redundant moves
 
     // Win32 messages / notifications / styles.
     private const int WM_CHAR = 0x0102;
     private const int VK_ESCAPE = 0x1B;
+    private const int VK_SPACE = 0x20;
     private const int WM_KEYDOWN = 0x0100;
     private const int WM_NCDESTROY = 0x0082;
     private const int WM_IME_STARTCOMPOSITION = 0x0283;
@@ -388,6 +397,9 @@ public partial class MainWindow
     // forwarded EXACTLY once — see the header):
     //
     //   WM_KEYDOWN  Esc            -> forward <Esc> + tear down any composition; handled (0)
+    //               Ctrl+Space     -> CHAIN to DefWindowProc (the IME ON/OFF hotkey; swallowing it
+    //                                 made the IME impossible to turn on) and flag the chord so
+    //                                 WM_CHAR swallows the space instead of inserting it
     //               VK_RETURN/TAB  -> NOT mapped here: WM_CHAR carries the same command, and
     //                                 forwarding from both branches was the doubled-Enter bug
     //               other commands -> ForwardNvimKey once; handled (0)
@@ -482,6 +494,11 @@ public partial class MainWindow
                 case WM_KEYDOWN:
                 {
                     int vki = (int)wParam;
+                    // Any key press ends a pending Ctrl+Space chord. Without this the flag could
+                    // outlive its space (the IME may swallow the char message, in which case
+                    // nothing clears it) and then swallow the NEXT ordinary typed space — a
+                    // stuck flag that eats the user's spaces.
+                    _imeToggleChord = false;
                     // Esc is carved out of the "composing owns every key" rule: it is how a
                     // composition is ABANDONED. Swallowing it wedges the app in composing forever
                     // (measured with the old target). Forward to nvim, then tear the IME's own
@@ -503,6 +520,22 @@ public partial class MainWindow
                     // Enter/Tab: WM_CHAR is their single delivery point (see map). Handled (0):
                     // nothing to do here, and our class has no default that needs the key.
                     if (vki == 0x0D || vki == 0x09) return IntPtr.Zero;
+                    // Ctrl+Space is the IME ON/OFF hotkey (HKCU\Control Panel\Input Method\
+                    // Hot Keys\00000070 = Virtual Key 0x20 with modifier 2=Ctrl). It must be
+                    // CHAINED, not swallowed: the IME's hotkey handling lives in the default key
+                    // processing, so returning 0 here means the IME can never be turned on from
+                    // the app — measured, Ctrl+Space did nothing while the key was consumed here.
+                    //
+                    // It must also never reach nvim. WM_CHAR for Ctrl+Space is a PLAIN SPACE
+                    // (0x20), not a control code, so the char branch would otherwise insert a
+                    // stray space on every IME toggle — which is what the log showed
+                    // ("IME-COMMIT ' '" / "INPUT  " right after the Ctrl+Space press).
+                    bool ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0; // VK_CONTROL
+                    if (ctrl && vki == VK_SPACE)
+                    {
+                        _imeToggleChord = true;   // makes WM_CHAR swallow the matching space
+                        break;                    // chain: let the IME see the hotkey
+                    }
                     ForwardNvimKey(wParam, lParam);
                     return IntPtr.Zero; // handled
                 }
@@ -519,6 +552,14 @@ public partial class MainWindow
                         return IntPtr.Zero;
                     }
                     if (wParam == 0x1B) return IntPtr.Zero;   // Esc char: forwarded from WM_KEYDOWN
+                    // The space of a Ctrl+Space IME toggle. The WM_KEYDOWN was chained to the IME
+                    // (not forwarded), so this char must not become a stray space in the buffer.
+                    if (wParam == 0x20 && _imeToggleChord)
+                    {
+                        _imeToggleChord = false;
+                        if (_diagEnabled) LogStartup("IME: swallowed space of Ctrl+Space toggle");
+                        return IntPtr.Zero;
+                    }
                     if (wParam == 0x0D || wParam == 0x0A)     // <CR>
                     {
                         if (!_imeComposing) ForwardToNvim("<CR>");
