@@ -62,5 +62,7 @@
     <Compile Include="MainWindow.mouse.cs" />
     <!-- IME: native Win32 EDIT target that receives the OS IME's committed text. -->
     <Compile Include="MainWindow.ime.cs" />
+    <!-- IME: TSF text store (MSIME is a TSF IME; IMM32 alone cannot make it compose). -->
+    <Compile Include="MainWindow.tsf.cs" />
   </ItemGroup>
 </Project>

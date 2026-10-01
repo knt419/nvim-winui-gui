@@ -361,6 +361,9 @@ public partial class MainWindow
                      " class=" + ImeHostClass);
             if (_diagEnabled) LogStartup("IME: custom-class target attached hwnd=0x" + _imeHost.ToString("X") +
                                           " owner=0x" + owner.ToString("X"));
+            // TSF is the path MSIME actually honours (IMM32 cannot make a TSF IME compose), so
+            // build the text store + context for this same window now that the HWND exists.
+            TsfAttach();
             // Focus now, not only on Activated: at launch the window is activated BEFORE Loaded, so
             // the Activated handler has already run and the target would never get focus.
             ImeFocusTarget("attach");
@@ -966,6 +969,7 @@ public partial class MainWindow
             }
             if (needContext) ImeAssociateContext();
             SetFocus(_imeHost);
+            TsfSetFocus();   // the TSF context must own focus too, or the IME targets another one
             // Log what actually holds focus: SetFocus can silently fail (e.g. the window is not the
             // foreground window), and then the IME has no target and composing does nothing.
             if (_diagEnabled)
@@ -1126,6 +1130,7 @@ public partial class MainWindow
     {
         try
         {
+            TsfDetach();
             if (_imeHost != IntPtr.Zero)
             {
                 DestroyWindow(_imeHost);
