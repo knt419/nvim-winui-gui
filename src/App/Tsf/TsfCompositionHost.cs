@@ -177,6 +177,8 @@ public sealed class TsfCompositionHost : ITfContextOwner, ITfContextOwnerComposi
 
     private readonly IntPtr _hwnd;
     private IntPtr _focusHwnd = IntPtr.Zero;   // the HWND TSF is actually associated with right now
+    private IntPtr _appliedHwnd = IntPtr.Zero; // HWND of the current association (skip redundant work)
+    private bool _focused;                     // is TSF currently focused on _appliedHwnd?
     private readonly Func<TsfRect> _caretRect;
     private readonly Func<TsfRect> _viewportRect;
 
@@ -268,11 +270,18 @@ public sealed class TsfCompositionHost : ITfContextOwner, ITfContextOwnerComposi
         {
             if (hwnd != IntPtr.Zero) _focusHwnd = hwnd;
             IntPtr target = _focusHwnd != IntPtr.Zero ? _focusHwnd : _hwnd;
+            // Never re-associate with the same window twice. Focus is re-asserted on every keystroke
+            // (the XAML path reclaims it), and each AssociateFocus+SetFocus is a synchronous trip
+            // through msctf; redoing it also re-opens the window in which a transient GetFocus()
+            // blip can park TSF on the wrong HWND.
+            if (_focused && target == _appliedHwnd) return;
             int hr = TsfCall.AssociateFocus(_tim, target, _dm, out IntPtr prev);
             TsfCall.Release(prev);
             Log($"AssociateFocus(hwnd=0x{target:X}) hr=0x{hr:X8}");
             hr = TsfCall.SetFocus(_tim, _dm);
             Log($"SetFocus(dm) hr=0x{hr:X8}");
+            _focused = true;
+            _appliedHwnd = target;
         }
         catch (Exception ex) { Log("Focus threw " + ex.Message); }
     }
@@ -300,6 +309,8 @@ public sealed class TsfCompositionHost : ITfContextOwner, ITfContextOwnerComposi
 
             hr = TsfCall.SetFocus(_tim, IntPtr.Zero);
             Log($"SetFocus(NULL) hr=0x{hr:X8}");
+            _focused = false;
+            _appliedHwnd = IntPtr.Zero;
 
             if (_lastPreview.Length > 0) { _lastPreview = ""; PreviewChanged?.Invoke(""); }
         }

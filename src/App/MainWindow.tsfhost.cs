@@ -100,6 +100,8 @@ public partial class MainWindow
         catch { }
     }
 
+    private IntPtr _tsfInputHwnd;   // WinUI's 'InputSiteWindowClass' child — the window that gets keys
+
     /// <summary>Re-assert TSF focus (window activated / IME target re-focused).</summary>
     private void TsfHostFocus()
     {
@@ -108,15 +110,36 @@ public partial class MainWindow
             if (_tsfHost == null) return;
             // The mode has the final say: a focus change must not re-attach the IME in normal mode.
             if (!_tsfImeAllowed) { if (_tsfFocusApplied) { _tsfFocusApplied = false; _tsfHost.Unfocus(); } return; }
-            // Associate with the HWND that actually owns the keyboard on this thread. WinUI 3 hosts
-            // its content in a child site-bridge window, so the top-level HWND is not always the
-            // window TSF must be told about. GetFocus is thread-local, which is exactly right here.
-            IntPtr focus = GetFocus();
-            IntPtr top = GetTopLevelHwnd();
-            _tsfHost.FocusOn(focus != IntPtr.Zero ? focus : top);
+            IntPtr hwnd = TsfResolveInputHwnd();
+            if (hwnd == IntPtr.Zero) return;
+            _tsfHost.FocusOn(hwnd);
             _tsfFocusApplied = true;
         }
         catch { }
+    }
+
+    // The window that actually receives keyboard input for the XAML content is a CHILD of the
+    // top-level window (class 'InputSiteWindowClass', measured 0xB60350 under top-level 0x800BB6),
+    // not the top-level window itself. GetFocus() normally returns that child, but it intermittently
+    // reports the top-level instead -- typically on the focus blip when a floating grid such as the
+    // completion popup appears -- and associating TSF with the top-level at that moment leaves the
+    // app receiving no keys at all until the user clicks the grid again. That is the reported
+    // "completion popup shows up, then typing does nothing". So cache the input-site HWND and never
+    // fall back to the top-level while it is still alive.
+    private IntPtr TsfResolveInputHwnd()
+    {
+        try
+        {
+            IntPtr top = GetTopLevelHwnd();
+            if (top == IntPtr.Zero) return IntPtr.Zero;
+            if (_tsfInputHwnd != IntPtr.Zero && IsWindow(_tsfInputHwnd)) return _tsfInputHwnd;
+            IntPtr focus = GetFocus();
+            if (focus != IntPtr.Zero && focus != top) { _tsfInputHwnd = focus; return focus; }
+            // Focus read did not identify the child: keep the last known one, else use the top-level
+            // for this call only (FocusOn will not remember it as the input site).
+            return _tsfInputHwnd != IntPtr.Zero ? _tsfInputHwnd : top;
+        }
+        catch { return IntPtr.Zero; }
     }
 
     /// <summary>Release TSF focus so a composition cannot survive into another app.</summary>
