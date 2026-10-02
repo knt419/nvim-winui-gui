@@ -69,11 +69,12 @@ namespace NvimWinUIGui;
 
 public partial class MainWindow
 {
-    private const string ImeHostClass = "NvimImeHost";
-    private static bool _imeClassRegistered;    // process-wide: re-registering fails harmlessly anyway
+    private const string ImeHostClass = "RICHEDIT50W";  // msftedit.dll's RichEditD2DPT — OS provides TSF text store
+    private static bool _imeClassRegistered;            // msftedit.dll loaded (registers the class)
 
-    private IntPtr _imeHost;                    // HWND of the custom-class IME target
-    private ImeHostProc? _imeHostProcKeepAlive; // class proc delegate; the class holds the thunk
+    private IntPtr _imeHost;                    // HWND of the RICHEDIT50W IME target
+    private ImeHostProc? _imeHostProcKeepAlive; // subclass proc delegate
+    private IntPtr _imePrevProc;                // original RichEdit window proc (for chaining)
     private bool _imeAttachTried;               // never retry: a failed attach would leak HWNDs
     private bool _imeComposing;                 // IME is mid-composition
     private string _imePreedit = "";            // current composition string (GCS_COMPSTR)
@@ -94,6 +95,8 @@ public partial class MainWindow
     private const int WM_CHAR = 0x0102;
     private const int VK_ESCAPE = 0x1B;
     private const int VK_SPACE = 0x20;
+    private const int VK_RETURN = 0x0D;
+    private const int VK_TAB = 0x09;
     private const int WM_KEYDOWN = 0x0100;
     private const int WM_NCDESTROY = 0x0082;
     private const int WM_IME_STARTCOMPOSITION = 0x0283;
@@ -110,61 +113,23 @@ public partial class MainWindow
     private const int GWLP_WNDPROC = -4;
     private const uint SWP_NOACTIVATE = 0x0010; // moving it must not steal/steal-back focus
 
-    private const uint CS_IME = 0x00010000;       // required: "this window is a text field"
-    private const uint CS_IMELEAVE = 0x00020000;  // keep the IME open state across focus changes
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct WNDCLASSEX
-    {
-        public uint cbSize;
-        // CS_IME is REQUIRED and was the missing piece. Measured on the live window: with the
-        // class registered without it, ImmSetOpenStatus reported success and the open state
-        // changed (OFF->ON), yet typing produced ZERO WM_IME_* messages -- the IME never engaged
-        // the window as a composition target. Notepad composes into RichEditD2DPT, an OS text
-        // class that carries CS_IME; ours read GCL_STYLE=0x00000000. CS_IME is how a class tells
-        // the IME it may compose into it, so without it the IME opens, has nowhere to put the
-        // preedit, and sends no composition messages at all.
-        public uint style;
-        public IntPtr lpfnWndProc;
-        public int cbClsExtra;
-        public int cbWndExtra;
-        public IntPtr hInstance;
-        public IntPtr hIcon;
-        public IntPtr hCursor;
-        public IntPtr hbrBackground;
-        public string? lpszMenuName;
-        public string? lpszClassName;
-        public IntPtr hIconSm;
-    }
-
     private delegate IntPtr ImeHostProc(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
-    // ---- The target's text model --------------------------------------------------------------
-    // WHY THIS EXISTS: a bare window class is not a composition target the IME will use. Measured
-    // against the live window: the IME opens (ImmSetOpenStatus OK, OFF->ON, five times) and then
-    // typing produces ZERO WM_IME_* messages -- the IME has nothing to compose INTO. Notepad,
-    // which composes into a real RichEditD2DPT text control, works on the same machine at the
-    // same time. The IME needs a caret to place the preedit and measure selection/candidate
-    // placement; our window had none because we never handled a single text message.
-    //
-    // So the target is a MINIMAL text field: a single-line buffer, a caret at offset 0, and
-    // selection == caret. That is the minimum an IME needs, and it is enough for composition to
-    // start; the composition string itself is never stored here (it lives in the IME) -- only the
-    // committed text is, so WM_SETTEXT/WM_GETTEXT round-trip for our own clear-on-commit.
-    private string _imeTargetText = "";
-    private int _imeCaret = 0;                 // caret offset within _imeTargetText
-    private const int EM_GETSEL = 0x00B0;
-    private const int EM_SETSEL = 0x00B1;
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern ushort RegisterClassExW(ref WNDCLASSEX lpwcx);
-    private const int GCL_STYLE = -26;   // for GetClassLongPtr: read the style we registered
-    [DllImport("user32.dll", EntryPoint = "GetClassLongPtrW", SetLastError = true)]
-    private static extern int GetClassLongPtrW(IntPtr hWnd, int nIndex);
+    // The target is RICHEDIT50W (msftedit.dll): the OS registers its class when the DLL loads,
+    // and it ships its own text model + TSF store. No RegisterClassExW, no hand-rolled buffer.
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateWindowExW(uint exStyle, string? className, string? windowName,
         uint style, int x, int y, int w, int h, IntPtr hWndParent, IntPtr hMenu,
         IntPtr hInstance, IntPtr lpParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr SendMessageW(IntPtr hWnd, int msg, IntPtr wParam, ref ENMSETTEXTRANGE lParam);
+
+    // Map a virtual key to the char it would produce (0 for command keys). Used to tell a
+    // printable text key (must reach the IME) from a command key (forwarded straight to nvim).
+    private const uint MAPVK_VK_TO_CHAR = 2;
+    [DllImport("user32.dll")]
+    private static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
     [DllImport("user32.dll")]
     private static extern bool DestroyWindow(IntPtr hWnd);
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
@@ -306,9 +271,16 @@ public partial class MainWindow
         private static IntPtr _module;
     }
 
-    // Create the custom-class IME host window. Called once the window is realized, the first
+    // Create the RICHEDIT50W IME host window. Called once the window is realized, the first
     // point a top-level HWND exists. Runs at most once per process: retrying after a failure
     // would leak a window handle on every attempt.
+    //
+    // WHY RICHEDIT50W (msftedit.dll) instead of our own class: msftedit's RichEditD2DPT is the
+    // SAME control Notepad composes into on this machine — it carries CS_IME AND ships its own
+    // TSF text store, so MSIME engages it with zero COM interop from us. Our custom class had to
+    // implement ITextStoreACP by hand (the .NET CCW path that crashed), and a bare class without
+    // a store never composes no matter how many IMM32 calls succeed. Subclassing the control's
+    // proc lets us keep every key-forwarding rule we already have while the OS owns composition.
     private void ImeAttach()
     {
         if (_imeAttachTried) return;
@@ -318,52 +290,51 @@ public partial class MainWindow
             IntPtr owner = GetTopLevelHwnd();
             if (owner == IntPtr.Zero) { if (_diagEnabled) LogStartup("IME: no top-level HWND yet"); return; }
 
-            // Register the class once per process. A bare class: no background brush (nothing
-            // is ever painted into it), no cursor, no menu.
+            // Load msftedit.dll once per process. Loading it registers RICHEDIT50W with the OS,
+            // so CreateWindowExW below can use the class name directly — no RegisterClassExW.
             if (!_imeClassRegistered)
             {
-                _imeHostProcKeepAlive = ImeHostProcThunk;   // the class holds the thunk; the delegate must outlive it
-                var wc = new WNDCLASSEX
+                try
                 {
-                    cbSize = (uint)Marshal.SizeOf<WNDCLASSEX>(),
-                    style = CS_IME | CS_IMELEAVE,
-                    lpfnWndProc = Marshal.GetFunctionPointerForDelegate(_imeHostProcKeepAlive),
-                    hInstance = GetModuleHandleW(null),
-                    lpszClassName = ImeHostClass,
-                };
-                ushort atom = RegisterClassExW(ref wc);
-                if (atom == 0)
-                {
-                    // ERROR_CLASS_ALREADY_EXISTS (1410) is fine — a previous attempt registered it.
-                    if (Marshal.GetLastWin32Error() != 1410)
-                    {
-                        if (_diagEnabled) LogStartup("IME: RegisterClassExW failed err=" + Marshal.GetLastWin32Error());
-                        return;
-                    }
+                    System.Runtime.InteropServices.NativeLibrary.Load("msftedit.dll");
+                    _imeClassRegistered = true;
+                    ImeTrace("ATTACH msftedit.dll loaded (RICHEDIT50W registered by OS)");
                 }
-                _imeClassRegistered = true;
-                ImeTrace("RegisterClassEx style=0x" + wc.style.ToString("X8") +
-                         " CS_IME=" + ((wc.style & CS_IME) != 0 ? "YES" : "NO") +
-                         " CS_IMELEAVE=" + ((wc.style & CS_IMELEAVE) != 0 ? "YES" : "no"));
+                catch (Exception ex)
+                {
+                    if (_diagEnabled) LogStartup("IME: msftedit.dll load failed: " + ex.Message);
+                    return;
+                }
             }
 
             // 1x1 px at the origin, invisible behind the canvas. ImeTrackCursor parks it at the
-            // nvim cursor cell so the candidate list anchors there.
-            _imeHost = CreateWindowExW(0, ImeHostClass, "", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            // nvim cursor cell so the candidate list anchors there. WS_BORDER gives RichEdit a
+            // visible caret region even at 1x1 (a borderless child can refuse to draw its caret).
+            _imeHost = CreateWindowExW(0, ImeHostClass, "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0080 /*WS_BORDER*/,
                 0, 0, 1, 1, owner, IntPtr.Zero, GetModuleHandleW(null), IntPtr.Zero);
             if (_imeHost == IntPtr.Zero)
             {
-                if (_diagEnabled) LogStartup("IME: CreateWindowExW(host) failed err=" + Marshal.GetLastWin32Error());
+                if (_diagEnabled) LogStartup("IME: CreateWindowExW(RICHEDIT50W) failed err=" + Marshal.GetLastWin32Error());
+                return;
+            }
+
+            // Subclass the control's proc so our key-forwarding rules run FIRST, then chain to
+            // the original RichEdit proc (which owns IME composition and text editing). This is
+            // the one change from the custom-class design: DefWindowProcW becomes CallWindowProcW.
+            _imeHostProcKeepAlive = ImeHostProcThunk;   // keep the delegate alive for the HWND's lifetime
+            _imePrevProc = SetWindowLongPtrW(_imeHost, GWLP_WNDPROC,
+                Marshal.GetFunctionPointerForDelegate(_imeHostProcKeepAlive));
+            if (_imePrevProc == IntPtr.Zero)
+            {
+                if (_diagEnabled) LogStartup("IME: subclass failed err=" + Marshal.GetLastWin32Error());
                 return;
             }
 
             ImeTrace("ATTACH host=0x" + _imeHost.ToString("X") + " owner=0x" + owner.ToString("X") +
-                     " class=" + ImeHostClass);
-            if (_diagEnabled) LogStartup("IME: custom-class target attached hwnd=0x" + _imeHost.ToString("X") +
+                     " class=" + ImeHostClass + " prevProc=0x" + _imePrevProc.ToString("X"));
+            if (_diagEnabled) LogStartup("IME: RICHEDIT50W target attached hwnd=0x" + _imeHost.ToString("X") +
                                           " owner=0x" + owner.ToString("X"));
-            // TSF is the path MSIME actually honours (IMM32 cannot make a TSF IME compose), so
-            // build the text store + context for this same window now that the HWND exists.
-            TsfAttach();
+            // msftedit sets up its own TSF text store internally — no TsfAttach() needed.
             // Focus now, not only on Activated: at launch the window is activated BEFORE Loaded, so
             // the Activated handler has already run and the target would never get focus.
             ImeFocusTarget("attach");
@@ -541,6 +512,11 @@ public partial class MainWindow
                     ImeTrace("WM_IME_ENDCOMPOSITION");
                     ScheduleRender(); FlushRender();
                     if (_diagEnabled) LogStartup("IME: composition ended");
+                    // The original RichEdit proc inserted the committed text into ITS buffer.
+                    // nvim is the real document owner, so wipe it back to empty — EM_SETTEXTRANGE
+                    // replaces programmatically without generating IME/EN_CHANGE noise, and a
+                    // zero-length buffer keeps every next composition starting at caret 0.
+                    ImeClearTargetText();
                     break; // chain below
                 }
                 case WM_IME_CHAR:
@@ -585,31 +561,41 @@ public partial class MainWindow
                         // handling still sees them, but forward nothing to nvim.
                         break; // (open flag already traced on every key-down above)
                     }
-                    // Enter/Tab: WM_CHAR is their single delivery point (see map). Handled (0):
-                    // nothing to do here, and our class has no default that needs the key.
-                    if (vki == 0x0D || vki == 0x09) return IntPtr.Zero;
-                    // Ctrl+Space is the IME ON/OFF hotkey (HKCU\Control Panel\Input Method\
-                    // Hot Keys\00000070 = Virtual Key 0x20 with modifier 2=Ctrl). It must be
-                    // CHAINED, not swallowed: the IME's hotkey handling lives in the default key
-                    // processing, so returning 0 here means the IME can never be turned on from
-                    // the app — measured, Ctrl+Space did nothing while the key was consumed here.
-                    //
-                    // It must also never reach nvim. WM_CHAR for Ctrl+Space is a PLAIN SPACE
-                    // (0x20), not a control code, so the char branch would otherwise insert a
-                    // stray space on every IME toggle — which is what the log showed
-                    // ("IME-COMMIT ' '" / "INPUT  " right after the Ctrl+Space press).
+
                     bool ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0; // VK_CONTROL
+                    bool imeOn = ImeOpenStatus() == 1;
+
+                    // Ctrl+Space is the IME ON/OFF hotkey. Perform the toggle in-process and
+                    // swallow the space: a hotkey press must never insert a space into nvim.
                     if (ctrl && vki == VK_SPACE)
                     {
-                        // The IME ON/OFF hotkey. We perform the toggle ourselves (see
-                        // ImeToggleOpenStatus for why chaining is not enough), then swallow the
-                        // space unconditionally: whether or not the toggle succeeded, a hotkey
-                        // press must never insert a space into the buffer.
                         _imeToggleChord = true;   // makes WM_CHAR swallow the matching space
                         bool nowOpen = ImeToggleOpenStatus();
                         ImeTraceOpen("Ctrl+Space handled in-app");
                         break;                    // handled; do NOT also forward to nvim
                     }
+
+                    // THE RICHEDIT50W FIX. While the IME is ON, a printable text key (and Enter/
+                    // Tab/space, which drive commit + candidate selection) must reach the ORIGINAL
+                    // RichEdit proc so MSIME can start composition. The old custom-class design
+                    // forwarded every non-composing key straight to nvim — there was no default
+                    // proc for it to go to — and that is exactly why romaji landed in nvim as plain
+                    // letters with no preedit (the reported "letters go in as-is"). Chaining here
+                    // lets the OS IME own the keystroke; the commit then arrives via GCS_RESULTSTR
+                    // (CommitImeText) and the preedit renders from WM_IME_COMPOSITION.
+                    if (imeOn && !ctrl)
+                    {
+                        uint ch = MapVirtualKeyW((uint)vki, MAPVK_VK_TO_CHAR);
+                        bool textOrCommit = ch != 0 || vki == VK_RETURN || vki == VK_TAB || vki == VK_SPACE;
+                        if (textOrCommit) break; // chain to RichEdit: the IME owns this keystroke
+                    }
+
+                    // Enter/Tab with the IME OFF are delivered via WM_CHAR, not here — forwarding
+                    // from both branches was the doubled-Enter bug. Command keys (arrows, F-keys,
+                    // BS, Del...) and plain letters with the IME OFF fall through to ForwardNvimKey;
+                    // a letter maps to null there and is delivered once via WM_CHAR instead.
+                    if (vki == 0x0D || vki == 0x09) return IntPtr.Zero;
+
                     ForwardNvimKey(wParam, lParam);
                     return IntPtr.Zero; // handled
                 }
@@ -647,60 +633,42 @@ public partial class MainWindow
                     }
                     // Other control chars (^H/BS, ^G, ^C, DEL...) were forwarded from WM_KEYDOWN.
                     if (wParam < 0x20 || wParam == 0x7F) return IntPtr.Zero;
+                    if (_imeComposing)
+                    {
+                        // Mid-composition a printable char reaching us is romaji leaking past the
+                        // IME's hook, not a commit (commits arrive via GCS_RESULTSTR + echo flag).
+                        // Forwarding it would double-input the preedit into nvim — swallow.
+                        ImeTrace("CHAR-DROPPED (composing) ch=0x" + wParam.ToString("X"));
+                        return IntPtr.Zero;
+                    }
                     if (wParam >= 1 && wParam <= 0xFFFF && ((int)wParam & 0xF800) != 0xD800)
                     {
                         // THE single text delivery point: plain keystrokes and IME commits share
                         // it. A surrogate pair arrives as two WM_CHARs in order; appending
                         // reproduces it (CommitImeText forwards per message, nvim reassembles).
                         CommitImeText(((char)wParam).ToString());
+                        // If the IME did NOT start composition for this char (a symbol, a letter
+                        // with no romaji mapping, etc.), RichEdit's default proc already inserted
+                        // it into its own buffer. nvim is our real document owner — wipe it so the
+                        // target stays empty and nothing accumulates across keystrokes.
+                        ImeClearTargetText();
                     }
-                    return IntPtr.Zero;
-                }
-                // --- Text model: the minimum an IME needs to treat this window as a
-                // composition target. Without these, the IME opens but never composes (measured).
-                case WM_GETTEXT:                                    // 0x000D
-                {
-                    int cap = (int)wParam;
-                    string t = _imeTargetText;
-                    if (cap <= 0) { ImeTrace("GETTEXT(len only) -> " + t.Length); return new IntPtr(t.Length); }
-                    if (cap - 1 < t.Length) t = t.Substring(0, cap - 1);
-                    var buf = Marshal.StringToHGlobalUni(t);
-                    ImeTrace("GETTEXT cap=" + cap + " -> '" + t + "'");
-                    return buf;   // caller frees with LocalFree; a short-lived leak at worst
-                }
-                case WM_SETTEXT:                                    // 0x000C
-                {
-                    _imeTargetText = lParam == IntPtr.Zero ? "" : (Marshal.PtrToStringUni(lParam) ?? "");
-                    _imeCaret = _imeTargetText.Length;
-                    ImeTrace("SETTEXT -> '" + _imeTargetText + "'");
-                    return new IntPtr(_imeTargetText.Length);
-                }
-                case WM_GETTEXTLENGTH:                              // 0x000E
-                {
-                    return new IntPtr(_imeTargetText.Length);
-                }
-                case EM_GETSEL:                                      // (WM_USER + 176)
-                {
-                    // Selection == caret (single point). The IME reads this to place the preedit.
-                    int packed = (_imeCaret << 16) | _imeCaret;
-                    ImeTrace("EM_GETSEL -> caret=" + _imeCaret);
-                    return new IntPtr(packed);
-                }
-                case EM_SETSEL:                                      // (WM_USER + 177)
-                {
-                    _imeCaret = Math.Clamp((int)wParam, 0, _imeTargetText.Length);
-                    ImeTrace("EM_SETSEL -> caret=" + _imeCaret);
                     return IntPtr.Zero;
                 }
                 case WM_NCDESTROY:
                 {
                     _imeHost = IntPtr.Zero;
-                    break; // chain below (defwindowproc finishes teardown)
+                    break; // chain below (original proc finishes teardown)
                 }
             }
         }
         catch (Exception ex) { if (_diagEnabled) LogStartup("IME proc error: " + ex.Message); }
-        return DefWindowProcW(hWnd, msg, wParam, lParam);
+        // Chain to the ORIGINAL RichEdit proc, not DefWindowProcW: msftedit's own proc owns IME
+        // composition, caret drawing and text editing. Returning its result is what makes the
+        // control behave like Notepad's while our rules above intercept first.
+        return _imePrevProc != IntPtr.Zero
+            ? CallWindowProcW(_imePrevProc, hWnd, msg, wParam, lParam)
+            : DefWindowProcW(hWnd, msg, wParam, lParam);
     }
 
     // The composition string for the requested field (GCS_COMPSTR / GCS_RESULTSTR), or "".
@@ -759,6 +727,21 @@ public partial class MainWindow
         if (_diagEnabled) LogStartup($"IME-COMMIT '{text}'");
         _imeComposing = false;
         ForwardToNvim(text);
+    }
+
+    // Wipe the RichEdit buffer after a commit. The original proc inserts committed text into its
+    // own buffer (that is how it owns the document); nvim is our real document owner, so we keep
+    // the target empty — every composition then starts at caret 0 and nothing accumulates.
+    private const int EM_SETTEXTRANGE = 0x00CD;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ENMSETTEXTRANGE { public int iCharIndex; public int iCharCount; }
+
+    private void ImeClearTargetText()
+    {
+        if (_imeHost == IntPtr.Zero) return;
+        var r = new ENMSETTEXTRANGE { iCharIndex = 0, iCharCount = -1 }; // -1 = to end of text
+        SendMessageW(_imeHost, EM_SETTEXTRANGE, IntPtr.Zero, ref r);
     }
 
     // Abandon an in-flight composition. Forwarding <Esc> to nvim is only half of leaving a
@@ -969,7 +952,8 @@ public partial class MainWindow
             }
             if (needContext) ImeAssociateContext();
             SetFocus(_imeHost);
-            TsfSetFocus();   // the TSF context must own focus too, or the IME targets another one
+            // No TSF focus call: msftedit owns its own text store and thread-manager focus; our
+            // hand-rolled ITfThreadMgr::SetFocus crashed the process (see MainWindow.tsf.cs).
             // Log what actually holds focus: SetFocus can silently fail (e.g. the window is not the
             // foreground window), and then the IME has no target and composing does nothing.
             if (_diagEnabled)
@@ -1130,7 +1114,6 @@ public partial class MainWindow
     {
         try
         {
-            TsfDetach();
             if (_imeHost != IntPtr.Zero)
             {
                 DestroyWindow(_imeHost);

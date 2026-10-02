@@ -63,6 +63,7 @@
     <!-- IME: native Win32 EDIT target that receives the OS IME's committed text. -->
     <Compile Include="MainWindow.ime.cs" />
     <!-- IME: TSF text store (MSIME is a TSF IME; IMM32 alone cannot make it compose). -->
-    <Compile Include="MainWindow.tsf.cs" />
+    <!-- MainWindow.tsf.cs removed: hand-rolled TSF text store (the .NET CCW path crashed).
+         IME now targets RICHEDIT50W (msftedit.dll), which ships its own OS-provided store. -->
   </ItemGroup>
 </Project>

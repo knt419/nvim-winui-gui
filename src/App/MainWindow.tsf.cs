@@ -193,6 +193,7 @@ public partial class MainWindow
         // IME cannot write to the store.
         public int AdviseSink(ref Guid riid, IntPtr punk, uint dwMask)
         {
+            ImeTrace("STORE->AdviseSink");
             try
             {
                 if (riid == IID_ITextStoreACPSink && punk != IntPtr.Zero)
@@ -215,6 +216,7 @@ public partial class MainWindow
         // the "everything reports success and nothing composes" failure all over again.
         public int RequestLock(uint dwLockFlags, out int phrSession)
         {
+            ImeTrace("STORE->RequestLock");
             phrSession = 0;
             ImeTrace("TSF RequestLock flags=0x" + dwLockFlags.ToString("X") + " sink=" + (_acpSink != null));
             try
@@ -242,6 +244,7 @@ public partial class MainWindow
 
         public int GetSelection(uint ulIndex, uint ulCount, IntPtr pSelection, out uint pcFetched)
         {
+            ImeTrace("STORE->GetSelection");
             // Single insertion point at the cursor. MSIME reads this to anchor the preedit.
             if (ulCount > 0 && pSelection != IntPtr.Zero)
             {
@@ -289,6 +292,7 @@ public partial class MainWindow
         // makes the commit arrive exactly once and intact.
         public int SetText(uint dwFlags, int acpStart, int acpEnd, IntPtr pchText, uint cch, IntPtr pChange)
         {
+            ImeTrace("STORE->SetText");
             // Total: TSF calls this from inside its own frames, where a managed exception is fatal.
             try
             {
@@ -315,6 +319,7 @@ public partial class MainWindow
         public int QueryInsertEmbedded(IntPtr pguidService, IntPtr pFormatEtc, out int pfInsertable) { pfInsertable = 0; return E_NOTIMPL; }
         public int InsertEmbedded(uint dwFlags, int acpStart, int acpEnd, IntPtr pDataObject, IntPtr pChange)
         {
+            ImeTrace("STORE->InsertEmbedded");
             try { if (pChange != IntPtr.Zero) Marshal.StructureToPtr(new TS_TEXTCHANGE { acpStart = acpStart, acpOldEnd = acpEnd, acpNewEnd = acpStart }, pChange, false); }
             catch { }
             return E_NOTIMPL;
@@ -322,6 +327,7 @@ public partial class MainWindow
 
         public int InsertTextAtSelection(uint dwFlags, IntPtr pchText, uint cch, out int pacpStart, out int pacpEnd, IntPtr pChange)
         {
+            ImeTrace("STORE->InsertTextAtSelection");
             pacpStart = 0; pacpEnd = (int)cch;
             try
             {
@@ -356,6 +362,7 @@ public partial class MainWindow
         // cell's rectangle in SCREEN pixels -- the same rect the inline preedit is drawn at.
         public int GetTextExt(uint vcView, int acpStart, int acpEnd, IntPtr prc, IntPtr pprcClip)
         {
+            ImeTrace("STORE->GetTextExt");
             // Total by construction: TSF calls this the moment focus lands, and a throw here kills
             // the process. An unwritten RECT is a harmless "I have no extent"; a thrown exception
             // is not recoverable.
@@ -370,6 +377,7 @@ public partial class MainWindow
         }
         public int GetScreenExt(uint vcView, IntPtr prc)
         {
+            ImeTrace("STORE->GetScreenExt");
             try { if (prc != IntPtr.Zero) Marshal.StructureToPtr(_host.TsfCaretRect(), prc, false); }
             catch { }
             return S_OK;
@@ -384,6 +392,7 @@ public partial class MainWindow
         // ---- ITfTextEditSink -------------------------------------------------------------------
         public int OnEndEdit(IntPtr ptitContext, IntPtr pEditCookie, IntPtr prgEditCookie)
         {
+            ImeTrace("STORE->OnEndEdit");
             try { _host.TsfOnEndEdit(); } catch { }
             return S_OK;
         }
