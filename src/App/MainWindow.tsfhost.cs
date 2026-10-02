@@ -44,10 +44,60 @@ public partial class MainWindow
 
             if (!host.Attach()) { ImeTrace("TSFHOST: attach failed, staying on the IMM32 path"); return; }
             _tsfHost = host;
-            TsfHostFocus();
             ImeTrace("TSFHOST: attached to hwnd=0x" + hwnd.ToString("X"));
+            TsfImeApplyModePolicy();     // the nvim mode decides whether the IME may take keys
         }
         catch (Exception ex) { ImeTrace("TSFHOST attach threw " + ex.GetType().Name + ": " + ex.Message); }
+    }
+
+    // ---- IME vs nvim mode ----------------------------------------------------------------------
+    // The IME may only own the keyboard in modes that actually take text: insert / replace and the
+    // command line (so `/日本語` and `:e 日本語` work). In every other mode (normal, operator, visual,
+    // select, terminal) msctf must not intercept keys, otherwise `d`, `i`, `a`, `:` … get eaten by
+    // the IME and the cursor shows kana while the user is issuing commands.
+    //
+    // mode_change reports the mode_info_set names, measured on this build: "normal",
+    // "cmdline_normal", "insert", "visual". Others nvim can send: "operator", "select", "replace",
+    // "insert_complete", "cmdline_insert", "cmdline_replace", "terminal".
+    private bool _tsfImeAllowed;
+    private bool _tsfFocusApplied;   // is the IME currently attached to the keyboard? (avoids churn)
+
+    private bool ImeModeAllowsInput()
+    {
+        string m = _modeName ?? "";
+        return m.StartsWith("insert", StringComparison.Ordinal)
+            || m.StartsWith("replace", StringComparison.Ordinal)
+            || m.StartsWith("cmdline", StringComparison.Ordinal);
+    }
+
+    /// <summary>Re-apply the "may the IME own the keyboard in this mode" decision.</summary>
+    private void TsfImeApplyModePolicy()
+    {
+        try
+        {
+            if (_tsfHost == null) return;
+            if (ImeModeAllowsInput())
+            {
+                if (!_tsfImeAllowed) ImeTrace("IME POLICY: mode '" + _modeName + "' -> IME enabled");
+                _tsfImeAllowed = true;
+                TsfHostFocus();
+            }
+            else
+            {
+                if (_tsfImeAllowed) ImeTrace("IME POLICY: mode '" + _modeName + "' -> IME disabled");
+                _tsfImeAllowed = false;
+                if (_tsfFocusApplied) { _tsfFocusApplied = false; _tsfHost.Unfocus(); }  // terminates a live composition and drops TSF focus
+                if (_imePreedit.Length > 0)
+                {
+                    _imePreedit = "";
+                    _imePreeditCursor = -1;
+                    _imeComposing = false;
+                    ScheduleRender();
+                    FlushRender();
+                }
+            }
+        }
+        catch { }
     }
 
     /// <summary>Re-assert TSF focus (window activated / IME target re-focused).</summary>
@@ -56,12 +106,15 @@ public partial class MainWindow
         try
         {
             if (_tsfHost == null) return;
+            // The mode has the final say: a focus change must not re-attach the IME in normal mode.
+            if (!_tsfImeAllowed) { if (_tsfFocusApplied) { _tsfFocusApplied = false; _tsfHost.Unfocus(); } return; }
             // Associate with the HWND that actually owns the keyboard on this thread. WinUI 3 hosts
             // its content in a child site-bridge window, so the top-level HWND is not always the
             // window TSF must be told about. GetFocus is thread-local, which is exactly right here.
             IntPtr focus = GetFocus();
             IntPtr top = GetTopLevelHwnd();
             _tsfHost.FocusOn(focus != IntPtr.Zero ? focus : top);
+            _tsfFocusApplied = true;
         }
         catch { }
     }

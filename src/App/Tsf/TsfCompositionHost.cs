@@ -106,6 +106,9 @@ public static class TsfNative
     public static readonly Guid IID_ITfSource = new Guid("4EA48A35-60AE-446F-8FD6-E6A8D82459F7");
     public static readonly Guid IID_ITfContextOwner = new Guid("AA80E80C-2021-11D2-93E0-0060B067B86E");
     public static readonly Guid IID_ITfTextEditSink = new Guid("8127D409-CCD3-4683-967A-B43D5B482BF7");
+    // ITfContextOwnerCompositionServices derives from ITfContextComposition (4 methods), so its
+    // single TerminateComposition lands in slot 7, not 3.
+    public static readonly Guid IID_ITfContextOwnerCompositionServices = new Guid("86462810-593B-4916-9764-19C08E9CE110");
 
     public static IntPtr Slot(IntPtr p, int i) => Marshal.ReadIntPtr(Marshal.ReadIntPtr(p), i * IntPtr.Size);
     public static T Fn<T>(IntPtr p, int i) where T : class
@@ -147,6 +150,7 @@ public static class TsfCall
     public static int RangeSetText(IntPtr range, uint ec, uint flags, IntPtr text, uint len) => TsfNative.Fn<RangeSetTextFn>(range, 4)(range, ec, flags, text, len);
     public static int RangeShiftEnd(IntPtr range, uint ec, int count, out int shifted, IntPtr halt) => TsfNative.Fn<RangeShiftEndFn>(range, 9)(range, ec, count, out shifted, halt);
     public static int AdviseSink(IntPtr src, ref Guid riid, IntPtr punk, out uint cookie) => TsfNative.Fn<AdviseSinkFn>(src, 3)(src, ref riid, punk, out cookie);
+    public static int TerminateComposition(IntPtr ownerServices, IntPtr comp) => TsfNative.Fn<TerminateCompositionFn>(ownerServices, 7)(ownerServices, comp);
     public static void Release(IntPtr p) { if (p != IntPtr.Zero) { try { TsfNative.Fn<ReleaseFn>(p, 2)(p); } catch { } } }
     public static IntPtr Qi(IntPtr p, ref Guid riid)
     {
@@ -176,7 +180,7 @@ public sealed class TsfCompositionHost : ITfContextOwner, ITfContextOwnerComposi
     private readonly Func<TsfRect> _caretRect;
     private readonly Func<TsfRect> _viewportRect;
 
-    private IntPtr _tim = IntPtr.Zero, _dm = IntPtr.Zero, _ctx = IntPtr.Zero;
+    private IntPtr _tim = IntPtr.Zero, _dm = IntPtr.Zero, _ctx = IntPtr.Zero, _ownerServices = IntPtr.Zero;
     private uint _clientId;
     private bool _active, _sessionPending;
     private int _compositions;
@@ -240,6 +244,11 @@ public sealed class TsfCompositionHost : ITfContextOwner, ITfContextOwnerComposi
             Log($"Push(ctx) hr=0x{hr:X8}");
             if (hr != 0) return false;
 
+            // Needed to cancel a live composition when the mode stops accepting text.
+            Guid iidOwnerSvc = TsfNative.IID_ITfContextOwnerCompositionServices;
+            _ownerServices = TsfCall.Qi(_ctx, ref iidOwnerSvc);
+            Log($"ctx->QI(ITfContextOwnerCompositionServices)=0x{_ownerServices:X}");
+
             _active = true;
             Log("TSF transitory context ready");
             return true;
@@ -268,15 +277,33 @@ public sealed class TsfCompositionHost : ITfContextOwner, ITfContextOwnerComposi
         catch (Exception ex) { Log("Focus threw " + ex.Message); }
     }
 
+    // Detach the IME from this window: cancel any live composition and drop TSF focus entirely.
+    // With no focused document manager msctf stops routing this thread's keys into the IME, so
+    // normal-mode keys (and the IME hotkeys) reach the app untouched. That is what makes "the IME
+    // is only active in text-input modes" real instead of merely hiding the preview.
     public void Unfocus()
     {
         if (!_active) return;
         try
         {
+            if (_compositions > 0 && _ownerServices != IntPtr.Zero)
+            {
+                int hrT = TsfCall.TerminateComposition(_ownerServices, IntPtr.Zero);
+                Log($"TerminateComposition hr=0x{hrT:X8}");
+                _compositions = 0;
+            }
+
+            IntPtr target = _focusHwnd != IntPtr.Zero ? _focusHwnd : _hwnd;
+            int hr = TsfCall.AssociateFocus(_tim, target, IntPtr.Zero, out IntPtr prev);
+            TsfCall.Release(prev);
+            Log($"AssociateFocus(hwnd=0x{target:X}, NULL) hr=0x{hr:X8}");
+
+            hr = TsfCall.SetFocus(_tim, IntPtr.Zero);
+            Log($"SetFocus(NULL) hr=0x{hr:X8}");
+
             if (_lastPreview.Length > 0) { _lastPreview = ""; PreviewChanged?.Invoke(""); }
-            Log("Unfocus: preview cleared");
         }
-        catch { }
+        catch (Exception ex) { Log("Unfocus threw " + ex.Message); }
     }
 
     public void Detach()
@@ -284,6 +311,7 @@ public sealed class TsfCompositionHost : ITfContextOwner, ITfContextOwnerComposi
         try
         {
             _active = false;
+            TsfCall.Release(_ownerServices); _ownerServices = IntPtr.Zero;
             TsfCall.Release(_ctx); _ctx = IntPtr.Zero;
             TsfCall.Release(_dm); _dm = IntPtr.Zero;
             if (_tim != IntPtr.Zero) { TsfCall.Deactivate(_tim); TsfCall.Release(_tim); _tim = IntPtr.Zero; }

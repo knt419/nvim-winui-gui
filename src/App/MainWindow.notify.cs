@@ -775,6 +775,9 @@ public partial class MainWindow
                     }
                     else { _cursorShape = "block"; _cursorCellPct = 100; } // no info yet: default block
                     LogImportant($"MODECHANGE name={_modeName} idx={mi} shape={_cursorShape}/{_cursorCellPct}%");
+                    // The IME is only allowed to own the keyboard in text-input modes; re-apply that
+                    // decision on every mode change (see MainWindow.tsfhost.cs).
+                    TsfImeApplyModePolicy();
                     ApplyCursorBlink(mi);
                     ScheduleRender();
                 }
