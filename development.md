@@ -29,9 +29,14 @@ variables, see the README.
   - `MainWindow.notify.cs` — RPC notification handling, nvim spawn (`--headless
     --listen`), guifont load at startup + re-read after ~1 s (lazy-loaded plugins),
     self-test.
-  - `MainWindow.ime.cs` — IME composition target: a child window of our own registered
-    class (`NvimImeHost`), input-context association, key forwarding, commit delivery,
-    preedit harvesting.
+  - `Tsf/TsfCompositionHost.cs` — the IME target: a *transitory* TSF context
+    (`ITfContextOwner` + `ITfContextOwnerCompositionSink` + `ITfTextEditSink`), shaped like
+    Windows Terminal's `src/tsf/Implementation.cpp`. Attach/focus/detach, composition
+    termination, and reading the composition text out of the context all live here.
+  - `MainWindow.tsfhost.cs` — IME wiring: attaching to the input-site HWND, the mode policy,
+    preedit → inline render, commit → `nvim_input`.
+  - `MainWindow.ime.cs` — legacy IMM32 / RICHEDIT50W composition target, now only the fallback
+    path for a machine where TSF cannot be created (see "Input and IME").
 
 ## Highlight model
 
@@ -62,81 +67,122 @@ made the cursor pick up the previous cell's or previous row's colors.
 
 ## Input and IME
 
-The grid is a Win2D surface with no text-input concept, so the OS IME needs a real target
-window. Keyboard focus lives on a 1x1 child of the top-level HWND belonging to a window class
-this project registers itself (`NvimImeHost`), created in `MainWindow.ime.cs`. It is parked at
-the nvim cursor cell so the IME anchors its candidate list there.
+The grid is a Win2D surface with no text-input concept, so the OS IME needs a real target. Since
+commit `299ff94` that target is a **TSF composition host** shaped like Windows Terminal's
+(`src/tsf/Implementation.cpp`): a *transitory* `ITfContext` on the window that actually receives
+keys, with no native text control involved at all.
 
-It was a hidden native `EDIT` until commit `6894529`. The custom class replaced it because most
-of the old code was mitigating EDIT's own defaults — the bell ringing for keys an always-empty
-control refuses, `ES_MULTILINE` to accept the IME's commit Enter, and chaining `WM_IME_CHAR` to
-the original proc because that proc synthesized the `WM_CHAR` carrying committed text. Our class
-has no defaults to refuse anything, so that machinery is gone.
+`MainWindow.ime.cs` still carries the older IMM32 / RICHEDIT50W path, but only as a fallback for a
+machine where TSF cannot be created. RICHEDIT50W never composed here: with the 1x1 RichEdit target
+focused, typing produced `WM_KEYDOWN` with no `WM_IME_STARTCOMPOSITION`/`WM_IME_COMPOSITION`, and the
+romaji landed in the control as plain text.
 
-The rules that remain are IME state-machine facts, not control facts:
+Everything below lives in `Tsf/TsfCompositionHost.cs` (the host) and `MainWindow.tsfhost.cs` (the
+wiring: preedit → inline render, commit → `nvim_input`, mode policy).
 
-- **One delivery point.** Windows sends both `WM_KEYDOWN` and `WM_CHAR` for a single
-  physical press. Forward from exactly one. `VK_RETURN` and `VK_TAB` are the two keys
-  where the character maps to the same command as the virtual key, so those are not
-  mapped from `WM_KEYDOWN`; every other command key stays on that path.
-- **Committed text comes from `GCS_RESULTSTR`, never from the `WM_CHAR` that
-  `DefWindowProc` derives from `WM_IME_CHAR`.** Measured against the live window, that
-  derived char carries only the **high byte** of the committed code point: posted
-  U+3042 / U+65E5 / U+3044 arrived as 0x30 / 0x65 / 0x30. Those are printable ASCII, so the
-  corruption reads as plausible text in a log rather than as an obvious failure. The derived
-  echo char is consumed (`_imeCommitEcho`) so a commit lands exactly once.
-- **`WM_IME_CHAR` must chain under its own id.** The IME state machine keys off the message
-  id and concludes a commit was never acknowledged if it is re-labelled or dropped.
-- **Esc must abandon a composition.** It is forwarded to nvim *and* the IME's composition is
-  torn down: the input context is released and immediately re-taken, because a released context
-  is not restored by the IME and the user's next keystroke arrives before any activation would.
-- **Never call back into the target from inside its own proc.** `ImmNotifyIME` posts the
-  composition string *into* the window and so re-enters the proc; doing that made the target
-  stop accepting compositions entirely.
-- **The input context must be associated and re-doable.** A window created by
-  `CreateWindowExW` has none, and the IME then does nothing with no error anywhere.
-- **Ctrl+Space is chained, not swallowed.** It is the registered IME ON/OFF hotkey
-  (`HKCU\Control Panel\Input Method\Hot Keys\00000070` = VK 0x20 with modifier 2 = Ctrl).
-  Handling its `WM_KEYDOWN` with a bare `return 0` made the IME impossible to switch on from the
-  app, because the hotkey lives in default key processing. Its `WM_CHAR` is a *plain space*
-  (0x20), not a control code, so the same press also inserted a stray space; the chord flag
-  swallows exactly that char and is cleared on every key-down so it cannot outlive its own press.
-- **`imm32.dll` is loaded, not `ime32.dll`.** The composition readers live in `imm32.dll`,
-  which exists on every install; `ime32.dll` is optional and verified absent on this box. The
-  old code loaded `ime32.dll`, so its commit-harvest path was silently dead and every commit
-  went through the truncated char path instead. Both are loaded lazily and probed once, and the
-  risky call lives in its own `try` so a missing DLL cannot skip the `SetFocus` the IME needs.
+### The TSF shape
+
+`CoCreateInstance(CLSID_TF_ThreadMgr)` → `ITfThreadMgrEx::ActivateEx` → `CreateDocumentMgr` →
+`CreateContext` (transitory) → `AdviseSink(ITfContextOwner)` + `AdviseSink(ITfTextEditSink)` →
+`Push`, then `AssociateFocus(hwnd, docMgr)` + `SetFocus(docMgr)`. The host implements
+`ITfContextOwner`, `ITfContextOwnerCompositionSink`, `ITfTextEditSink` and one `ITfEditSession`;
+composition callbacks request an edit session (`TF_ES_READWRITE | TF_ES_ASYNC`) and read the text
+out of the context there.
+
+Three facts are load-bearing:
+
+- **No `ITextStoreACP`.** Windows Terminal does not implement one either, and the hand-rolled .NET
+  store is what used to crash. With a transitory context TSF owns the text: we read the composition
+  out of the context (`GetStart` → `ShiftEnd(LONG_MAX)` → `GetText`) and erase it
+  (`SetText(ec, 0, NULL, 0)`) once it has been handed to nvim. Erasing after every commit is what
+  makes "text in the context" mean "the current composition", so WT's `GUID_PROP_COMPOSING`
+  bookkeeping is not needed.
+- **`GetStatus` must report `TS_SS_TRANSITORY | TS_SS_NOHIDDENTEXT`.** The transitory flag turns on
+  CUAS (the IMM32 emulation layer); without it the IME does not engage at all.
+- **`ActivateEx` returning `S_FALSE` is success, not failure.** The thread manager is a per-thread
+  singleton and is usually already activated; treating 1 as an error is why an earlier host
+  silently never attached.
+
+Vtable slot numbers come from the SDK header, extracted mechanically — never from memory
+(`Windows Kits\10\Include\<ver>\um\msctf.h`; `IUnknown` occupies slots 0..2, so each interface's
+first listed method is slot 3). Interfaces that are only *called* are driven through raw slots
+(`Marshal.GetDelegateForFunctionPointer`), which sidesteps `[ComImport]` marshalling.
+
+**The CCW rule that cost a process per attempt: an interface that a managed class IMPLEMENTS must
+not declare `QueryInterface`/`AddRef`/`Release`.** The CLR builds a CCW's IUnknown slots itself, so
+redeclaring them shifts every method by three — TSF then calls the wrong slot and the process dies
+on the first inbound call, with no managed trace to show for it.
+
+### Which HWND
+
+A WinUI 3 desktop app has two handles and only one of them receives keys: the top-level window
+(`WinUIDesktopWin32WindowClass`) and the child that actually takes input (`InputSiteWindowClass`).
+`GetFocus()` normally returns the child but intermittently reports the top-level — notably on the
+focus blip when a floating grid (the completion popup) appears — and TSF associated with the
+top-level leaves the app receiving no keys until the grid is clicked again. `TsfResolveInputHwnd()`
+caches the child and never falls back to the top-level while it is alive, and `FocusOn()` is a no-op
+when the target is unchanged, so the per-keystroke focus reclaim in the XAML key path no longer
+costs a synchronous `AssociateFocus` + `SetFocus` per key.
+
+### Mode gating
+
+The IME may only own the keyboard in modes that take text — `insert*`, `replace*`, `cmdline*` (so
+`/日本語` and `:e 日本語` work). Everything else (`normal`, `operator`, `visual`, `select`,
+`terminal`) detaches it; otherwise `d`, `i`, `a`, `:` are eaten and leaving insert with the IME in
+kana garbles the first command keystroke. Detaching is real rather than cosmetic: a live composition
+is terminated via `ITfContextOwnerCompositionServices::TerminateComposition(NULL)` (slot **7** —
+that interface derives from `ITfContextComposition`, whose four methods come first), then
+`AssociateFocus(hwnd, NULL)` + `SetFocus(NULL)` leaves msctf with no focused document manager, so it
+stops routing the thread's keys into the IME. The IME's own あ/A state is deliberately left alone so
+returning to insert keeps the user's kana choice.
+
+Ctrl+Space is the IME's own ON/OFF hotkey and TSF delivers it to the IME; the app only guards against
+it arriving as a literal space, which would insert a space into nvim.
+
+#### Notes from the retired IMM32 target
+
+Kept because they are IME state-machine facts a future IMM32 path would hit again: one delivery
+point per physical press (`WM_KEYDOWN` *and* `WM_CHAR` both arrive); committed text must come from
+`GCS_RESULTSTR`, never from the `WM_CHAR` that `DefWindowProc` derives from `WM_IME_CHAR` (measured:
+it carries only the **high byte** of the code point, so U+3042/U+65E5/U+3044 arrived as
+0x30/0x65/0x30 — printable ASCII, which reads as plausible text in a log rather than as a failure);
+`WM_IME_CHAR` must chain under its own id; Esc must abandon the composition; an input context
+released by a cancel must be re-associated, because the IME does not restore it; and `imm32.dll` is
+the DLL to load, not `ime32.dll`.
 
 ### Inline preedit
 
-`WM_IME_COMPOSITION` is harvested for `GCS_COMPSTR` and `GCS_CURSORPOS`, and
-`DrawImePreedit` (in `MainWindow.render.cs`, called from `RenderCore`) paints the composition
-string at the cursor cell in the grid's own font, with the standard composition underline and a
-caret at the reported cursor offset. This is what the `EDIT` target could not do: it showed the
-IME's own floating composition window instead. Painted after the cursor so it sits on top.
+`DrawImePreedit` (in `MainWindow.render.cs`, called from `RenderCore`) paints the composition at the
+cursor cell in the grid's own font, with the composition underline and a caret. Drawn after the
+cursor so it sits on top. Three rules came out of using it:
+
+- **Per character, by the glyph's own cell width.** Kana/kanji are 2 cells and ASCII 1, and the
+  wide/narrow text format is picked per character. Laying a whole preedit out in one narrow-format
+  run draws kana at half advance, so `ああ` overlapped into what read as "あ with a dakuten".
+- **Occupy the cells.** Each covered cell is filled with its own background before the glyph is
+  drawn, so `list`/`listchars` markers (the `eol:` ↲ sitting under the cursor) no longer show
+  through the composition. Per cell, so a CursorLine or a coloured band keeps its exact colours.
+- **An empty result still clears.** Backspacing the last preedit character ends the composition with
+  *no text*, so the clear must not be conditional on a non-empty commit, or the last preedit stays on
+  screen forever.
 
 ### Verification status
 
-A Japanese IME **is** configured on this machine (`Get-WinUserLanguageList` reports `ja` with the
-MSIME TIP, and `msime.dll` is present); the earlier conclusion that no IME was available was wrong.
-The real limit is that **synthetic keyboard input is blocked on this box**: `SendInput` returns 1
-(system accepted) yet no window receives the key — confirmed with Notepad as a known-good IME host,
-which also received nothing. So composition cannot be driven from a harness here, and
-`ImmSetOpenStatus` cannot stand in for it either, because the input context is thread-local and
-`ImmGetContext` on another process's window returns NULL.
+IME is verified end to end. An out-of-tree probe (`--selftest`) drives the real path and produces
+`PREVIEW 'ｎ' → 'に' → 'にほ' → … → 'にほんご'` while typing, then `COMMIT 'にほんご'` on Enter, with
+`WM_IME_NOTIFY` traffic and `VK_PROCESSKEY` (0xE5) showing the keystrokes being consumed. In the app
+itself `%LOCALAPPDATA%\NvimWinUIGui\ime.log` shows the attach sequence (`CoCreateInstance` … `Push` …
+`AssociateFocus`/`SetFocus`), the mode-policy transitions, and `COMMIT` → `SENT-TO-NVIM`. A Japanese
+IME must be installed: on Windows 11 it lives in `C:\Windows\System32\IME\IMEJP\IMJPTIP.DLL` (the
+`System32\msime.tsf` this file used to reference no longer exists).
 
-Verified against the live window by posting messages at the target HWND (which does exercise the
-real forwarding path): the target attaches with an input context and focus (`getfocus == host`);
-`WM_KEYDOWN` of a command key arrives once as `<F5>`; `WM_CHAR` arrives once as `INPUT Q`; a posted
-`WM_IME_CHAR` yields exactly one consumed echo and no corrupted `INPUT`; three consecutive posted
-commits behave identically; Ctrl+Space is chained to the IME and its space is swallowed with no
-`INPUT` line; and no exceptions or bell-triggering paths appear in the log.
-
-**Still unverified: the inline preedit render and the `GCS_RESULTSTR` commit path**, which need a
-real composition. Either drive it by hand in a foreground session, or run the harness somewhere
-`SendInput` is not blocked. Note also that `Get-WinUserLanguageList` and the `CTF\TIP` registry
-keys return **empty values** on this box while the language list itself is populated — read the
-language list, not those registry keys, when deciding whether an IME exists.
+**Two earlier conclusions here were wrong and are corrected.** Synthetic input is *not* blocked on
+this box — the harness that "proved" it was itself broken: its `INPUT` struct was 24 bytes instead of
+the 40 x64 requires (the union is sized by `MOUSEINPUT`, not `KEYBDINPUT`), so `SendInput` returned 0
+and nothing was ever injected (the same bug also dropped letters, because a letter's `wVk` is the
+UPPERCASE code, `VK_N` = 0x4E, not `'n'` = 0x6E). And "the IME never composes" was a property of the
+RICHEDIT50W target, not of the machine: the IME composes as soon as it has a transitory TSF context
+to drive.
 
 ## API coverage (nvim 0.12.5, `--api-info`: 261 functions / 10 ui_options / 69 ui_events)
 
@@ -291,3 +337,9 @@ reference `rpc-test`, so building the solution builds it too. Their `bin/`, `obj
   leaves insert mode once, and IME commits arrive exactly once each — in runs, interleaved
   with plain keys, and across repeated compose-then-Esc cycles. nvim itself emits zero
   `bell`/`visual_bell` for any of them, so the sound was never Neovim's.
+- IME verified in the app on 2026-10-03 on the TSF path: `nihongo` composes with the preedit drawn
+  inline at the cursor and commits to nvim as `にほんご`; the IME is attached only in
+  insert/replace/cmdline modes and detached — live composition terminated — everywhere else; typing
+  continues straight through the completion popup appearing, which previously needed a mouse click
+  because `GetFocus()` had reported the top-level window instead of the `InputSiteWindowClass` child
+  TSF must be associated with.
