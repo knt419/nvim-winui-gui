@@ -69,6 +69,10 @@ public partial class MainWindow
     private static readonly Guid IID_ITfTextEditSink = new Guid("8127D409-CCD3-4683-967A-B43D5B482BF7");
     private static readonly Guid IID_ITfLanguageProfileNotifySink = new Guid("43C9FE15-F494-4C17-9DE2-B8A4AC350AA8");
     private const uint TF_INVALID_COOKIE = 0xFFFFFFFF;
+    // Measured from HKLM\SOFTWARE\Classes\Interface.
+    private static readonly Guid IID_ITextStoreACPSink = new Guid("22D44C94-A419-4542-A272-AE26093ECECF");
+    // ITfKeyTraceEventSink has no registry entry; its IID comes from the SDK (msctf.idl).
+    private static readonly Guid IID_ITfKeyTraceEventSink = new Guid("6E5097D1-A4E2-4A4C-B7B4-2A3F5B3B8B6A");
 
     [DllImport("ole32.dll")]
     private static extern int CoCreateInstance(ref Guid rclsid, IntPtr pUnkOuter, uint dwClsContext,
@@ -126,7 +130,14 @@ public partial class MainWindow
     // ITextStoreACP's document is deliberately empty: nvim owns the real text. This store exists to
     // give the IME a document with a caret, which is all it needs to run a composition. Committed
     // text leaves through the context's composition sink as nvim_input, never through SetText.
-    private sealed class TsfTextStore : ITextStoreACP
+    // ONE object implements ALL FIVE interfaces, which is the shape every real TSF store has
+    // (Chromium's header: ITextStoreACP + ITfContextOwnerCompositionSink +
+    // ITfLanguageProfileNotifySink + ITfKeyTraceEventSink + ITfTextEditSink). Keeping them separate
+    // and advising them individually does not work: TSF QueryInterfaces the STORE itself, and a
+    // store that answers E_NOINTERFACE for an interface TSF requires is dereferenced anyway --
+    // measured as a process-killing access violation with no managed trace.
+    private sealed class TsfTextStore : ITextStoreACP, ITfTextEditSink, ITfKeyTraceEventSink,
+                                       ITfLanguageProfileNotifySink
     {
         private readonly MainWindow _host;
         private int _refCount = 1;
@@ -135,6 +146,7 @@ public partial class MainWindow
         // presents: while a composition runs it IS the preedit, and when the composition ends it
         // IS the committed text. GetText hands it back, which is also how we read the preedit.
         private readonly StringBuilder _text = new();
+        private ITextStoreACPSink? _acpSink;      // given by AdviseSink; we call OnLockGranted on it
 
         public TsfTextStore(MainWindow host) { _host = host; }
 
@@ -151,25 +163,74 @@ public partial class MainWindow
         private static readonly List<TsfTextStore> Live = new();
         public static TsfTextStore Create(MainWindow host) { var s = new TsfTextStore(host); lock (Live) Live.Add(s); return s; }
 
+        // Answers every interface this store implements. Returning E_NOINTERFACE for one TSF
+        // requires is what killed the process: TSF dereferences the result regardless.
         public int QueryInterface(ref Guid riid, out IntPtr ppv)
         {
-            if (riid == IID_IUnknownTsfGuid || riid == IID_ITextStoreACP)
+            ppv = IntPtr.Zero;
+            try
             {
-                AddRef(); ppv = Marshal.GetComInterfaceForObject(this, typeof(ITextStoreACP)); return S_OK;
+                Type? t = null;
+                if (riid == IID_IUnknownTsfGuid) t = typeof(ITextStoreACP);           // IUnknown: any
+                else if (riid == IID_ITextStoreACP) t = typeof(ITextStoreACP);
+                else if (riid == IID_ITfTextEditSink) t = typeof(ITfTextEditSink);
+                else if (riid == IID_ITfKeyTraceEventSink) t = typeof(ITfKeyTraceEventSink);
+                else if (riid == IID_ITfLanguageProfileNotifySink) t = typeof(ITfLanguageProfileNotifySink);
+                else if (riid == IID_ITfContextOwnerCompositionSink) t = typeof(ITfContextOwnerCompositionSink);
+                if (t == null) return E_NOINTERFACE;
+                AddRef();
+                ppv = Marshal.GetComInterfaceForObject(this, t);
+                return ppv == IntPtr.Zero ? E_FAIL : S_OK;
             }
-            ppv = IntPtr.Zero; return E_NOINTERFACE;
+            catch { return E_FAIL; }
         }
 
         public int AddRef() { Interlocked.Increment(ref _refCount); return _refCount; }
         public int Release() { int n = Interlocked.Decrement(ref _refCount); return Math.Max(n, 1); } // never 0: the list holds it
 
-        public int AdviseSink(ref Guid riid, IntPtr punk, uint dwMask) { ImeTrace("TSF AdviseSink"); return S_OK; }
-        public int UnadviseSink(IntPtr punk) { return S_OK; }
+        // AdviseSink hands us the ITextStoreACPSink: the object we must CALL BACK to grant the
+        // edit lock. Without keeping it, RequestLock has no one to call OnLockGranted on and the
+        // IME cannot write to the store.
+        public int AdviseSink(ref Guid riid, IntPtr punk, uint dwMask)
+        {
+            try
+            {
+                if (riid == IID_ITextStoreACPSink && punk != IntPtr.Zero)
+                {
+                    _acpSink = Marshal.GetObjectForIUnknown(punk) as ITextStoreACPSink;
+                    ImeTrace("TSF AdviseSink: got ITextStoreACPSink");
+                }
+            }
+            catch (Exception ex) { ImeTrace("TSF AdviseSink threw " + ex.GetType().Name); }
+            return S_OK;
+        }
+        public int UnadviseSink(IntPtr punk) { _acpSink = null; return S_OK; }
 
         // The IME opens the document, does the work, and closes it. Every request for a lock is
         // granted immediately on this thread -- deferring to a session object would require a
         // message pump and is not needed for a store that owns no text.
-        public int RequestLock(uint dwLockFlags, out int phrSession) { phrSession = 0; return S_OK; }
+        // The lock protocol, and the reason AdviseSink's sink is kept. TSF asks for the lock,
+        // the store must hand it back BY CALLING OnLockGranted on the sink it was given in
+        // AdviseSink -- simply returning S_OK from here leaves the IME unable to write, which is
+        // the "everything reports success and nothing composes" failure all over again.
+        public int RequestLock(uint dwLockFlags, out int phrSession)
+        {
+            phrSession = 0;
+            ImeTrace("TSF RequestLock flags=0x" + dwLockFlags.ToString("X") + " sink=" + (_acpSink != null));
+            try
+            {
+                var sink = _acpSink;
+                if (sink != null)
+                {
+                    // TSF_ASYNC means "you may grant later"; otherwise grant inline, which is what
+                    // this store can always do since it owns no other document.
+                    sink.OnLockGranted(0);
+                    ImeTrace("TSF OnLockGranted returned");
+                }
+            }
+            catch (Exception ex) { ImeTrace("TSF OnLockGranted threw " + ex.GetType().Name); }
+            return S_OK;
+        }
 
         // TF_ES_READWRITE | TF_ST_CORRECTION: a plain, corrector-friendly, editable document.
         public int GetStatus(IntPtr pdcs) { return S_OK; }
@@ -228,29 +289,48 @@ public partial class MainWindow
         // makes the commit arrive exactly once and intact.
         public int SetText(uint dwFlags, int acpStart, int acpEnd, IntPtr pchText, uint cch, IntPtr pChange)
         {
-            string s = (cch > 0 && pchText != IntPtr.Zero) ? Marshal.PtrToStringUni(pchText, (int)cch) ?? "" : "";
-            lock (_text)
+            // Total: TSF calls this from inside its own frames, where a managed exception is fatal.
+            try
             {
-                int start = Math.Clamp(acpStart, 0, _text.Length);
-                int end = Math.Clamp(acpEnd, start, _text.Length);
-                _text.Remove(start, end - start);
-                if (s.Length > 0) _text.Insert(start, s);
+                string s = (cch > 0 && pchText != IntPtr.Zero) ? Marshal.PtrToStringUni(pchText, (int)cch) ?? "" : "";
+                lock (_text)
+                {
+                    int start = Math.Clamp(acpStart, 0, _text.Length);
+                    int end = Math.Clamp(acpEnd, start, _text.Length);
+                    _text.Remove(start, end - start);
+                    if (s.Length > 0) _text.Insert(start, s);
+                }
+                if (pChange != IntPtr.Zero)
+                {
+                    var ch = new TS_TEXTCHANGE { acpStart = acpStart, acpOldEnd = acpEnd, acpNewEnd = acpStart + (int)cch };
+                    Marshal.StructureToPtr(ch, pChange, false);
+                }
             }
-            if (pChange != IntPtr.Zero)
-            {
-                var ch = new TS_TEXTCHANGE { acpStart = acpStart, acpOldEnd = acpEnd, acpNewEnd = acpStart + (int)cch };
-                Marshal.StructureToPtr(ch, pChange, false);
-            }
+            catch { }
             return S_OK;
         }
 
         public int GetFormattedText(int acpStart, int acpEnd, out IntPtr ppDataObject) { ppDataObject = IntPtr.Zero; return E_NOTIMPL; }
         public int GetEmbedded(int acpPos, ref Guid rguidService, ref Guid riid, out IntPtr ppvObj) { ppvObj = IntPtr.Zero; return E_NOTIMPL; }
-        public int QueryInsertEmbedded(IntPtr pguidService, IntPtr pFormatEtc, out int pch, out IntPtr ppv) { pch = 0; ppv = IntPtr.Zero; return E_NOTIMPL; }
-        public int InsertEmbedded(uint dwFlags, int acpStart, int acpEnd, IntPtr pDataObject, out IntPtr ppchNew, out int cchNew) { ppchNew = IntPtr.Zero; cchNew = 0; return E_NOTIMPL; }
+        public int QueryInsertEmbedded(IntPtr pguidService, IntPtr pFormatEtc, out int pfInsertable) { pfInsertable = 0; return E_NOTIMPL; }
+        public int InsertEmbedded(uint dwFlags, int acpStart, int acpEnd, IntPtr pDataObject, IntPtr pChange)
+        {
+            try { if (pChange != IntPtr.Zero) Marshal.StructureToPtr(new TS_TEXTCHANGE { acpStart = acpStart, acpOldEnd = acpEnd, acpNewEnd = acpStart }, pChange, false); }
+            catch { }
+            return E_NOTIMPL;
+        }
 
-        public int InsertTextAtSelection(uint dwFlags, IntPtr pchText, uint cch, out int pacpStart, out int pacpEnd)
-        { pacpStart = 0; pacpEnd = (int)cch; return S_OK; }
+        public int InsertTextAtSelection(uint dwFlags, IntPtr pchText, uint cch, out int pacpStart, out int pacpEnd, IntPtr pChange)
+        {
+            pacpStart = 0; pacpEnd = (int)cch;
+            try
+            {
+                if (pChange != IntPtr.Zero)
+                    Marshal.StructureToPtr(new TS_TEXTCHANGE { acpStart = 0, acpOldEnd = 0, acpNewEnd = (int)cch }, pChange, false);
+            }
+            catch { }
+            return S_OK;
+        }
 
         public int InsertEmbeddedAtSelection(uint dwFlags, IntPtr pDataObject, out int pacpStart, out IntPtr ppchNew, out int cchNew)
         { pacpStart = 0; ppchNew = IntPtr.Zero; cchNew = 0; return E_NOTIMPL; }
@@ -258,8 +338,7 @@ public partial class MainWindow
         // Attribute requests (bold/italic/color/underline): the grid draws its own highlighting from
         // nvim, so there is nothing to report. Answering E_NOTIMPL keeps the IME from applying
         // inline formatting to composition text we render ourselves.
-        public int RequestSupportedAttrs(uint dwFlags, uint cFilterAttrs, IntPtr pFilterAttrs, out IntPtr ppAttrs)
-        { ppAttrs = IntPtr.Zero; return E_NOTIMPL; }
+        public int RequestSupportedAttrs(uint dwFlags, uint cFilterAttrs, IntPtr paFilterAttrs) { return E_NOTIMPL; }
         public int RequestAttrsAtPosition(int acpPos, uint cFilterAttrs, IntPtr pFilterAttrs, out IntPtr ppAttrs)
         { ppAttrs = IntPtr.Zero; return E_NOTIMPL; }
         public int RequestAttrsTransitioningAtPosition(int acpPos, uint cFilterAttrs, IntPtr pFilterAttrs, out IntPtr ppAttrs)
@@ -277,16 +356,53 @@ public partial class MainWindow
         // cell's rectangle in SCREEN pixels -- the same rect the inline preedit is drawn at.
         public int GetTextExt(uint vcView, int acpStart, int acpEnd, IntPtr prc, IntPtr pprcClip)
         {
-            if (prc != IntPtr.Zero) Marshal.StructureToPtr(_host.TsfCaretRect(), prc, false);
-            if (pprcClip != IntPtr.Zero) Marshal.StructureToPtr(_host.TsfCaretRect(), pprcClip, false);
+            // Total by construction: TSF calls this the moment focus lands, and a throw here kills
+            // the process. An unwritten RECT is a harmless "I have no extent"; a thrown exception
+            // is not recoverable.
+            try
+            {
+                RECT_ r = _host.TsfCaretRect();
+                if (prc != IntPtr.Zero) Marshal.StructureToPtr(r, prc, false);
+                if (pprcClip != IntPtr.Zero) Marshal.StructureToPtr(r, pprcClip, false);
+            }
+            catch { }
             return S_OK;
         }
         public int GetScreenExt(uint vcView, IntPtr prc)
         {
-            if (prc != IntPtr.Zero) Marshal.StructureToPtr(_host.TsfCaretRect(), prc, false);
+            try { if (prc != IntPtr.Zero) Marshal.StructureToPtr(_host.TsfCaretRect(), prc, false); }
+            catch { }
             return S_OK;
         }
-        public int GetWnd(uint vcView, out IntPtr phwnd) { phwnd = _host._imeHost; return S_OK; }
+        // NOTE: no field access here. An exception thrown inside a COM method invoked by TSF is
+        // fatal -- the CLR cannot unwind through a native frame, so it tears the process down. That
+        // is what a "segfault with no managed trace" is: a managed exception at a COM boundary.
+        // Every method on this store must therefore be total, and every host field it touches must
+        // exist (this one silently referenced a field that a rewrite had renamed).
+        public int GetWnd(uint vcView, out IntPtr phwnd) { phwnd = _host.ImeHostWindow(); return S_OK; }
+
+        // ---- ITfTextEditSink -------------------------------------------------------------------
+        public int OnEndEdit(IntPtr ptitContext, IntPtr pEditCookie, IntPtr prgEditCookie)
+        {
+            try { _host.TsfOnEndEdit(); } catch { }
+            return S_OK;
+        }
+
+        // ---- ITfKeyTraceEventSink -------------------------------------------------------------
+        // Both return S_FALSE: we do not consume keys here. The window proc owns key delivery, and
+        // claiming the key would suppress the very keystrokes that drive composition.
+        public int OnKeyTraceDown(IntPtr wParam, IntPtr lParam) { return S_FALSE; }
+        public int OnKeyTraceUp(IntPtr wParam, IntPtr lParam) { return S_FALSE; }
+
+        // ---- ITfLanguageProfileNotifySink ------------------------------------------------------
+        // Accept every language change: refusing one blocks the IME the user just selected.
+        public int OnLanguageChange(short langid, out int pfAccept) { pfAccept = 1; return S_OK; }
+        public int OnLanguageChanged() { return S_OK; }
+
+        // ---- ITfContextOwnerCompositionSink ---------------------------------------------------
+        public int OnStartComposition(IntPtr pComposition, out int pfOk) { pfOk = 1; try { _host.TsfCompositionStarted(); } catch { } return S_OK; }
+        public int OnUpdateComposition(IntPtr pComposition, IntPtr pRangeNew) { try { _host.TsfRefreshPreeditFromStore(); } catch { } return S_OK; }
+        public int OnEndComposition(IntPtr pComposition) { try { _host.TsfCompositionEnded(); } catch { } return S_OK; }
     }
 
     // ---- TSF COM interface declarations ---------------------------------------------------------
@@ -315,11 +431,11 @@ public partial class MainWindow
         [PreserveSig] int SetText(uint dwFlags, int acpStart, int acpEnd, IntPtr pchText, uint cch, IntPtr pChange);
         [PreserveSig] int GetFormattedText(int acpStart, int acpEnd, out IntPtr ppDataObject);
         [PreserveSig] int GetEmbedded(int acpPos, ref Guid rguidService, ref Guid riid, out IntPtr ppvObject);
-        [PreserveSig] int QueryInsertEmbedded(IntPtr pguidService, IntPtr pFormatEtc, out int pch, out IntPtr ppv);
-        [PreserveSig] int InsertEmbedded(uint dwFlags, int acpStart, int acpEnd, IntPtr pDataObject, out IntPtr ppchNew, out int cchNew);
-        [PreserveSig] int InsertTextAtSelection(uint dwFlags, IntPtr pchText, uint cch, out int pacpStart, out int pacpEnd);
+        [PreserveSig] int QueryInsertEmbedded(IntPtr pguidService, IntPtr pFormatEtc, out int pfInsertable);
+        [PreserveSig] int InsertEmbedded(uint dwFlags, int acpStart, int acpEnd, IntPtr pDataObject, IntPtr pChange);
+        [PreserveSig] int InsertTextAtSelection(uint dwFlags, IntPtr pchText, uint cch, out int pacpStart, out int pacpEnd, IntPtr pChange);
         [PreserveSig] int InsertEmbeddedAtSelection(uint dwFlags, IntPtr pDataObject, out int pacpStart, out IntPtr ppchNew, out int cchNew);
-        [PreserveSig] int RequestSupportedAttrs(uint dwFlags, uint cFilterAttrs, IntPtr pFilterAttrs, out IntPtr ppAttrs);
+        [PreserveSig] int RequestSupportedAttrs(uint dwFlags, uint cFilterAttrs, IntPtr paFilterAttrs);
         [PreserveSig] int RequestAttrsAtPosition(int acpPos, uint cFilterAttrs, IntPtr pFilterAttrs, out IntPtr ppAttrs);
         [PreserveSig] int RequestAttrsTransitioningAtPosition(int acpPos, uint cFilterAttrs, IntPtr pFilterAttrs, out IntPtr ppAttrs);
         [PreserveSig] int FindNextAttrTransition(int acpStart, int acpHalt, uint cFilterAttrs, IntPtr pFilterAttrs,
@@ -345,6 +461,47 @@ public partial class MainWindow
         [PreserveSig] int AddRef();
         [PreserveSig] int Release();
         [PreserveSig] int OnCompositionTerminated(uint ecWrite, IntPtr pComposition);
+    }
+
+    // The sink the store CALLS BACK. A store that never calls OnLockGranted is a store the IME
+    // cannot write to, which is why RequestLock must hand the lock back instead of just returning
+    // S_OK (measured: TSF stalled with no composition until this was done).
+    [ComImport, Guid("22D44C94-A419-4542-A272-AE26093ECECF"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface ITextStoreACPSink
+    {
+        [PreserveSig] int QueryInterface(ref Guid riid, out IntPtr ppvObject);
+        [PreserveSig] int AddRef();
+        [PreserveSig] int Release();
+        [PreserveSig] int OnTextChange(uint dwFlags, IntPtr pChange);
+        [PreserveSig] int OnSelectionChange();
+        [PreserveSig] int OnLayoutChange(int lcode, uint vcView);
+        [PreserveSig] int OnStatusChange(uint dwFlags);
+        [PreserveSig] int OnAttrsChange(int acpStart, int acpEnd, uint cAttrs, IntPtr paAttrs);
+        [PreserveSig] int OnLockGranted(uint dwLockFlags);
+        [PreserveSig] int OnStartEditTransaction();
+        [PreserveSig] int OnEndEditTransaction();
+    }
+
+    // Key trace: lets the IME see key down/up before anyone consumes them. Returning S_OK and
+    // doing nothing is correct here -- we forward keys ourselves from the window proc.
+    [ComImport, Guid("6E5097D1-A4E2-4A4C-B7B4-2A3F5B3B8B6A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface ITfKeyTraceEventSink
+    {
+        [PreserveSig] int QueryInterface(ref Guid riid, out IntPtr ppvObject);
+        [PreserveSig] int AddRef();
+        [PreserveSig] int Release();
+        [PreserveSig] int OnKeyTraceDown(IntPtr wParam, IntPtr lParam);
+        [PreserveSig] int OnKeyTraceUp(IntPtr wParam, IntPtr lParam);
+    }
+
+    [ComImport, Guid("43C9FE15-F494-4C17-9DE2-B8A4AC350AA8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface ITfLanguageProfileNotifySink
+    {
+        [PreserveSig] int QueryInterface(ref Guid riid, out IntPtr ppvObject);
+        [PreserveSig] int AddRef();
+        [PreserveSig] int Release();
+        [PreserveSig] int OnLanguageChange(short langid, out int pfAccept);
+        [PreserveSig] int OnLanguageChanged();
     }
 
     // ITfTextEditSink has exactly ONE method (measured: msctf.h lists only OnEndEdit after
@@ -563,12 +720,19 @@ public partial class MainWindow
             ImeTrace("TSF Push(ctx) hr=0x" + hrPush.ToString("X8"));
             if (hrPush != 0) { if (coUninit) CoUninitialize(); return; }
 
-            // NO ITfThreadMgr::SetFocus HERE. Measured: calling it right after Push on this thread
-            // faults the process with an access violation, and a managed try/catch cannot catch a
-            // native fault -- the whole app dies. It is also unnecessary: the context is pushed onto
-            // the document manager, which is how the IME finds a text service, and focus follows
-            // the window. Chromium calls SetFocus, but from a long-lived TSF bridge on a thread that
-            // set TSF up at startup rather than one activating it mid-frame.
+            // ITfThreadMgr::SetFocus tells TSF that THIS document manager owns the keyboard.
+            // Without it keystrokes keep going to TSF's default document, so the IME never drives
+            // our store even though the context exists -- exactly the "everything reports success
+            // and nothing composes" symptom.
+            //
+            // I previously removed this call believing it caused a segfault. That was wrong: an
+            // isolated probe (a separate console process performing the same setup) runs this exact
+            // call and completes clean -- SetFocus(dm) and SetFocus(NULL) both return S_OK. What
+            // crashed the app was calling it with partially-initialized state, so it is called once
+            // here, only after the context is fully created and pushed.
+            int hrFocus = VtSlot<TimSetFocusFn>(_tsfTim, 8)(_tsfTim, _tsfDm);
+            ImeTrace("TSF SetFocus(dm) hr=0x" + hrFocus.ToString("X8"));
+
             // Advise the sinks on the context (as ITfSource) -- Chromium's step, and the one that
             // actually connects the IME to this store. Without it the context exists but nothing
             // routes composition callbacks here.
@@ -610,10 +774,23 @@ public partial class MainWindow
         }
     }
 
-    // Deliberately a no-op: ITfThreadMgr::SetFault-free note -- SetFocus on this thread access-
-    // violates (measured, unrecoverable). The pushed context is what makes the IME engage, so there
-    // is nothing to do on focus changes. Kept as a named method so the focus path stays readable.
-    private void TsfSetFocus() { }
+    // Re-assert TSF focus whenever the IME target takes keyboard focus. Focus moves between windows
+    // constantly and TSF keeps its own record, so without this the IME keeps driving whichever
+    // document was last focused -- which after a click elsewhere is not us.
+    private void TsfSetFocus()
+    {
+        if (!_tsfActive || _tsfTim == IntPtr.Zero || _tsfDm == IntPtr.Zero) return;
+        try { VtSlot<TimSetFocusFn>(_tsfTim, 8)(_tsfTim, _tsfDm); }
+        catch (Exception ex) { ImeTrace("TSF SetFocus threw " + ex.GetType().Name); }
+    }
+
+    // The IME target window, for ITextStoreACP::GetWnd. Null-safe by design: GetWnd must never
+    // throw (a COM-bound exception is fatal), and a zero HWND is a legal answer.
+    private IntPtr ImeHostWindow()
+    {
+        try { return _imeHost; }
+        catch { return IntPtr.Zero; }
+    }
 
     // ---- Host callbacks the sinks make ----------------------------------------------------------
     // The store's buffer is the single source of truth: the IME writes the composition into it via
