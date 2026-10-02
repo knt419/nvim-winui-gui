@@ -62,6 +62,10 @@
     <Compile Include="MainWindow.mouse.cs" />
     <!-- IME: native Win32 EDIT target that receives the OS IME's committed text. -->
     <Compile Include="MainWindow.ime.cs" />
+    <!-- IME: Windows-Terminal-shaped TSF composition host. A transitory ITfContext on a PLAIN
+         window; no ITextStoreACP. Measured working (PREVIEW 'にほんご' -> COMMIT 'にほんご'). -->
+    <Compile Include="Tsf\TsfCompositionHost.cs" />
+    <Compile Include="MainWindow.tsfhost.cs" />
     <!-- IME: TSF text store (MSIME is a TSF IME; IMM32 alone cannot make it compose). -->
     <!-- MainWindow.tsf.cs removed: hand-rolled TSF text store (the .NET CCW path crashed).
          IME now targets RICHEDIT50W (msftedit.dll), which ships its own OS-provided store. -->

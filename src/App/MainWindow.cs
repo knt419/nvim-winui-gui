@@ -282,6 +282,16 @@ public partial class MainWindow : Window
             return;
         }
         string? kv = MapModifierKey(e.Key) ?? MapKey(e.Key);
+        // Ctrl+Space is the IME on/off hotkey, never a literal space. With the TSF host up the IME
+        // normally consumes it first (this path would then see VK_PROCESSKEY, which maps to
+        // nothing). If the key still arrives here, swallowing it is what keeps a stray space out of
+        // the nvim buffer -- the exact symptom that was reported before TSF was wired up.
+        if (_tsfHost != null && e.Key == VirtualKey.Space && (GetAsyncKeyState(0x11) & 0x8000) != 0)
+        {
+            ImeTrace("XAML Ctrl+Space swallowed (TSF IME hotkey)");
+            e.Handled = true;
+            return;
+        }
         ImeTrace("XAML-SEND '" + (kv ?? "<null>") + "' for key=" + e.Key);
         if (kv != null)
         {

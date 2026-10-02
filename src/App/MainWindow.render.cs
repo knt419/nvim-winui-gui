@@ -1916,23 +1916,62 @@ private void OnClosed(object sender, object e)
         try
         {
             double rh = rowTop[cr + 1] - rowTop[cr];
-            var tf = Tf(false, false, false);   // narrow chain: its fallbacks cover kana/kanji
-            var layout = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, pre, tf, float.MaxValue, float.MaxValue);
-            float w = (float)layout.LayoutBounds.Width;
-            float x = (float)colLeft[cc];
-            float y = (float)(rowTop[cr] + rh / 2 - _liftNarrow);
-            ds.DrawTextLayout(layout, x, y, GetW2dBrush(rc, _defFg));
-            // Composition underline: the Windows convention for uncommitted text.
-            ds.FillRectangle(new Windows.Foundation.Rect(x, (float)(rowTop[cr + 1] - 2.0), Math.Max(w, 1f), 1.5f), GetW2dBrush(rc, _defFg));
-            // Caret inside the preedit at GCS_CURSORPOS (character index). Measured from the
-            // prefix rather than a caret API — CanvasTextLayout has no GetCaretPosition.
-            int cp = _imePreeditCursor;
-            if (cp > 0 && cp < pre.Length)
+            var fg = GetW2dBrush(rc, _defFg);
+
+            // PER CHARACTER, with the glyph's own advance. The earlier version laid the whole
+            // preedit out in the NARROW format, which draws a kana at half its true advance: the
+            // second kana then lands on top of the first and the pair reads as one glyph with a
+            // stray mark (typing ああ showed "あ + dakuten"). Kana and kanji are 2 cells wide, so
+            // each character must be classified and advanced exactly like a grid cell.
+            double x = colLeft[cc];
+            double xStart = x;
+            double caretX = -1;
+            double maxRight = colLeft[colLeft.Length - 1] + _cellW;   // never run off the canvas
+            var buf = _activeRenderCells ?? _cells;                   // same buffer the cursor uses
+
+            for (int i = 0; i < pre.Length; i++)
             {
-                using var preL = new Microsoft.Graphics.Canvas.Text.CanvasTextLayout(rc, pre.Substring(0, cp), tf, float.MaxValue, float.MaxValue);
-                ds.FillRectangle(new Windows.Foundation.Rect(x + (float)preL.LayoutBounds.Width, (float)rowTop[cr], 1.5f, (float)rh), GetW2dBrush(rc, _defFg));
+                string ch = pre[i].ToString();
+                bool wide = IsWideGlyph(ch);
+                double adv = wide ? 2 * _cellW : _cellW;
+                if (x + adv > maxRight) break;                        // clip: partial last glyph off-canvas
+
+                // Occupy the cells before drawing them. nvim draws real characters in the cells the
+                // composition sits on -- with `list`/`listchars` the cursor cell holds the EOL marker
+                // (↲), so drawing the preedit straight on top made both unreadable. A terminal's
+                // composition REPLACES the cells it covers, so fill each cell with its own background
+                // first, then draw the glyph. Per cell (not one rect) so a mixed-background row, e.g.
+                // a CursorLine or a coloured band, keeps its exact colours.
+                int col2 = cc + (int)Math.Round((x - xStart) / _cellW);
+                int idx = cr * _screenCols + col2;
+                Color bg = _defBg;
+                if (col2 < colLeft.Length && idx >= 0 && idx < buf.Length)
+                {
+                    var cell = buf[idx];
+                    if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var cellHl))
+                    {
+                        var cb = HlBg(cellHl);
+                        if (cb is not null) bg = cb.Value;
+                    }
+                }
+                ds.FillRectangle(new Windows.Foundation.Rect(x, rowTop[cr], adv, rh), GetW2dBrush(rc, bg));
+
+                var tf = Tf(wide, false, false);
+                double lift = wide ? _liftWide : GlyphLiftN(ch);
+                float gy = (float)(rowTop[cr] + rh / 2 - lift);
+                ds.DrawText(ch, (float)x, gy, fg, tf);
+
+                if (_imePreeditCursor == i) caretX = x;
+                x += adv;
             }
-            layout.Dispose();
+            if (_imePreeditCursor >= pre.Length) caretX = x;
+
+            // Composition underline: the Windows convention for uncommitted text.
+            ds.FillRectangle(new Windows.Foundation.Rect(xStart, (float)(rowTop[cr + 1] - 2.0),
+                Math.Max(x - xStart, 1.0), 1.5f), fg);
+            // Caret inside the preedit, at the cell the IME's own caret sits on.
+            if (caretX >= 0)
+                ds.FillRectangle(new Windows.Foundation.Rect((float)caretX, (float)rowTop[cr], 1.5f, (float)rh), fg);
         }
         catch (Exception ex) { if (_diagEnabled) LogStartup("PREEDIT draw failed: " + ex.Message); }
     }

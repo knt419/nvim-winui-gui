@@ -290,6 +290,25 @@ public partial class MainWindow
             IntPtr owner = GetTopLevelHwnd();
             if (owner == IntPtr.Zero) { if (_diagEnabled) LogStartup("IME: no top-level HWND yet"); return; }
 
+            // PRIMARY PATH: the Windows-Terminal-shaped TSF composition host, on this thread's own
+            // focused window. RICHEDIT50W is retired here because it was measured NOT to compose:
+            // with the 1x1 RichEdit target focused, typing produced WM_KEYDOWN with no
+            // WM_IME_STARTCOMPOSITION/WM_IME_COMPOSITION and the romaji landed in the control as
+            // plain text. The transitory TSF context composes and commits on the same machine, same
+            // session: PREVIEW 'にほんご' -> COMMIT 'にほんご'. Details in MainWindow.tsfhost.cs.
+            TsfHostAttach();
+            if (_tsfHost != null)
+            {
+                ImeTrace("ATTACH TSF path active (RICHEDIT50W retired) owner=0x" + owner.ToString("X"));
+                if (_diagEnabled) LogStartup("IME: TSF composition host -> owner=0x" + owner.ToString("X"));
+                ImeFocusTarget("attach(tsf)");
+                return;
+            }
+
+            // FALLBACK: the legacy RICHEDIT50W child target. Kept only for the case where TSF could
+            // not be created at all (msctf/IME unavailable); it is not the normal path any more.
+            if (_diagEnabled) LogStartup("IME: TSF unavailable, falling back to the RICHEDIT50W target");
+
             // Load msftedit.dll once per process. Loading it registers RICHEDIT50W with the OS,
             // so CreateWindowExW below can use the class name directly — no RegisterClassExW.
             if (!_imeClassRegistered)
@@ -532,6 +551,12 @@ public partial class MainWindow
                     ImeTrace("WM_IME_CHAR ack ch=0x" + wParam.ToString("X"));
                     break;
                 }
+                case 0x0007 /* WM_SETFOCUS */:
+                    ImeTrace("SETFOCUS host=0x" + hWnd.ToString("X") + " getfocus=0x" + GetFocus().ToString("X"));
+                    break; // chain below — RichEdit's own proc must see this to run its internal TSF setup
+                case 0x0008 /* WM_KILLFOCUS */:
+                    ImeTrace("KILLFOCUS host=0x" + hWnd.ToString("X") + " getfocus=0x" + GetFocus().ToString("X"));
+                    break; // chain below
                 case WM_KEYDOWN:
                 {
                     int vki = (int)wParam;
@@ -936,6 +961,10 @@ public partial class MainWindow
         _imeFocusReason = reason;
         try
         {
+            // TSF path: the composition host owns this thread's keyboard focus; there is no native
+            // child target to focus any more (RICHEDIT50W retired).
+            if (_tsfHost != null) { TsfHostFocus(); return; }
+
             if (_imeHost == IntPtr.Zero) return;
             if (!IsWindow(_imeHost)) return;
             // A freshly created window has NO input context: Windows leaves the default IME
@@ -1114,6 +1143,7 @@ public partial class MainWindow
     {
         try
         {
+            try { _tsfHost?.Detach(); _tsfHost = null; } catch { }
             if (_imeHost != IntPtr.Zero)
             {
                 DestroyWindow(_imeHost);
