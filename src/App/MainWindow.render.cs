@@ -1110,10 +1110,14 @@ private void ResetParentOpacity()
         int cr2 = curIdx / cols, cc2 = curIdx % cols;
         double rh2 = rowTop[cr2 + 1] - rowTop[cr2];
         float x2 = (float)colLeft[cc2], w2 = (float)_cellW;
+        // A wide character owns two cells, so a cursor that spans the glyph has to be two cells
+        // wide as well. The vertical BAR keeps its thickness measured against ONE cell: it marks an
+        // edge, and scaling it with the glyph would make it twice as thick instead of twice as wide.
+        float wSpan = (float)(_cellW * CursorCellWidth(curIdx));
         if (_cursorShape == "vertical")
             ds.FillRectangle(new Windows.Foundation.Rect(x2, rowTop[cr2], Math.Max(1f, w2 * _cursorCellPct / 100f), rh2), GetW2dBrush(rc, _defFg));
         else if (_cursorShape == "horizontal")
-            ds.FillRectangle(new Windows.Foundation.Rect(x2, rowTop[cr2] + rh2 - Math.Max(1f, (float)rh2 * _cursorCellPct / 100f), w2, Math.Max(1f, (float)rh2 * _cursorCellPct / 100f)), GetW2dBrush(rc, _defFg));
+            ds.FillRectangle(new Windows.Foundation.Rect(x2, rowTop[cr2] + rh2 - Math.Max(1f, (float)rh2 * _cursorCellPct / 100f), wSpan, Math.Max(1f, (float)rh2 * _cursorCellPct / 100f)), GetW2dBrush(rc, _defFg));
     }
 
     // Inline IME preedit (option-2 IMM32 target): the composition string is drawn HERE, in our
@@ -1420,8 +1424,16 @@ private Cell[]? _activeRenderCells; // set by RenderCore each frame (composited 
 private Color CellBg(int r, int c, int curIdx)
 {
     var buf = _activeRenderCells ?? _cells;
-    var cell = buf[r * _screenCols + c];
-    if (r * _screenCols + c == curIdx && curIdx >= 0 && _cursorShape == "block")
+    int idx = r * _screenCols + c;
+    var cell = buf[idx];
+    // The block cursor covers the whole glyph. A full-width character sits in its own cell with an
+    // empty filler cell after it, so the block has to span BOTH cells or it stops halfway through
+    // the character (the reported "cursor is only 1 cell on a wide character"). nvim never places a
+    // wide glyph in the last column, so curIdx+1 always stays on the same row.
+    bool cursorBlock = _cursorShape == "block" && curIdx >= 0 &&
+                       (idx == curIdx ||
+                        (idx == curIdx + 1 && idx % _screenCols != 0 && CursorCellWidth(curIdx) == 2));
+    if (cursorBlock)
     {
         // Inverted cursor. Nvim's own terminals and neovide invert the cell's ACTUAL colors, so the
         // cursor is visible on ANY background. We used to fill with _defFg unconditionally, which
@@ -1429,17 +1441,34 @@ private Color CellBg(int r, int c, int curIdx)
         // fill is Normal's fg = _defFg by definition, see HlBg) the cursor vanished completely.
         // So: real cell bg -> real cell fg; and if those two are too close to tell apart (a `reverse`
         // band whose fg happens to match), fall back to a contrasting color instead of hiding.
+        // Both colours come from the CURSOR cell, so the two halves of a wide cursor are identical
+        // even if nvim gave the filler cell a different hl.
+        var src = (curIdx >= 0 && curIdx < buf.Length) ? buf[curIdx] : cell;
         Color cellBg = _defBg;
-        if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var ch))
+        if (src.Hl >= 0 && _hlDefs.TryGetValue(src.Hl, out var ch))
         {
             var cb = HlBg(ch);
             if (cb is not null) cellBg = cb.Value;
         }
-        Color block = InvertForCursor(r, c, cellBg);
+        Color block = InvertForCursor(curIdx / _screenCols, curIdx % _screenCols, cellBg);
         return block.A == 0 ? _defFg : block;
     }
     if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var h)) { var cb = HlBg(h); if (cb is not null) return cb.Value; }
     return TransparentColor;
+}
+
+// Display width of the glyph under the cursor, in cells: 2 for a full-width character or an emoji,
+// 1 otherwise. The cursor is sized with this so it covers exactly what the character covers.
+private int CursorCellWidth(int curIdx)
+{
+    try
+    {
+        var buf = _activeRenderCells ?? _cells;
+        if (curIdx < 0 || curIdx >= buf.Length) return 1;
+        string t = buf[curIdx].Text;
+        return string.IsNullOrEmpty(t) ? 1 : AppGlyphWidth(t);
+    }
+    catch { return 1; }
 }
 
 // Glyph color for the inverted block cursor at (r,c). A terminal inverts the cursor cell:
