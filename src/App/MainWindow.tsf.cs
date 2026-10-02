@@ -725,13 +725,15 @@ public partial class MainWindow
             // our store even though the context exists -- exactly the "everything reports success
             // and nothing composes" symptom.
             //
-            // I previously removed this call believing it caused a segfault. That was wrong: an
-            // isolated probe (a separate console process performing the same setup) runs this exact
-            // call and completes clean -- SetFocus(dm) and SetFocus(NULL) both return S_OK. What
-            // crashed the app was calling it with partially-initialized state, so it is called once
-            // here, only after the context is fully created and pushed.
-            int hrFocus = VtSlot<TimSetFocusFn>(_tsfTim, 8)(_tsfTim, _tsfDm);
-            ImeTrace("TSF SetFocus(dm) hr=0x" + hrFocus.ToString("X8"));
+            // SETFOCUS IS CURRENTLY NOT CALLED. I restored it once on the strength of an isolated
+            // probe that returned S_OK, and reported the crash fixed -- that was a ONE-OFF: run
+            // three times in a row, the app now dies at exactly this line every time (the log
+            // stops after Push, before this trace). The probe survives because its store answers
+            // E_NOINTERFACE to everything and never lets TSF call into it; ours implements the
+            // interfaces, so SetFocus is the first call that enters our CCW, and that is where it
+            // dies. Until the entry path is verified in-process, this stays off -- without it the
+            // IME falls back to TSF's default document rather than crashing the app.
+            ImeTrace("TSF skipping SetFocus(dm) -- see comment");
 
             // Advise the sinks on the context (as ITfSource) -- Chromium's step, and the one that
             // actually connects the IME to this store. Without it the context exists but nothing
@@ -777,12 +779,13 @@ public partial class MainWindow
     // Re-assert TSF focus whenever the IME target takes keyboard focus. Focus moves between windows
     // constantly and TSF keeps its own record, so without this the IME keeps driving whichever
     // document was last focused -- which after a click elsewhere is not us.
-    private void TsfSetFocus()
-    {
-        if (!_tsfActive || _tsfTim == IntPtr.Zero || _tsfDm == IntPtr.Zero) return;
-        try { VtSlot<TimSetFocusFn>(_tsfTim, 8)(_tsfTim, _tsfDm); }
-        catch (Exception ex) { ImeTrace("TSF SetFocus threw " + ex.GetType().Name); }
-    }
+    // Also disabled: calling ITfThreadMgr::SetFocus here -- i.e. right after the IMM32 target's
+    // SetFocus -- reliably kills the process. Two focus mechanisms in sequence (Win32 SetFocus,
+    // then TSF SetFocus) is what triggers it, and a managed catch cannot see a native fault.
+    // Everything TSF needs is already done by the time the user types (store, context, push,
+    // sinks); only the explicit TSF focus handoff is missing, and that degrades to TSF's default
+    // document rather than taking the app down.
+    private void TsfSetFocus() { }
 
     // The IME target window, for ITextStoreACP::GetWnd. Null-safe by design: GetWnd must never
     // throw (a COM-bound exception is fatal), and a zero HWND is a legal answer.
