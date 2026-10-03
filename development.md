@@ -190,11 +190,31 @@ to drive.
   menu, tabline and messages are deliberately NOT externalized (no `ext_cmdline` /
   `ext_popupmenu` / `ext_tabline` / `ext_messages`), so nvim draws them into the grid
   and they need no widget code.
-- **ui events handled**: the 16 grid/multigrid/highlight events (`grid_resize`,
+- **ui events handled**: the 18 grid/multigrid/highlight events (`grid_resize`,
   `grid_line`, `grid_clear`, `grid_scroll`, `grid_cursor_goto`, `grid_destroy`,
   `hl_attr_define`, `hl_group_set`, `default_colors_set`, `mode_change`, `mode_info_set`,
-  `win_pos`, `win_float_pos`, `win_hide`, `win_close`, `msg_set_pos`) plus `flush` and
-  `option_set`.
+  `win_pos`, `win_float_pos`, `win_viewport`, `win_viewport_margins`, `win_hide`,
+  `win_close`, `msg_set_pos`) plus `flush` and `option_set`.
+- **smooth scrolling** (`win_viewport`). The payload is richer than a viewport rectangle:
+  `[grid, win, topline, botline, curline, curcol, line_count, scroll_delta]` — `line_count`
+  is the buffer length a scrollbar thumb would need, and `scroll_delta` is "how much the top
+  line moved since `win_viewport` was last emitted; it is intended to be used to implement
+  smooth scrolling" (api-ui-events.txt). This app animates it without keeping per-grid
+  snapshots: the frame is composited as usual, and while the animation runs
+  `DrawScrollAnimOverlay` draws the **previous** composite a second time — clipped to the
+  window's viewport (`win_viewport_margins` supplies the non-viewport rows) and translated by
+  the remaining distance, so the old lines slide out while the vacated strip keeps the new
+  content from the base pass. `_activeRenderCells` already holds what was on screen before the
+  batch, which also satisfies the doc's ordering note ("all updates in a batch affect the new
+  viewport, despite `win_viewport` arriving after them"). Length is `NVIM_WINUI_SCROLL_MS`
+  (default 120 ms, `0` disables); deltas beyond 6 rows stay instant, and the animation is
+  skipped while a float overlay is up (the base pass is blurred then).
+
+  Verified by correlating two frames the app captured at known phases of one scroll
+  (`FULL-SHOT ... (anim p=…)` logs the phase): the frame at `p=0.02` matches the settled frame
+  shifted by **85 px**, the eased prediction being 84.9 px = 2.82 rows of the 30.07 px cell —
+  a perfect correlation (mismatch 0.000) at a *fractional* row offset, which a stepped
+  implementation cannot produce (it would land on 30.07 px multiples).
 - **`hl_group_set` is only for elements the app draws itself.** api-ui-events.txt is explicit
   that it is *not* needed to render the grid — cells carry attribute ids directly — because
   what it provides is the **name → attribute id** table for nvim's built-in groups (147

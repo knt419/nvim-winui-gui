@@ -26,6 +26,14 @@ public partial class MainWindow
         public int ZIndex;          // draw order: higher = on top (floating windows > normal)
         public bool Focusable;      // win_float_pos mouse_enabled/focusable — input-capable float
         public int LastHl = -1;   // hl inheritance across grid_line tuples for this grid
+        // win_viewport: the range of buffer text displayed in this window, zero-based, plus the cursor
+        // position in BUFFER coordinates (curline/curcol — unlike grid_cursor_goto's cell coords) and
+        // the buffer length, which is what a scrollbar thumb would need. scroll_delta is how far the
+        // top line moved since the previous win_viewport: the input for smooth scrolling.
+        public int ViewTop = -1, ViewBot = -1, ViewCurLine = -1, ViewCurCol = -1, LineCount = -1, ScrollDelta;
+        // win_viewport_margins: the parts of the grid that are NOT the viewport ('winbar' rows, float
+        // borders). Used to clip the smooth-scroll overlay to the rows that actually scroll.
+        public int MarginTop, MarginBottom, MarginLeft, MarginRight;
     }
 
     private readonly Dictionary<int, MGrid> _mgrid = new();
@@ -382,6 +390,8 @@ public partial class MainWindow
             fallbackCol = c;
         }
         _mgrid.Remove(id);
+        // A disappearing grid cannot be the destination of a running slide.
+        if (_scrollAnimGrid == id) CancelScrollAnim();
         // Only reposition the cursor when the outer cell could actually be resolved (the entry still
         // existed). When nvim's win_close already dropped it — the common ordering — there is nothing
         // to preserve, and touching _curLocalRow/Col would park the cursor off-screen; leaving it
@@ -392,6 +402,97 @@ public partial class MainWindow
             _curGridId = 1;                 // grid 1's coordinates ARE outer-frame coordinates
             _curLocalRow = fallbackRow;
             _curLocalCol = fallbackCol;
+        }
+    }
+
+    // ---- Smooth scrolling (win_viewport scroll_delta) ------------------------------------------
+    // api-ui-events.txt: scroll_delta "is intended to be used to implement smooth scrolling", and it
+    // tells the UI to "keep the grid separated from what's displayed on the screen and copy it to the
+    // viewport destination once win_viewport is received". That is what this does: the frame is
+    // composited normally (new content), and while the animation runs the PREVIOUS frame is drawn
+    // again — clipped to the scrolling window's viewport and translated by the remaining distance — so
+    // the old lines slide out and the strip they vacate shows the new content from the base pass.
+    // Reusing the previous composite needs no per-grid snapshot, and the ordering note above ("all
+    // updates in a batch affect the new viewport, despite win_viewport arriving after them") is handled
+    // for free: _activeRenderCells still holds what was on screen before the batch was applied.
+    private Cell[]? _scrollAnimCells;      // previous frame's composite — a COPY (the scratch is reused)
+    private int _scrollAnimGrid = -1;
+    private int _scrollAnimRows;           // >0 = topline advanced, so the content slides up
+    private long _scrollAnimStartTicks;
+    private double _scrollAnimMs;
+    private System.Threading.Timer? _scrollAnimTimer;
+    private readonly object _scrollAnimLock = new();
+    private bool _scrollAnimLogged;        // DIAG: one overlay line per animation, not per frame
+
+    // NVIM_WINUI_SCROLL_MS: animation length; 0 turns smooth scrolling off (every scroll instant).
+    private static readonly double ScrollAnimMs =
+        double.TryParse(Environment.GetEnvironmentVariable("NVIM_WINUI_SCROLL_MS"), out var scrollMs) && scrollMs >= 0
+            ? scrollMs : 120;
+    // nvim calls the delta approximate for scrolls longer than a screen, and animating 30 rows reads as
+    // a slide rather than as motion. Animate the small ones (j/k/Ctrl-E = 1, wheel = 3); jump instantly
+    // beyond that.
+    private const int ScrollAnimMaxRows = 6;
+
+    private void StartScrollAnim(int id, int delta)
+    {
+        if (ScrollAnimMs <= 0 || delta == 0 || Math.Abs(delta) > ScrollAnimMaxRows) return;
+        // The overlay re-renders the previous composite, so it must be a full frame of the CURRENT
+        // geometry, and the grid must be a window grid that is actually on screen.
+        var buf = _activeRenderCells;
+        if (buf is null || buf.Length != _screenRows * _screenCols) return;
+        if (!_mgrid.TryGetValue(id, out var g) || g.IsMessageGrid || g.PosRow >= int.MaxValue) return;
+        // With a float up the base pass is a blurred composite; sliding a sharp copy over it would
+        // punch a hole in the blur, so those scrolls stay instant.
+        if (_mgrid.Values.Any(o => MGridIsOverlay(o) && MGridHasContent(o))) return;
+        var snapshot = new Cell[buf.Length];
+        Array.Copy(buf, snapshot, buf.Length);
+        lock (_scrollAnimLock)
+        {
+            _scrollAnimCells = snapshot;
+            _scrollAnimGrid = id;
+            _scrollAnimRows = delta;
+            _scrollAnimStartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            _scrollAnimMs = ScrollAnimMs;
+            _scrollAnimLogged = false;
+            _scrollAnimTimer ??= new System.Threading.Timer(_ =>
+            {
+                lock (_scrollAnimLock)
+                {
+                    if (_scrollAnimCells is null) return;
+                    if (ScrollAnimProgressLocked() >= 1.0) _scrollAnimCells = null;  // done: drop the snapshot
+                    ScheduleRender();
+                }
+            }, null, 16, 16);
+        }
+        if (_diagEnabled) LogStartup($"SCROLL-ANIM start g={id} rows={delta} over {ScrollAnimMs:F0} ms");
+    }
+
+    // 0..1 progress of the running animation. Caller holds _scrollAnimLock.
+    private double ScrollAnimProgressLocked()
+    {
+        if (_scrollAnimMs <= 0) return 1.0;
+        double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - _scrollAnimStartTicks) * 1000.0
+                    / System.Diagnostics.Stopwatch.Frequency;
+        return Math.Clamp(ms / _scrollAnimMs, 0.0, 1.0);
+    }
+
+    // Drop any running animation (geometry changed, grid went away, window closing).
+    private void CancelScrollAnim()
+    {
+        lock (_scrollAnimLock) { _scrollAnimCells = null; _scrollAnimGrid = -1; }
+        _scrollAnimTimer?.Dispose();
+        _scrollAnimTimer = null;
+    }
+
+    // DIAG: the phase a captured frame was taken at, or -1 when nothing is animating. A frame captured
+    // at p=0.5 must show the window content offset HALF a row — without this the measurement cannot
+    // tell "the animation is fake" from "the shot landed after it finished".
+    private double ScrollAnimPhaseForLog()
+    {
+        lock (_scrollAnimLock)
+        {
+            if (_scrollAnimCells is null) return -1;
+            return ScrollAnimProgressLocked();
         }
     }
 

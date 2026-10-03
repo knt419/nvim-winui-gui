@@ -558,8 +558,75 @@ private void DrawDecorations(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, 
 // (consecutive same-color cells batched into single DrawText runs). Runs on the UI thread.
 private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl sender, Microsoft.Graphics.Canvas.UI.Xaml.CanvasDrawEventArgs args)
 {
-    try { RenderCore(args.DrawingSession, sender); }
+    // The smooth-scroll overlay is a SECOND pass over the frame just drawn (it paints the previous
+    // frame, translated and clipped) — see DrawScrollAnimOverlay.
+    try { RenderCore(args.DrawingSession, sender); DrawScrollAnimOverlay(args.DrawingSession, sender); }
     catch (Exception ex) { LogCritical("DRAW EXCEPTION: " + ex.GetType().Name + ": " + ex.Message); }
+}
+
+// Smooth scrolling: one extra pass of the PREVIOUS frame over the frame just composited. The overlay
+// covers the scrolling window's viewport shifted up (or down) by the remaining distance, so the old
+// lines slide out of view while the strip they vacate keeps the new content from the base pass, and it
+// lands exactly on the new content when it finishes. Because it is a cellsOverride (non-outer) pass,
+// RenderCore already excludes the cursor, the IME preedit, ApplyParentOpacity and the float
+// orchestration; only Clear needed suppressing (the `overlayPass` argument), since Clear would wipe the
+// base pass this composites over.
+private void DrawScrollAnimOverlay(Microsoft.Graphics.Canvas.CanvasDrawingSession ds,
+                                   Microsoft.Graphics.Canvas.ICanvasResourceCreator rc)
+{
+    Cell[]? snap;
+    int gridId, rows;
+    double p;
+    lock (_scrollAnimLock)
+    {
+        snap = _scrollAnimCells;
+        if (snap is null) return;
+        gridId = _scrollAnimGrid;
+        rows = _scrollAnimRows;
+        p = ScrollAnimProgressLocked();
+        if (p >= 1.0) { _scrollAnimCells = null; return; }   // finished: back to the plain frame
+    }
+    try
+    {
+        // A resize (or a lost grid) invalidates the snapshot's geometry — drop the animation instead of
+        // drawing a copy whose row/col count no longer matches the screen.
+        if (snap.Length != _screenRows * _screenCols || !_mgrid.TryGetValue(gridId, out var g))
+        {
+            CancelScrollAnim();
+            return;
+        }
+        // The viewport is the grid rect minus the margins nvim reported as NOT part of it (winbar rows,
+        // floating-window borders): those rows must never slide.
+        int top = g.PosRow + g.MarginTop, left = g.PosCol + g.MarginLeft;
+        int bot = g.PosRow + g.Rows - g.MarginBottom, right = g.PosCol + g.Cols - g.MarginRight;
+        if (bot <= top || right <= left) return;
+        var viewport = new Windows.Foundation.Rect(left * _cellW, top * _cellH,
+                                                   (right - left) * _cellW, (bot - top) * _cellH);
+        // Ease out, so the motion decelerates into place instead of stopping dead. rows > 0 means the
+        // topline advanced, i.e. the content slides UP — hence the negative sign.
+        double eased = 1 - Math.Pow(1 - p, 3);
+        float dy = (float)(-rows * eased * _cellH);
+        // One line per animation: the fractional dy is the whole point (it is what makes the motion
+        // smooth rather than a jump), and the viewport numbers show the margins were applied.
+        if (_diagEnabled && !_scrollAnimLogged)
+        {
+            _scrollAnimLogged = true;
+            LogStartup($"SCROLL-ANIM overlay p={p:F2} dy={dy:F2}px rows={rows} " +
+                       $"viewport=({top},{left})-({bot},{right}) of grid {gridId}");
+        }
+        var savedActive = _activeRenderCells;
+        try
+        {
+            using (ds.CreateLayer(1f, viewport))
+            {
+                ds.Transform = System.Numerics.Matrix3x2.CreateTranslation(0f, dy);
+                RenderCore(ds, rc, snap, suppressCursor: true, overlayPass: true);
+                ds.Transform = System.Numerics.Matrix3x2.Identity;
+            }
+        }
+        finally { _activeRenderCells = savedActive; }   // the overlay must not become "what is displayed"
+    }
+    catch (Exception ex) { if (_diagEnabled) LogStartup("SCROLL-ANIM draw failed: " + ex.Message); }
 }
 
 // When a floating window (:help, completion, terminal-in-float...) is up, the underlying parent
@@ -655,7 +722,7 @@ private void ResetParentOpacity()
 // cellsOverride: draw this exact buffer (base-only during the blur split) instead of compositing
 // fresh. blurLayerPass: marks the recursive render of the parent layer into the offscreen target
 // (skips DIAG one-shots and the overlay orchestration).
-    private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc, Cell[]? cellsOverride = null, bool blurLayerPass = false, bool suppressCursor = false)
+    private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc, Cell[]? cellsOverride = null, bool blurLayerPass = false, bool suppressCursor = false, bool overlayPass = false)
 {
     bool outer = cellsOverride is null && !blurLayerPass;
     try
@@ -676,7 +743,9 @@ private void ResetParentOpacity()
     // Parent opacity is a Win32 window attribute, not a drawing op, but this is the first point
     // where a real top-level HWND is guaranteed — same moment ImeAttach uses.
     if (outer) ApplyParentOpacity();
-    ds.Clear(_defBg);
+    // The smooth-scroll overlay paints ON TOP of the frame already on the drawing session, so it must
+    // not clear — Clear wipes the whole surface, including the base pass it composites over.
+    if (!overlayPass) ds.Clear(_defBg);
 
     // Multigrid: composite outer frame (grid 1) + window grids into the draw buffer, and resolve
     // the per-grid cursor to outer-frame coordinates. In linegrid mode this is a no-op passthrough.
@@ -1140,10 +1209,19 @@ private void ResetParentOpacity()
         {
             float wS = (float)Math.Round(GlyphCanvas.Width), hS = (float)Math.Round(GlyphCanvas.Height);
             var rtS = new Microsoft.Graphics.Canvas.CanvasRenderTarget((Microsoft.Graphics.Canvas.ICanvasResourceCreatorWithDpi)rc, wS, hS, ((Microsoft.Graphics.Canvas.ICanvasResourceCreatorWithDpi)rc).Dpi);
-            using (var dsS = rtS.CreateDrawingSession()) RenderCore(dsS, rc, cells, blurLayerPass: true, suppressCursor: false);
+            using (var dsS = rtS.CreateDrawingSession())
+            {
+                RenderCore(dsS, rc, cells, blurLayerPass: true, suppressCursor: false);
+                // The shot claims to be the live composite, so it must include the smooth-scroll
+                // overlay — otherwise a mid-animation frame is captured without the thing being
+                // verified.
+                DrawScrollAnimOverlay(dsS, rc);
+            }
             string pS = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvimWinUIGui", "fullshot.png");
             _ = SaveRtAsync(rtS, pS);
-            LogStartup("FULL-SHOT queued -> " + pS);
+            double phase = ScrollAnimPhaseForLog();
+            LogStartup($"FULL-SHOT queued -> {pS}" +
+                       (phase >= 0 ? $" (anim p={phase:F2}, rows={_scrollAnimRows})" : ""));
         }
         catch (Exception ex) { LogStartup("FULL-SHOT failed: " + ex.Message); }
     }
@@ -1951,6 +2029,7 @@ private void OnClosed(object sender, object e)
 {
     try { _blinkTimer?.Dispose(); } catch { }
     try { _flushWatchdogTimer?.Dispose(); } catch { }
+    try { CancelScrollAnim(); } catch { }
     // Restore the window to fully opaque BEFORE the HWND dies: a layered window that is killed
     // while translucent can leave the frame's window shell see-through for the next launch.
     try { ResetParentOpacity(); } catch { }

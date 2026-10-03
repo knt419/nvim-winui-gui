@@ -954,6 +954,45 @@ public partial class MainWindow
                     ScheduleRender();
                 }
                 break;
+            case "win_viewport":
+                // [grid, win, topline, botline, curline, curcol, line_count, scroll_delta], all
+                // zero-based. scroll_delta is how far the TOP LINE moved since the previous
+                // win_viewport, counted in displayed lines (a fold counts once) — the input smooth
+                // scrolling is built on (api-ui-events.txt). topline/botline/line_count describe the
+                // visible range and the buffer length, which is what a scrollbar thumb needs.
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 8) continue;
+                    int gv = ToInt(t[0]);
+                    if (!_mgrid.TryGetValue(gv, out var vg)) continue;   // no buffer for it yet
+                    vg.ViewTop = ToInt(t[2]);
+                    vg.ViewBot = ToInt(t[3]);
+                    vg.ViewCurLine = ToInt(t[4]);
+                    vg.ViewCurCol = ToInt(t[5]);
+                    vg.LineCount = ToInt(t[6]);
+                    vg.ScrollDelta = ToInt(t[7]);
+                    if (_diagEnabled)
+                        LogStartup($"WIN-VIEWPORT g={gv} top={vg.ViewTop} bot={vg.ViewBot} " +
+                                   $"cur={vg.ViewCurLine},{vg.ViewCurCol} lines={vg.LineCount} delta={vg.ScrollDelta}");
+                    // Animate whatever window scrolled, not just the focused one: the wheel scrolls the
+                    // window under the pointer, which may not hold the cursor.
+                    if (vg.ScrollDelta != 0) StartScrollAnim(gv, vg.ScrollDelta);
+                }
+                break;
+            case "win_viewport_margins":
+                // [grid, win, top, bottom, left, right] — the parts of the grid that are NOT the
+                // viewport ('winbar' rows, floating-window borders). The smooth-scroll overlay clips to
+                // the viewport, so those rows never slide.
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 6) continue;
+                    if (!_mgrid.TryGetValue(ToInt(t[0]), out var mg)) continue;
+                    mg.MarginTop = ToInt(t[2]);
+                    mg.MarginBottom = ToInt(t[3]);
+                    mg.MarginLeft = ToInt(t[4]);
+                    mg.MarginRight = ToInt(t[5]);
+                }
+                break;
             case "win_hide":
                 foreach (var tuple in a)
                 {
