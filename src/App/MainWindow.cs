@@ -66,6 +66,26 @@ public partial class MainWindow : Window
     private Color _defFg = Color.FromArgb(0xFF, 0xDC, 0xDC, 0xDC);
     private Color _defBg = Color.FromArgb(0xFF, 0x1E, 0x1E, 0x1E);
 
+    // Built-in highlight group name -> the attribute id its cells use (ui event hl_group_set). nvim
+    // sends the whole table on attach and re-sends a name when its definition changes. It is NOT
+    // needed for the grid — cells carry ids directly (api-ui-events.txt) — only for elements the app
+    // draws itself; see PreeditHlGroup.
+    private readonly Dictionary<string, int> _hlGroupIds = new();
+
+    // Which nvim built-in group styles the app-drawn IME preedit. Default `Normal`: nvim does not put
+    // Normal in the hl_group_set table at all (it is carried by default_colors_set), so the default
+    // resolves to nothing and the preedit keeps _defFg — the terminal convention of composition text in
+    // the normal foreground, i.e. today's look unchanged. Point it at a group that IS in the table
+    // (NVIM_WINUI_IMEPREEDIT_HL=Pmenu|IncSearch|Cursor|Visual) to take the preedit's colour from the
+    // colorscheme; measured here, IncSearch settled 19 -> 84 and resolved to fg 0xFFF6BBE7.
+    private static readonly string PreeditHlGroup = PreeditHlGroupFromEnv();
+
+    private static string PreeditHlGroupFromEnv()
+    {
+        string? g = Environment.GetEnvironmentVariable("NVIM_WINUI_IMEPREEDIT_HL");
+        return string.IsNullOrWhiteSpace(g) ? "Normal" : g.Trim();
+    }
+
     // Effective opaque background: nvim may report a transparent default bg (A=0). Clearing the
     // swap chain / painting the root with that would expose the black window base. Fall back to a
     // fixed dark color so the surface is always fully covered.

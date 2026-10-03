@@ -79,6 +79,7 @@ public partial class MainWindow
     private bool _imeComposing;                 // IME is mid-composition
     private string _imePreedit = "";            // current composition string (GCS_COMPSTR)
     private int _imePreeditCursor = -1;         // cursor inside the preedit (GCS_CURSORPOS), -1 unknown
+    private string _preeditStyleKey = "";       // DIAG: last logged preedit style, so PREEDIT-STYLE logs on change only
     // Set while an IME commit is in flight. DefWindowProc synthesizes a WM_CHAR echoing the
     // commit, so the NEXT WM_CHAR after any WM_IME_CHAR is that echo and must be consumed
     // rather than forwarded — otherwise the commit is sent twice.

@@ -823,6 +823,36 @@ public partial class MainWindow
                     _hlDefs[ToInt(t[0])] = ParseHl(t[1]);
                     ScheduleRender();
                 }
+                LogPreeditStyle("hl_attr_define");
+                break;
+            }
+            case "hl_group_set":
+            {
+                // ["hl_group_set", [name, hl_id]]. nvim publishes its BUILT-IN group table here (147
+                // entries on attach, measured on 0.12.5) and re-publishes a name when that group's
+                // definition changes. api-ui-events.txt is explicit that this is NOT needed to render
+                // the grid — cells carry attribute ids directly — it is what lets the app style the
+                // elements it DRAWS ITSELF (here the IME preedit) with nvim's own groups, so `:hi
+                // Pmenu guifg=…`, a `:hi link` on that name, and a colorscheme switch all reach them.
+                bool firstBatch = _hlGroupIds.Count == 0;
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 2) continue;
+                    string gname = t[0]?.ToString() ?? "";
+                    if (gname.Length == 0) continue;          // nvim sends ('', 0) for "no highlight"
+                    int gid = ToInt(t[1]);
+                    if (_hlGroupIds.TryGetValue(gname, out int prev) && prev == gid) continue;
+                    _hlGroupIds[gname] = gid;
+                    if (_diagEnabled) LogStartup($"HL-GROUPSET {gname}={gid}");
+                    // The group the preedit resolves through is logged outside DIAG: without it a
+                    // restyle of an app-drawn element is not observable in the field.
+                    if (gname == PreeditHlGroup)
+                        LogImportant($"HL-GROUPSET preedit {gname} -> hl id {gid}");
+                }
+                if (firstBatch && _hlGroupIds.Count > 0)
+                    LogImportant($"HL-GROUPSET table: {_hlGroupIds.Count} groups in the first batch " +
+                                 "(nvim publishes more as it settles)");
+                LogPreeditStyle("hl_group_set");
                 break;
             }
             case "default_colors_set":

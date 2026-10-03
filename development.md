@@ -190,10 +190,34 @@ to drive.
   menu, tabline and messages are deliberately NOT externalized (no `ext_cmdline` /
   `ext_popupmenu` / `ext_tabline` / `ext_messages`), so nvim draws them into the grid
   and they need no widget code.
-- **ui events handled**: the 15 grid/multigrid/highlight events (`grid_resize`,
+- **ui events handled**: the 16 grid/multigrid/highlight events (`grid_resize`,
   `grid_line`, `grid_clear`, `grid_scroll`, `grid_cursor_goto`, `grid_destroy`,
-  `hl_attr_define`, `default_colors_set`, `mode_change`, `mode_info_set`, `win_pos`,
-  `win_float_pos`, `win_hide`, `win_close`, `msg_set_pos`) plus `flush` and `option_set`.
+  `hl_attr_define`, `hl_group_set`, `default_colors_set`, `mode_change`, `mode_info_set`,
+  `win_pos`, `win_float_pos`, `win_hide`, `win_close`, `msg_set_pos`) plus `flush` and
+  `option_set`.
+- **`hl_group_set` is only for elements the app draws itself.** api-ui-events.txt is explicit
+  that it is *not* needed to render the grid — cells carry attribute ids directly — because
+  what it provides is the **name → attribute id** table for nvim's built-in groups (147
+  entries in a bare `-u NONE` session, and it is re-published per group as definitions
+  settle: `Pmenu=1 → 59 → 488 → 515` in one measured session). The app keeps it in
+  `_hlGroupIds` and resolves it through `HlOfGroup(name)` → `HlFg`, which is how the app's
+  own drawn element — the **IME preedit** (text, underline, caret) — follows the
+  colorscheme instead of a hardcoded foreground. `NVIM_WINUI_IMEPREEDIT_HL` picks the group
+  and defaults to `Normal`, which is the terminal convention and leaves today's look
+  unchanged; the resolved style is logged under DIAG:
+
+  ```
+  HL-GROUPSET preedit Pmenu -> hl id 515                     # after :hi Pmenu guifg=#ff0000 gui=italic
+  PREEDIT-STYLE hl=Pmenu id=515 fg=0xFFFF0000 italic=True bold=False (hl_group_set)
+  ```
+
+  **A `:hi link` shows up as the linked-to group's id**, which is the resolution this event
+  exists for: `PmenuKind` (nvim's own link to `Pmenu`) reports id 59 exactly like `Pmenu`
+  does, so `NVIM_WINUI_IMEPREEDIT_HL=PmenuKind` renders identically to `=Pmenu`. Note that
+  `:hi link` is refused (E414) for a group that already has settings, so link-based styling
+  only applies to groups nvim leaves unset. A name nvim maps to id 0, or one whose
+  attributes have not arrived, resolves to `null` and the preedit keeps `_defFg` — an unset
+  group can never blank an element.
 - **`grid_destroy` frees state that `win_close` does not** (measured on 0.12.5). nvim
   destroys the *message* grid at every startup and on reflow **carrying live placement
   state** and sends no `win_close`/`win_hide` for it:

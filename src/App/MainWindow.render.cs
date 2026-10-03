@@ -1556,6 +1556,34 @@ private Color? HlFg(Hl h) => !h.Reverse ? (h.FgSet ? h.Fg : null) : (h.BgSet ? h
 // not reversed (caller falls back to its default). Blend applies to the non-reversed path only —
 // a reverse group's fill is an opaque swap color; blending it would wash out the inversion.
 private Color? HlBg(Hl h) => !h.Reverse ? (h.BgSet ? BlendHlBg(h) : null) : (h.FgSet ? h.Fg : _defFg);
+
+// Attributes of a BUILT-IN highlight group, resolved by NAME: hl_group_set gives name -> id and
+// hl_attr_define gives id -> attributes. Null when nvim never mentioned the name or when it maps to
+// id 0 ("the default highlight with colors defined by default_colors_set", api-ui-events.txt) — so
+// every caller keeps its own default and an unset group can never blank an app-drawn element.
+private Hl? HlOfGroup(string name)
+{
+    if (!_hlGroupIds.TryGetValue(name, out int id) || id <= 0) return null;
+    return _hlDefs.TryGetValue(id, out var hl) ? hl : null;
+}
+
+// DIAG: report the style the app-drawn preedit resolves to. Called from the draw path (where it
+// matters) AND from the highlight handlers, so the whole resolution — group name -> hl_group_set id
+// -> hl_attr_define attributes -> colour — is observable without having to type a composition.
+// Logs on change only.
+private void LogPreeditStyle(string why)
+{
+    if (!_diagEnabled) return;
+    var st = HlOfGroup(PreeditHlGroup);
+    Color fg = (st is { } s ? HlFg(s) : null) ?? _defFg;
+    bool it = st?.Italic ?? false, bd = st?.Bold ?? false;
+    string key = $"{PreeditHlGroup}:{fg}:{it}:{bd}";
+    if (key == _preeditStyleKey) return;
+    _preeditStyleKey = key;
+    int id = _hlGroupIds.TryGetValue(PreeditHlGroup, out int pid) ? pid : -1;
+    LogStartup($"PREEDIT-STYLE hl={PreeditHlGroup} id={id} fg=0x{PackColor(fg):X8} " +
+               $"italic={it} bold={bd} ({why})");
+}
 // WinAppSDK 2.x's Windows.UI.Color has no PackedValue property, so pack ARGB from the
 // component fields ourselves for brush-cache keys.
 private static int PackColor(Color c) => (c.A << 24) | (c.R << 16) | (c.G << 8) | c.B;
@@ -1945,7 +1973,18 @@ private void OnClosed(object sender, object e)
         try
         {
             double rh = rowTop[cr + 1] - rowTop[cr];
-            var fg = GetW2dBrush(rc, _defFg);
+
+            // The preedit is drawn by the APP, so nvim cannot colour it: hl_group_set is what maps a
+            // group NAME to the attribute id nvim uses for it, which is how `:hi Pmenu guifg=…`, a link
+            // on that name, or a colorscheme switch reaches this text. Only the composition's own
+            // styling follows the group — each covered cell keeps its own background below, because the
+            // preedit replaces the cells it sits on rather than covering them with a panel.
+            var style = HlOfGroup(PreeditHlGroup);
+            Color preFg = (style is { } sh ? HlFg(sh) : null) ?? _defFg;
+            bool preItalic = style?.Italic ?? false;
+            bool preBold = style?.Bold ?? false;
+            if (_diagEnabled) LogPreeditStyle("draw");
+            var fg = GetW2dBrush(rc, preFg);
 
             // PER CHARACTER, with the glyph's own advance. The earlier version laid the whole
             // preedit out in the NARROW format, which draws a kana at half its true advance: the
@@ -1985,7 +2024,7 @@ private void OnClosed(object sender, object e)
                 }
                 ds.FillRectangle(new Windows.Foundation.Rect(x, rowTop[cr], adv, rh), GetW2dBrush(rc, bg));
 
-                var tf = Tf(wide, false, false);
+                var tf = Tf(wide, preItalic, preBold);
                 double lift = wide ? _liftWide : GlyphLiftN(ch);
                 float gy = (float)(rowTop[cr] + rh / 2 - lift);
                 ds.DrawText(ch, (float)x, gy, fg, tf);
