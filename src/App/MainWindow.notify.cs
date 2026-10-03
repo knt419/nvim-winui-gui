@@ -991,6 +991,9 @@ public partial class MainWindow
                     mg.MarginBottom = ToInt(t[3]);
                     mg.MarginLeft = ToInt(t[4]);
                     mg.MarginRight = ToInt(t[5]);
+                    if (_diagEnabled)
+                        LogStartup($"WIN-VIEWPORT-MARGINS g={ToInt(t[0])} top={mg.MarginTop} " +
+                                   $"bottom={mg.MarginBottom} left={mg.MarginLeft} right={mg.MarginRight}");
                 }
                 break;
             case "win_hide":

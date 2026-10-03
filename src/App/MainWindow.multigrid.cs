@@ -433,6 +433,73 @@ public partial class MainWindow
     // beyond that.
     private const int ScrollAnimMaxRows = 6;
 
+    // NVIM_WINUI_SCROLL_FREEZE (DIAG): hold every animation at this phase, 0..1, so a captured frame is
+    // reproducible — the app's own shot only fires on a render counter, so an unfrozen animation is
+    // caught at whatever phase the counter happened to land on (and the PNG write is asynchronous, which
+    // made the frames hard to trust). -1 (the default) leaves the animation alone.
+    private static readonly double ScrollAnimFreeze =
+        double.TryParse(Environment.GetEnvironmentVariable("NVIM_WINUI_SCROLL_FREEZE"), out var freeze)
+            && freeze >= 0 ? freeze : -1;
+
+    // The rows/cols the smooth-scroll overlay may paint: the window grid's rect minus the margins nvim
+    // reported as NOT part of the viewport ('winbar' rows, floating-window borders). Shared by the
+    // snapshot masking and the layer clip so the two can never disagree. Measured on this box, a window
+    // grid IS the text area — the tabline and statusline live in the outer frame (grid 1) — so this
+    // reduces to the plain grid rect unless nvim reports margins (it does for floats: 1 / 1 / 1 / 1).
+    private static bool MGridViewportRect(MGrid g, out int top, out int left, out int bot, out int right)
+    {
+        top = g.PosRow + g.MarginTop;
+        left = g.PosCol + g.MarginLeft;
+        bot = g.PosRow + g.Rows - g.MarginBottom;
+        right = g.PosCol + g.Cols - g.MarginRight;
+        return bot > top && right > left;
+    }
+
+    // Highlight id used for cells `MaskScrollRows` empties out. It must be *distinct* from -1 ("no
+    // highlight"): the renderer makes overlay cells opaque (see CellBgPainted) so the base pass cannot
+    // show through, but a masked cell has to stay transparent — that is what keeps the tabline,
+    // statusline and message planes visible while the text slides past them. -2 reads as "no highlight"
+    // everywhere else, since every lookup is guarded by `Hl >= 0`.
+    private const int MaskedHl = -2;
+
+    // Copy of a whole-screen composite in which only the rows the scrolling window owns survive: every
+    // other row is blanked, and a blank cell (`Text=" ", Hl=MaskedHl`) paints nothing at all. Two
+    // reasons this matters:
+    //   * the overlay's clip should not be the only thing keeping the tabline, statusline and message
+    //     planes out of the animation;
+    //   * a whole-screen composite also carries the planes drawn ON TOP of the scrolling window (nvim's
+    //     message grid via `msg_set_pos`, z=200). Sliding those rows draws them twice — once by the
+    //     overlay, once where the base pass put them — which is the after-image seen while scrolling
+    //     with a message on screen. Blanked rows instead stay exactly where the base pass drew them.
+    // Floats never get here: the caller skips those scrolls entirely.
+    private Cell[] MaskScrollRows(Cell[] src, MGrid g, int vTop, int vBot, out int outside, out int occluded)
+    {
+        var masked = new Cell[src.Length];
+        Array.Copy(src, masked, src.Length);
+        outside = occluded = 0;
+        for (int r = 0; r < _screenRows; r++)
+        {
+            bool inView = r >= vTop && r < vBot;
+            if (inView && ScrollRowMoves(g, r)) continue;
+            if (inView) occluded++; else outside++;
+            for (int c = 0; c < _screenCols; c++)
+                masked[r * _screenCols + c] = new Cell { Text = " ", Hl = MaskedHl };
+        }
+        return masked;
+    }
+
+    // Does screen row `r` belong to the scrolling window alone, i.e. is no plane above it drawn there?
+    private bool ScrollRowMoves(MGrid g, int r)
+    {
+        foreach (var o in _mgrid.Values)
+        {
+            if (ReferenceEquals(o, g) || !MGridHasContent(o)) continue;
+            if (!(o.ZIndex > g.ZIndex || o.IsMessageGrid || MGridIsOverlay(o))) continue;
+            if (r >= o.PosRow && r < o.PosRow + o.Rows) return false;
+        }
+        return true;
+    }
+
     private void StartScrollAnim(int id, int delta)
     {
         if (ScrollAnimMs <= 0 || delta == 0 || Math.Abs(delta) > ScrollAnimMaxRows) return;
@@ -444,8 +511,8 @@ public partial class MainWindow
         // With a float up the base pass is a blurred composite; sliding a sharp copy over it would
         // punch a hole in the blur, so those scrolls stay instant.
         if (_mgrid.Values.Any(o => MGridIsOverlay(o) && MGridHasContent(o))) return;
-        var snapshot = new Cell[buf.Length];
-        Array.Copy(buf, snapshot, buf.Length);
+        if (!MGridViewportRect(g, out int vTop, out _, out int vBot, out _)) return;
+        var snapshot = MaskScrollRows(buf, g, vTop, vBot, out int outside, out int occluded);
         lock (_scrollAnimLock)
         {
             _scrollAnimCells = snapshot;
@@ -464,7 +531,9 @@ public partial class MainWindow
                 }
             }, null, 16, 16);
         }
-        if (_diagEnabled) LogStartup($"SCROLL-ANIM start g={id} rows={delta} over {ScrollAnimMs:F0} ms");
+        if (_diagEnabled) LogStartup($"SCROLL-ANIM start g={id} rows={delta} over {ScrollAnimMs:F0} ms " +
+                                     $"(blanked {outside} row(s) outside the viewport, {occluded} under " +
+                                     $"a plane above it)");
     }
 
     // 0..1 progress of the running animation. Caller holds _scrollAnimLock.
@@ -473,6 +542,9 @@ public partial class MainWindow
         if (_scrollAnimMs <= 0) return 1.0;
         double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - _scrollAnimStartTicks) * 1000.0
                     / System.Diagnostics.Stopwatch.Frequency;
+        // DIAG: with NVIM_WINUI_SCROLL_FREEZE set the phase stops advancing, so every frame of the
+        // animation shows the same intermediate state and a capture can be checked reproducibly.
+        if (ScrollAnimFreeze >= 0) return ScrollAnimFreeze;
         return Math.Clamp(ms / _scrollAnimMs, 0.0, 1.0);
     }
 

@@ -595,33 +595,51 @@ private void DrawScrollAnimOverlay(Microsoft.Graphics.Canvas.CanvasDrawingSessio
             CancelScrollAnim();
             return;
         }
-        // The viewport is the grid rect minus the margins nvim reported as NOT part of it (winbar rows,
-        // floating-window borders): those rows must never slide.
-        int top = g.PosRow + g.MarginTop, left = g.PosCol + g.MarginLeft;
-        int bot = g.PosRow + g.Rows - g.MarginBottom, right = g.PosCol + g.Cols - g.MarginRight;
-        if (bot <= top || right <= left) return;
+        if (!MGridViewportRect(g, out int top, out int left, out int bot, out int right)) return;
         var viewport = new Windows.Foundation.Rect(left * _cellW, top * _cellH,
                                                    (right - left) * _cellW, (bot - top) * _cellH);
         // Ease out, so the motion decelerates into place instead of stopping dead. rows > 0 means the
         // topline advanced, i.e. the content slides UP — hence the negative sign.
         double eased = 1 - Math.Pow(1 - p, 3);
-        float dy = (float)(-rows * eased * _cellH);
-        // One line per animation: the fractional dy is the whole point (it is what makes the motion
-        // smooth rather than a jump), and the viewport numbers show the margins were applied.
+        double shiftRows = rows * eased;        // how far the pre-scroll content has already travelled
+        double remainRows = rows - shiftRows;   // how far the new content is still pulled back
+        // The frame the base pass just composed IS the settled (post-scroll) content, and pulling it back
+        // by the remaining distance puts every row at its interpolated position. Only the strip that
+        // leaves empty — the rows whose source lies outside the frame — needs the pre-scroll copy.
+        var fresh = MaskScrollRows(_activeRenderCells!, g, top, bot, out _, out _);
+        // One line per animation: the fractional offsets are the whole point (they are what makes the
+        // motion smooth rather than a jump), and the viewport numbers show the margins were applied.
         if (_diagEnabled && !_scrollAnimLogged)
         {
             _scrollAnimLogged = true;
-            LogStartup($"SCROLL-ANIM overlay p={p:F2} dy={dy:F2}px rows={rows} " +
+            LogStartup($"SCROLL-ANIM overlay anim p={p:F2}, shift={shiftRows:F2}, remain={remainRows:F2} rows, " +
                        $"viewport=({top},{left})-({bot},{right}) of grid {gridId}");
         }
         var savedActive = _activeRenderCells;
         try
         {
+            // Layer 1: the fresh frame pulled back by the remaining distance. Leaving this out is what
+            // produced the after-image: the rows the pre-scroll copy cannot reach kept showing the settled
+            // content, so the line at the seam appeared twice, a fraction of a row apart.
+            // The shift is applied INSIDE the render (rowTop + yOffset), never with ds.Transform: a
+            // transform is active while the clip layer draws, and a clip that moves with the content stops
+            // clipping — which slid the tabline and statusline along with the text. Both layers are masked
+            // first, so chrome stays put even if a clip ever fails.
             using (ds.CreateLayer(1f, viewport))
+                RenderCore(ds, rc, fresh, suppressCursor: true, overlayPass: true,
+                           yOffset: remainRows * _cellH);
+            // Layer 2: the strip layer 1 left blank holds the lines that scrolled OFF the window, which
+            // only the pre-scroll copy still has.
+            double stripPx = Math.Abs(remainRows) * _cellH;
+            if (stripPx > 0.5)
             {
-                ds.Transform = System.Numerics.Matrix3x2.CreateTranslation(0f, dy);
-                RenderCore(ds, rc, snap, suppressCursor: true, overlayPass: true);
-                ds.Transform = System.Numerics.Matrix3x2.Identity;
+                var strip = remainRows >= 0
+                    ? new Windows.Foundation.Rect(viewport.X, viewport.Y, viewport.Width, stripPx)
+                    : new Windows.Foundation.Rect(viewport.X, viewport.Y + viewport.Height - stripPx,
+                                                  viewport.Width, stripPx);
+                using (ds.CreateLayer(1f, strip))
+                    RenderCore(ds, rc, snap, suppressCursor: true, overlayPass: true,
+                               yOffset: -shiftRows * _cellH);
             }
         }
         finally { _activeRenderCells = savedActive; }   // the overlay must not become "what is displayed"
@@ -722,7 +740,7 @@ private void ResetParentOpacity()
 // cellsOverride: draw this exact buffer (base-only during the blur split) instead of compositing
 // fresh. blurLayerPass: marks the recursive render of the parent layer into the offscreen target
 // (skips DIAG one-shots and the overlay orchestration).
-    private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc, Cell[]? cellsOverride = null, bool blurLayerPass = false, bool suppressCursor = false, bool overlayPass = false)
+    private void RenderCore(Microsoft.Graphics.Canvas.CanvasDrawingSession ds, Microsoft.Graphics.Canvas.ICanvasResourceCreator rc, Cell[]? cellsOverride = null, bool blurLayerPass = false, bool suppressCursor = false, bool overlayPass = false, double yOffset = 0)
 {
     bool outer = cellsOverride is null && !blurLayerPass;
     try
@@ -769,7 +787,11 @@ private void ResetParentOpacity()
     // DPI probe failed (a zero divisor would produce NaN coordinates).
     double dpi = _dpiScale > 0 ? _dpiScale : 1.0;
     var rowTop = new double[rows + 1];
-    for (int r = 0; r <= rows; r++) rowTop[r] = Math.Round(r * _cellH * dpi) / dpi;
+    // yOffset is how the smooth-scroll overlay shifts its content: the whole frame is drawn at
+    // rowTop + yOffset. Every glyph, fill and decoration already derives its position from rowTop, so
+    // this is the only place a vertical shift has to be applied — and unlike ds.Transform it leaves the
+    // drawing session untransformed, which is what keeps a clip layer anchored to the viewport.
+    for (int r = 0; r <= rows; r++) rowTop[r] = Math.Round(r * _cellH * dpi) / dpi + yOffset;
     if (outer && _diagEnabled && Interlocked.Increment(ref _rowLogCount) % 50 == 1)
     {
         var sbr2 = new System.Text.StringBuilder();
@@ -985,10 +1007,10 @@ private void ResetParentOpacity()
             int c = 0;
             while (c < cols)
             {
-                Color bg = CellBg(r, c, curIdx);
+                Color bg = CellBgPainted(r, c, curIdx, overlayPass, cells);
                 if (bg == TransparentColor) { c++; continue; } // no fill: clear color shows through
                 int s = c;
-                do { c++; } while (c < cols && CellBg(r, c, curIdx) == bg);
+                do { c++; } while (c < cols && CellBgPainted(r, c, curIdx, overlayPass, cells) == bg);
                 curRuns.Add((s, c, bg));
             }
         }
@@ -1499,6 +1521,23 @@ private Microsoft.Graphics.Canvas.Brushes.ICanvasBrush GetW2dBrush(Microsoft.Gra
 private static Color UnpackPacked(int p) => Color.FromArgb((byte)(p >> 24), (byte)(p >> 16), (byte)(p >> 8), (byte)p);
 // Background color of one cell for Pass 1: inverted cursor block, highlight bg, or transparent.
 private Cell[]? _activeRenderCells; // set by RenderCore each frame (composited multigrid buffer)
+// Background actually painted for a cell. `CellBg` answers "what does this cell's highlight say?", and
+// that is TransparentColor for ordinary text — nvim sends foreground-only attributes unless the highlight
+// sets a background. The base pass is fine with that: it clears the canvas with _defBg first, so the
+// clear colour shows through. The smooth-scroll overlay is NOT fine with it: it draws on top of the base
+// pass, and a transparent cell would let the settled text underneath show through the shifted copy — the
+// whole text area then reads as doubled. So in the overlay pass a transparent cell is painted with the
+// default background instead. The exception is a cell `MaskScrollRows` emptied out (MaskedHl), which must
+// paint nothing at all: those rows are where the tabline, statusline or a message plane lives.
+private Color CellBgPainted(int r, int c, int curIdx, bool overlayPass, Cell[] cells)
+{
+    Color bg = CellBg(r, c, curIdx);
+    if (bg != TransparentColor || !overlayPass) return bg;
+    int idx = r * _screenCols + c;
+    if (idx >= 0 && idx < cells.Length && cells[idx].Hl == MaskedHl) return TransparentColor;
+    return _defBg;
+}
+
 private Color CellBg(int r, int c, int curIdx)
 {
     var buf = _activeRenderCells ?? _cells;

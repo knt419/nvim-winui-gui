@@ -202,19 +202,74 @@ to drive.
   smooth scrolling" (api-ui-events.txt). This app animates it without keeping per-grid
   snapshots: the frame is composited as usual, and while the animation runs
   `DrawScrollAnimOverlay` draws the **previous** composite a second time — clipped to the
-  window's viewport (`win_viewport_margins` supplies the non-viewport rows) and translated by
-  the remaining distance, so the old lines slide out while the vacated strip keeps the new
-  content from the base pass. `_activeRenderCells` already holds what was on screen before the
-  batch, which also satisfies the doc's ordering note ("all updates in a batch affect the new
-  viewport, despite `win_viewport` arriving after them"). Length is `NVIM_WINUI_SCROLL_MS`
-  (default 120 ms, `0` disables); deltas beyond 6 rows stay instant, and the animation is
-  skipped while a float overlay is up (the base pass is blurred then).
+  window's text area and shifted by the remaining distance, so the old lines slide out while the
+  vacated strip keeps the new content from the base pass. `_activeRenderCells` already holds what
+  was on screen before the batch, which also satisfies the doc's ordering note ("all updates in a
+  batch affect the new viewport, despite `win_viewport` arriving after them"). Length is
+  `NVIM_WINUI_SCROLL_MS` (default 120 ms, `0` disables); deltas beyond 6 rows stay instant, and
+  the animation is skipped while a float overlay is up (the base pass is blurred then).
 
-  Verified by correlating two frames the app captured at known phases of one scroll
-  (`FULL-SHOT ... (anim p=…)` logs the phase): the frame at `p=0.02` matches the settled frame
-  shifted by **85 px**, the eased prediction being 84.9 px = 2.82 rows of the 30.07 px cell —
-  a perfect correlation (mismatch 0.000) at a *fractional* row offset, which a stepped
-  implementation cannot produce (it would land on 30.07 px multiples).
+  **Only the buffer text may move, and only at interpolated positions.** The first implementation
+  translated the whole drawing session (`ds.Transform`) inside a clip layer, which slid the tabline
+  and statusline along with the buffer; then the motion still doubled a line near the window edge.
+  Three mechanisms bound the overlay now:
+  * the clip is the window's viewport rect — the grid rect minus the margins
+    `win_viewport_margins` reports as *not* part of it (`1/1/1/1` for a bordered float, `0` for a
+    window grid). Measured here a window grid *is* the text area: with `laststatus=3
+    showtabline=2` the buffer window is `row=1, 58x12` while the tabline occupies screen row 0
+    and the global statusline row 13, both outside it in the outer frame (grid 1);
+  * the shift is a **row offset inside the render** (`rowTop[r] = … + yOffset`), never
+    `ds.Transform`: a transform is active while the clip layer draws, and a clip that moves with
+    the content stops clipping. Every glyph, background and decoration takes its y from `rowTop`,
+    and the two places that read `_cellH` directly take a *difference* of two rows, so the offset
+    cancels in both;
+  * every buffer handed to the overlay goes through `MaskScrollRows`, which blanks each row the
+    scrolling window does not own (`Text = " ", Hl = -1` carries no highlight, so it paints no
+    background). That covers rows outside the viewport *and* rows a plane above the window draws
+    on — nvim's message grid (`msg_set_pos`, z=200) is the one that happens in practice, and
+    sliding its rows showed the message twice: once moved by the overlay and once where the base
+    pass had put it. `SCROLL-ANIM start … (blanked 2 row(s) outside the viewport, 3 under a plane
+    above it)` logs both counts. Floats never reach here — those scrolls skip the animation.
+
+  **The animation needs two layers, not one.** Drawn from the pre-scroll copy alone, the rows its
+  shift cannot reach (the strip at the trailing edge, its height growing with the phase) kept the
+  *settled* content, so the line at that seam appeared **twice**, a fraction of a row apart — the
+  after-image visible while scrolling. The current composite is exactly the settled content, so
+  pulling it back by the remaining distance puts every row at its interpolated position, and the
+  pre-scroll copy only has to fill the small strip that leaves empty:
+  `shiftRows = rows * ease`, `remainRows = rows - shiftRows`; layer 1 = the freshly composed frame
+  offset by `remainRows`, clipped to the viewport; layer 2 = the pre-scroll snapshot offset by
+  `-shiftRows`, clipped to the `|remainRows|`-tall strip at the trailing edge (top for a
+  downward scroll, bottom for an upward one). Both ends are then exact — at `p=0` the pair
+  reproduces the pre-scroll frame, at `p=1` the settled one — and every phase in between is the
+  interpolated view with no seam. `SCROLL-ANIM overlay anim p=…, shift=…, remain=… rows` logs it.
+
+  **The overlay's cells have to be opaque.** nvim sends foreground-only attributes for ordinary text, so
+  `CellBg` answers TransparentColor for it and the base pass just lets the clear colour show through —
+  harmless there, but the overlay draws *on top of* the base pass, so a transparent cell left the
+  *settled* text visible underneath the *shifted* copy and the whole text area read as doubled (the
+  reported "テキスト領域全体" doubling, not the edge strip). `CellBgPainted` therefore paints a transparent
+  overlay cell with `_defBg`, except the rows `MaskScrollRows` emptied, which carry `MaskedHl = -2` and
+  must paint nothing at all so the tabline, statusline and message planes stay visible underneath —
+  hence the marker is distinct from -1 ("no highlight"), which real cells use.
+
+  Verified as far as the capture harness allows. (1) The capture that showed the bug: a pre-fix frame
+  taken while scrolling (the app's own shot, phase logged) had the dashboard's plugin-status line
+  drawn **twice**, "another instance directly below it, slightly offset" — the seam described above,
+  at the trailing edge exactly as the geometry predicts.
+  (2) After the change, frames from **one** scroll (`FULL-SHOT … (anim p=…)` logs the phase, so both
+  frames hold the same buffer content, only shifted) correlate at a *sub-row* offset: the frame at
+  `p=0.01` matches the frame at `p=1.00` shifted by **84 px** against an eased prediction of
+  87.5 px = 2.91 rows of the 30.07 px cell, mismatch 0.000, and 27 px away from any whole-row
+  multiple — a stepped implementation cannot land there. (3) Chrome rows are byte-identical between
+  those two frames (0.0% changed on row 0, the tabline). (4) The doubling is measured, not eyeballed:
+  with the phase frozen (`NVIM_WINUI_SCROLL_FREEZE=0.23`, `remain = 1.37` rows = 41 px here) a
+  screen capture of a real source file was scored for how often a pixel's colour repeats *d* px below
+  it. Before the transparency fix the rate peaked exactly at the predicted offset — d=41 px scored
+  0.533 against a 0.368 median (1.45×) — and after it the profile is flat (0.312 against 0.321,
+  0.97×). (5) `NVIM_WINUI_SCROLL_FREEZE` exists to make a mid-animation frame reproducible for exactly
+  this kind of check — the shot only fires every 30th render and its PNG write is asynchronous, so an
+  unfrozen capture lands on an arbitrary phase.
 - **`hl_group_set` is only for elements the app draws itself.** api-ui-events.txt is explicit
   that it is *not* needed to render the grid — cells carry attribute ids directly — because
   what it provides is the **name → attribute id** table for nvim's built-in groups (147
