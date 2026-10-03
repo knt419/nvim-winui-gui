@@ -944,6 +944,27 @@ public partial class MainWindow
                     ScheduleRender();
                 }
                 break;
+            case "grid_destroy":
+                // ["grid_destroy", [grid]]. Sent for good when nvim frees a per-window/message grid;
+                // it is the only event that lets the placement state go (see MGridDestroy). The buffer
+                // count is logged because id reuse makes "did the state actually go away" invisible
+                // from the screen alone.
+                foreach (var tuple in a)
+                {
+                    if (tuple is not object?[] t || t.Length < 1) continue;
+                    int gd = ToInt(t[0]);
+                    // Record what was still held for this grid: WIN-CLOSE usually runs first and drops
+                    // the entry, so "no live buffer" means grid_destroy had nothing left to free there,
+                    // while a parked grid (pos=2147483647) or a message grid is exactly the state that
+                    // only this event clears.
+                    string state = _mgrid.TryGetValue(gd, out var dying)
+                        ? $"pos={dying.PosRow} z={dying.ZIndex} msg={dying.IsMessageGrid} focus={dying.Focusable}"
+                        : "no live buffer";
+                    MGridDestroy(gd);
+                    LogImportant($"GRID-DESTROY g={gd} [{state}] (grid buffers now {_mgrid.Count})");
+                    ScheduleRender();
+                }
+                break;
         }
     }
 }

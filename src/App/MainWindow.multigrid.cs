@@ -358,6 +358,43 @@ public partial class MainWindow
     private void MWinHide(int id) { if (_mgrid.TryGetValue(id, out var g)) g.PosRow = int.MaxValue; }
     private void MWinClose(int id) { _mgrid.Remove(id); }
 
+    // grid_destroy [grid_id] — the grid is gone for good, so release its cell buffer AND its placement
+    // state. win_close only drops the entry and win_hide only parks it off-screen, and nvim REUSES
+    // grid ids: the next window to receive this id would otherwise inherit whatever was left behind
+    // (a hidden PosRow=int.MaxValue, or a float's ZIndex/Focusable/IsMessageGrid) and be composited in
+    // the wrong layer — a stale float zindex keeps the parent blurred, a stale IsMessageGrid keeps a
+    // ghost message surface drawn after nvim cleared it. Only grid 1 is exempt: it is the outer frame
+    // and has no per-grid buffer here. Grid 0 is NOT exempt — nvim emits msg_set_pos for grid 0 in
+    // practice, so it is tracked like any other and must be releasable.
+    private void MGridDestroy(int id)
+    {
+        if (id == 1) return;
+        // If the cursor sits on the dying grid (a float that closes while focused), keep its current
+        // OUTER-frame cell first: after the entry is gone MGridResolveCursor falls back to treating
+        // the grid-LOCAL row/col as outer coordinates, which visibly jumps the cursor. nvim sends a
+        // fresh grid_cursor_goto for the surviving grid in the same batch, so this covers at most one
+        // frame.
+        int fallbackRow = -1, fallbackCol = -1;
+        bool cursorWasHere = _curGridId == id;
+        if (cursorWasHere && MGridResolveCursor(id, _curLocalRow, _curLocalCol, out int r, out int c))
+        {
+            fallbackRow = r;
+            fallbackCol = c;
+        }
+        _mgrid.Remove(id);
+        // Only reposition the cursor when the outer cell could actually be resolved (the entry still
+        // existed). When nvim's win_close already dropped it — the common ordering — there is nothing
+        // to preserve, and touching _curLocalRow/Col would park the cursor off-screen; leaving it
+        // alone keeps the previous behaviour, and nvim's next grid_cursor_goto takes over either way.
+        if (cursorWasHere && fallbackRow >= 0 && fallbackCol >= 0)
+        {
+            LogImportant($"GRID-DESTROY g={id} cursor was on it -> outer ({fallbackRow},{fallbackCol})");
+            _curGridId = 1;                 // grid 1's coordinates ARE outer-frame coordinates
+            _curLocalRow = fallbackRow;
+            _curLocalCol = fallbackCol;
+        }
+    }
+
     // Build the frame to draw: outer-frame (grid 1) content + all window grids composited on top,
     // into a scratch buffer so _cells stays clean. Window grids fully cover their region (blanks
     // included), which is correct in multigrid — each grid is an independent surface placed by

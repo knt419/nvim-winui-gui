@@ -190,10 +190,29 @@ to drive.
   menu, tabline and messages are deliberately NOT externalized (no `ext_cmdline` /
   `ext_popupmenu` / `ext_tabline` / `ext_messages`), so nvim draws them into the grid
   and they need no widget code.
-- **ui events handled**: the 14 grid/multigrid/highlight events (`grid_resize`,
-  `grid_line`, `grid_clear`, `grid_scroll`, `grid_cursor_goto`, `hl_attr_define`,
-  `default_colors_set`, `mode_change`, `mode_info_set`, `win_pos`, `win_float_pos`,
-  `win_hide`, `win_close`, `msg_set_pos`) plus `flush` and `option_set`.
+- **ui events handled**: the 15 grid/multigrid/highlight events (`grid_resize`,
+  `grid_line`, `grid_clear`, `grid_scroll`, `grid_cursor_goto`, `grid_destroy`,
+  `hl_attr_define`, `default_colors_set`, `mode_change`, `mode_info_set`, `win_pos`,
+  `win_float_pos`, `win_hide`, `win_close`, `msg_set_pos`) plus `flush` and `option_set`.
+- **`grid_destroy` frees state that `win_close` does not** (measured on 0.12.5). nvim
+  destroys the *message* grid at every startup and on reflow **carrying live placement
+  state** and sends no `win_close`/`win_hide` for it:
+
+  ```
+  MSG-POS g=3 row=24 z=200
+  GRID-DESTROY g=3 [pos=24 z=200 msg=True focus=False] (grid buffers now 2)
+  ```
+
+  Cleanup keyed only on `win_close` therefore left that entry in `_mgrid`, and the render
+  composited a ghost message surface over the bottom rows for the rest of the session.
+  `MGridDestroy` drops the cell buffer **and** the placement state
+  (`PosRow`/`ZIndex`/`Focusable`/`IsMessageGrid`), because grid ids are reused and a stale
+  zindex or message flag would put a later window in the wrong layer. Only grid 1 (the outer
+  frame, which has no per-grid buffer here) is exempt — grid **0** is tracked for real
+  (`msg_set_pos` for grid 0 arrives from nvim), so an `id <= 1` guard would silently skip
+  releasing it. The handler logs the state it released: the ordinary split/float/tab
+  destroys report `[no live buffer]` because `win_close` ran first, which is exactly why the
+  message-grid case is invisible without that field.
 - **flush-gated rendering**: nvim may send several `redraw` batches before the screen is
   consistent and marks only the last with `flush` (api-ui-events.txt), so
   `HandleNotification` paints on flush rather than after every batch. A 250 ms watchdog
