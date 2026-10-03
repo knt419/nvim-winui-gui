@@ -77,6 +77,14 @@ public partial class MainWindow
     private IntPtr _imePrevProc;                // original RichEdit window proc (for chaining)
     private bool _imeAttachTried;               // never retry: a failed attach would leak HWNDs
     private bool _imeComposing;                 // IME is mid-composition
+    // DIAG: render-only test for the inline preedit. A real composition can only be produced by a real
+    // IME session, which a script cannot drive, so NVIM_WINUI_IMEPREEDIT_TEST=<text> draws that text as
+    // the composition everywhere the preedit appears — enough to check the drawing (position, layer,
+    // colours). Input handling keys off _imeComposing, never this, so typing is unaffected.
+    private static readonly string ImePreeditTestText =
+        Environment.GetEnvironmentVariable("NVIM_WINUI_IMEPREEDIT_TEST") ?? "";
+    private bool ImePreeditActive() => _imeComposing || ImePreeditTestText.Length > 0;
+    private string ImePreeditDrawText() => ImePreeditTestText.Length > 0 ? ImePreeditTestText : _imePreedit;
     private string _imePreedit = "";            // current composition string (GCS_COMPSTR)
     private int _imePreeditCursor = -1;         // cursor inside the preedit (GCS_CURSORPOS), -1 unknown
     private string _preeditStyleKey = "";       // DIAG: last logged preedit style, so PREEDIT-STYLE logs on change only

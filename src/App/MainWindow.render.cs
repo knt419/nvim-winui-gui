@@ -1215,8 +1215,9 @@ private void ResetParentOpacity()
     // own font at the exact cursor cell — the feature the hidden EDIT target could not do (it
     // showed the IME's own floating composition window instead). Drawn after the cursor so it
     // sits on top, like Windows composition UI does.
-    if (outer && ImeIsComposing())
-        DrawImePreedit(ds, rc, curIdx, cols, rowTop, colLeft);
+    if (outer && ImePreeditActive())
+        DrawImePreedit(ds, rc, curRow, Math.Clamp(curCol, 0, cols - 1), rowTop, colLeft,
+                       _activeRenderCells ?? _cells, cols, curRow, Math.Clamp(curCol, 0, cols - 1));
 
     double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
     _renderMsTotal += ms; int rcc = Interlocked.Increment(ref _renderCount);
@@ -1499,10 +1500,30 @@ private void RenderOverlayLayer(Microsoft.Graphics.Canvas.CanvasDrawingSession d
                     else if (_cursorShape == "horizontal")
                         ds.FillRectangle(new Windows.Foundation.Rect(colLeft[cc], rowTop[cr] + rh - Math.Max(1f, (float)rh * _cursorCellPct / 100f), (float)_cellW, Math.Max(1f, (float)rh * _cursorCellPct / 100f)), GetW2dBrush(rc, _defFg));
                 }
+                // IME composition inside a floating window. The base pass draws the preedit too, but with
+                // a float up that pass is the BLURRED parent layer — and it suppresses the preedit along
+                // with the cursor — so a composition typed in a float showed nothing at all. Draw it here
+                // instead, in the sharp layer, at the float's own cursor cell and with the float's own
+                // cell backgrounds (those cells are not in the screen composite), on top of the cursor
+                // exactly like the base pass does.
+                if (ImePreeditActive())
+                {
+                    DrawImePreedit(ds, rc, cr, cc, rowTop, colLeft, cg.Cells, cg.Cols, lr, lc);
+                    if (_diagEnabled && _preeditSharpKey != (cr * 1024 + cc))
+                    {
+                        _preeditSharpKey = cr * 1024 + cc;
+                        LogStartup($"PREEDIT-SHARP grid={cg.Id} screen=({cr},{cc}) local=({lr},{lc}) " +
+                                   $"cols={cg.Cols} text='{ImePreeditDrawText()}'");
+                    }
+                }
             }
         }
     }
 }
+
+// DIAG: last cursor cell the sharp-layer preedit was logged for, so the line appears on position change
+// instead of on every frame.
+private int _preeditSharpKey = int.MinValue;
 
 // Win2D brushes cached by packed ARGB. Must be created inside a Draw/CreateResources handler
 // (they need the canvas's device), so this is only called from OnGlyphCanvasDraw / RenderCore.
@@ -2080,13 +2101,18 @@ private void OnClosed(object sender, object e)
     // the standard composition underline, and a caret at GCS_CURSORPOS when known. Width is the
     // measured layout width, so wide (kana/kanji) preedit extends past one cell naturally —
     // exactly like every other inline-preedit client (Windows Terminal, neovide).
+    //
+    // `curRow`/`curCol` are SCREEN coordinates — the cursor resolves to screen space even inside a float
+    // (MGridResolveCursor) — while `buf`/`bufCols`/`bufRow`/`bufCol` say where the cell backgrounds being
+    // filled come from: the flat screen composite for the base pass, or the floating grid's OWN cells when
+    // the composition is typed in a float, which are not part of that composite.
     private void DrawImePreedit(Microsoft.Graphics.Canvas.CanvasDrawingSession ds,
-        Microsoft.Graphics.Canvas.ICanvasResourceCreator rc, int curIdx, int cols,
-        double[] rowTop, double[] colLeft)
+        Microsoft.Graphics.Canvas.ICanvasResourceCreator rc, int curRow, int curCol,
+        double[] rowTop, double[] colLeft, Cell[] buf, int bufCols, int bufRow, int bufCol)
     {
-        string pre = _imePreedit;
-        if (curIdx < 0 || pre.Length == 0) return;
-        int cr = curIdx / cols, cc = curIdx % cols;
+        string pre = ImePreeditDrawText();
+        if (curRow < 0 || curCol < 0 || pre.Length == 0 || bufCols <= 0) return;
+        int cr = curRow, cc = curCol;
         if (cr + 1 >= rowTop.Length || cc >= colLeft.Length) return;
         try
         {
@@ -2113,7 +2139,6 @@ private void OnClosed(object sender, object e)
             double xStart = x;
             double caretX = -1;
             double maxRight = colLeft[colLeft.Length - 1] + _cellW;   // never run off the canvas
-            var buf = _activeRenderCells ?? _cells;                   // same buffer the cursor uses
 
             for (int i = 0; i < pre.Length; i++)
             {
@@ -2129,9 +2154,10 @@ private void OnClosed(object sender, object e)
                 // first, then draw the glyph. Per cell (not one rect) so a mixed-background row, e.g.
                 // a CursorLine or a coloured band, keeps its exact colours.
                 int col2 = cc + (int)Math.Round((x - xStart) / _cellW);
-                int idx = cr * _screenCols + col2;
+                int localCol = bufCol + (col2 - cc);                       // same cell, in the buffer's space
+                int idx = bufRow * bufCols + localCol;
                 Color bg = _defBg;
-                if (col2 < colLeft.Length && idx >= 0 && idx < buf.Length)
+                if (col2 < colLeft.Length && localCol >= 0 && localCol < bufCols && idx >= 0 && idx < buf.Length)
                 {
                     var cell = buf[idx];
                     if (cell.Hl >= 0 && _hlDefs.TryGetValue(cell.Hl, out var cellHl))

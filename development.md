@@ -165,6 +165,21 @@ cursor so it sits on top. Three rules came out of using it:
 - **An empty result still clears.** Backspacing the last preedit character ends the composition with
   *no text*, so the clear must not be conditional on a non-empty commit, or the last preedit stays on
   screen forever.
+- **Inside a floating window it is drawn by the SHARP layer.** With a float up the base pass *is* the
+  blurred parent layer and suppresses the preedit along with the cursor, so a composition typed into a
+  float (a telescope prompt, an LSP rename, a floating cmdline) showed nothing at all. `RenderCore`
+  therefore draws it again in the sharp layer, right after that layer's cursor block and at the same
+  cursor cell. `DrawImePreedit` takes the buffer its cell backgrounds come from as an argument — the
+  flat screen composite in the base pass, the floating grid's own cells here, since a float's cells are
+  not part of that composite — plus the cursor's screen row/col, which `MGridResolveCursor` already
+  resolves even inside a float. (With `NVIM_WINUI_FLOAT_BLUR=0` the float is composited in the base
+  pass, so the base-pass call draws it and the sharp path does not run.)
+
+  Verified with `NVIM_WINUI_IMEPREEDIT_TEST`, which paints a synthetic composition because a script
+  cannot drive a real TSF session: inside a bordered float the string appeared at the float's cursor
+  cell, crisp with the composition underline while the parent stayed blurred
+  (`PREEDIT-SHARP grid=9 screen=(5,11) local=(2,5) cols=36 text='aiあい'`), and with the float closed it
+  appeared at the normal cursor in the base pass, unblurred — no regression on the ordinary path.
 
 ### Verification status
 
