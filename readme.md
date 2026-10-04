@@ -93,6 +93,11 @@ A dot in front of a row's name means an environment variable is set for it, and 
 variable **wins over the file**: the panel still stores your value, but it cannot take
 effect until the variable is gone.
 
+The panel is drawn in the font nvim reported — `guifont`'s family at `guifont`'s size, the
+same font the grid uses — so `:set guifont=…` changes the panel live (and the row heights,
+value boxes and arrows scale with it). The gear button is the Nerd Font glyph `U+F423`,
+drawn from that same family: any Nerd Font has it, a family without it shows a box instead.
+
 ## Environment variables
 
 Every variable below is also editable from the settings panel above.

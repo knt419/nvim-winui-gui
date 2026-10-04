@@ -388,11 +388,25 @@ self-test) hold the feature; both are in the csproj's explicit `<Compile Include
   early-return left the window translucent once the value walked back up. `NVIM_WINUI_STATUSBAR` and
   the nvim path/args stay restart-only (the row says `(restart)`), and `NvimClient.DiagEnabled` was
   made settable so the log toggle also reaches the RPC trace in NvimCore.
+- **Font.** The panel's format is derived from the grid's font state — `BaseFamily(_narrowFont)` at
+  `_narrowSize` — keyed on `"<family>@<size>"`, so `option_set guifont` → `RefreshGuifontAsync` →
+  the next draw rebuilds it (a 10 DIP floor keeps a small font legible). Row heights, the value box
+  and the arrows scale from the measured natural line height, and long texts are truncated to the
+  panel width.
+  **Only the FIRST family may be passed to DirectWrite**: a comma-separated list is treated as one
+  family name, matches nothing, and falls back to a default font. Measured in one capture:
+  `"JetBrainsMono NFM"` draws the Nerd Font's gear, `"JetBrainsMono NFM, Cascadia Mono, …"` draws a
+  tofu box. That is the rule the grid's `MakeTf` already documents, and it is what makes the gear
+  render — the button is the glyph **U+F423** (`oct-gear` in Nerd Fonts; verified as `oct-gear` in
+  the installed JetBrainsMono NF and in the user's OperatorMono Nerd Font), drawn centred in the
+  caption strip with `GearTf()` (size tracks guifont but is capped by the strip height).
 - **Verification switch** `NVIM_WINUI_SETTINGS_TEST=1` (env var or settings.json): 1.5 s after load
   the app drives the gear-click path in-process, steps rows, writes/parses `settings.json`, reads the
   layered alpha back with `GetLayeredWindowAttributes`, clicks a row's arrow zone, walks the keyboard
-  path, saves `settings-nogear.png` / `settings-gear.png` / `settings-shot.png`, and restores
-  `settings.json` byte-identical. It exists because synthetic MOUSE input cannot be delivered from an
+  path, changes `guifont` live and captures the result, saves `settings-nogear.png` /
+  `settings-gear.png` / `settings-shot.png` / `settings-gear-nerd.png` / `settings-shot-small.png` /
+  `settings-glyph.png` (the glyph at 3x, for judging its shape), and restores `settings.json`
+  byte-identical. It exists because synthetic MOUSE input cannot be delivered from an
   agent session on this box.
 
 ## Window sizing
@@ -526,6 +540,13 @@ reference `rpc-test`, so building the solution builds it too. Their `bin/`, `obj
   to no layered style at 1.00; `settings.json` was written, re-parsed and (in the test) restored
   byte-identical; a click on a row's arrow zone and the `<Down>`/`<Right>` key notation both changed
   the selected row. 0 errors, warning count unchanged from the pre-change baseline.
+- Settings panel font/glyph verified on 2026-10-04: with `guifont=JetBrainsMono NFM:h12` set live over
+  RPC (the `option_set` path) the panel font became family `JetBrainsMono NFM` at 16.00 DIP with a
+  measured natural line height of 22.0 (from 18.67 DIP / 22.0 before, and back after restoring), and
+  the gear glyph captured at 3x is a cog — 8 teeth plus a central hole — while the same capture's
+  comma-separated-family variant is a hollow rectangle. `U+F423` was confirmed as glyph `oct-gear` in
+  the installed JetBrainsMono NF *and* in the family the app's own `guifont` names (OperatorMono Nerd
+  Font). Reading the font back with `nvim_get_option_value` also proved the value round-trips.
 - IME verified in the app on 2026-10-03 on the TSF path: `nihongo` composes with the preedit drawn
   inline at the cursor and commits to nvim as `にほんご`; the IME is attached only in
   insert/replace/cmdline modes and detached — live composition terminated — everywhere else; typing

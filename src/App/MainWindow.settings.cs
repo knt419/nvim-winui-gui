@@ -36,6 +36,9 @@ public partial class MainWindow
     private Rect _settingsPanelRect;
     private readonly List<(Rect Rect, string Key, int Zone)> _settingsHit = new();
     private CanvasTextFormat? _tfPanel;
+    private string _tfPanelKey = "";            // "<family>@<size>" the panel format was built for
+    private CanvasTextFormat? _tfGear;
+    private string _tfGearKey = "";
     private double _settingsNatH = -1;          // natural line height of the panel font (cached)
 
     private static string BaseFamily(string chain)
@@ -50,24 +53,101 @@ public partial class MainWindow
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool GetLayeredWindowAttributes(IntPtr hwnd, out int crKey, out byte bAlpha, out uint dwFlags);
 
+    // ---- Font: everything in the panel follows guifont ------------------------------------------
+    // The panel is drawn in the font nvim reported — the guifont family at the guifont size, the same
+    // pair the grid uses, instead of a fixed 13 DIP.
+    // Keyed on "<family>@<size>": RefreshGuifontAsync / option_set move _narrowFont/_narrowSize, and
+    // the next draw rebuilds these formats, so a live `:set guifont=…` reaches the panel as well. The
+    // floor only exists so a config asking for a very small font stays legible.
+    private const double PanelMinFontSize = 10.0;
+    private double PanelFontSize => Math.Max(PanelMinFontSize, _narrowSize);
+    // FIRST family only — same rule as the grid's MakeTf: DirectWrite takes a single family name and
+    // does NOT accept a comma list (it treats the whole string as one name, finds nothing and falls
+    // back to a default font). Measured on this box: "JetBrainsMono NFM" alone draws the Nerd Font's
+    // U+F423 gear, while the comma chain "JetBrainsMono NFM, Cascadia Mono, …" draws a tofu box.
+    // Everything the primary family lacks (CJK, symbols) is covered by DirectWrite's own automatic
+    // fallback, which is the same mechanism the grid relies on.
+    private string PanelFamily => BaseFamily(_narrowFont);
+
     private CanvasTextFormat PanelTf()
     {
-        if (_tfPanel == null)
+        string key = PanelFamily + "@" + PanelFontSize;
+        if (_tfPanel == null || _tfPanelKey != key)
+        {
             _tfPanel = new CanvasTextFormat
             {
-                // Base family only: the grid's chain string is a DirectWrite *fallback list* and is
-                // not meant for a text format (the grid builds its own layouts).
-                FontFamily = BaseFamily(_narrowFont),
-                FontSize = 13,
+                FontFamily = PanelFamily,
+                FontSize = (float)PanelFontSize,
                 WordWrapping = CanvasWordWrapping.NoWrap,
             };
+            _tfPanelKey = key;
+            _settingsNatH = -1;   // the cached line height belongs to the previous font
+        }
         return _tfPanel;
     }
 
+    // Measured natural line height of the panel font, keyed on "<family>@<size>" so a font change
+    // invalidates it here too — not only inside PanelTf (a caller may ask for the height before any
+    // draw has rebuilt the format).
+    private string _natHKey = "";
     private double PanelLineH()
     {
-        if (_settingsNatH < 0) _settingsNatH = MeasureNatLineH(BaseFamily(_narrowFont), 13);
+        string key = PanelFamily + "@" + PanelFontSize;
+        if (_settingsNatH < 0 || _natHKey != key)
+        {
+            _settingsNatH = MeasureNatLineH(PanelFamily, PanelFontSize);
+            _natHKey = key;
+        }
         return _settingsNatH;
+    }
+
+    // Rough monospace advance of the panel font. Used only to keep text inside the panel and to space
+    // the title's two parts apart — the font is monospace, so one width per character is enough.
+    private double PanelTextW(string text) => text.Length * PanelFontSize * 0.55;
+
+    // Truncate to a pixel budget with an ellipsis (a long nvim path must not run under the value box).
+    private string Fit(string text, double widthPx)
+    {
+        double maxChars = Math.Max(4.0, widthPx / (PanelFontSize * 0.55));
+        return text.Length <= maxChars ? text : text.Substring(0, (int)maxChars - 1) + "\u2026";
+    }
+
+    // The settings glyph: U+F423, the Nerd Font (Octicons) gear — the character this button was asked
+    // for. Drawn from the guifont chain, so it appears in whatever Nerd Font the user runs; the chain's
+    // fallbacks still apply if the primary family lacks it. Size tracks guifont but is capped by the
+    // caption strip, which is a fixed OS metric rather than a font metric.
+    private const string GearGlyph = "\uF423";
+    private double GearFontSize => Math.Clamp(Math.Min(CaptionStripHeight() * 0.55, PanelFontSize), 9.0, 26.0);
+
+    // Centre-aligned: DrawText with a Rect honours both alignments, which is what centres the glyph.
+    private CanvasTextFormat GearTf()
+    {
+        string key = PanelFamily + "@" + GearFontSize;
+        if (_tfGear == null || _tfGearKey != key)
+        {
+            _tfGear = new CanvasTextFormat
+            {
+                FontFamily = PanelFamily,
+                FontSize = (float)GearFontSize,
+                WordWrapping = CanvasWordWrapping.NoWrap,
+                HorizontalAlignment = CanvasHorizontalAlignment.Center,
+                VerticalAlignment = CanvasVerticalAlignment.Center,
+            };
+            _tfGearKey = key;
+        }
+        return _tfGear;
+    }
+
+    // Caption strip height: a fixed OS metric (32 DIP by default), NOT a font metric.
+    private double CaptionStripHeight()
+    {
+        try
+        {
+            var tb = AppWindow.TitleBar;
+            if (tb != null && tb.Height > 0) return tb.Height;
+        }
+        catch { }
+        return 32.0;
     }
 
     // Fg/bg blend used for every panel colour, so the panel follows whatever theme nvim reported
@@ -117,16 +197,12 @@ public partial class MainWindow
     // frame is still hit-tested against the real strip.
     private void UpdateSettingsGeometry()
     {
-        double stripH = 32;
+        double stripH = CaptionStripHeight();
         double rightInset = 0;
         try
         {
             var tb = AppWindow.TitleBar;
-            if (tb != null)
-            {
-                if (tb.Height > 0) stripH = tb.Height;
-                if (tb.RightInset > 0) rightInset = tb.RightInset;
-            }
+            if (tb != null && tb.RightInset > 0) rightInset = tb.RightInset;
         }
         catch { /* TitleBar unavailable: fall back to the default strip */ }
 
@@ -219,38 +295,16 @@ public partial class MainWindow
         DrawSettingsPanel(ds, rc);
     }
 
-    private static Vector2 Rot(double cx, double cy, double ca, double sa, double x, double y)
-        => new Vector2((float)(cx + x * ca - y * sa), (float)(cy + x * sa + y * ca));
-
-    // A gear: a ring (two circles combined with Exclude = the hole) plus 8 teeth. Vector, not a font
-    // glyph — no dependency on an icon font being installed.
+    // The settings button: the U+F423 gear glyph, drawn from the same font as the grid (see GearTf),
+    // centred in the caption strip immediately left of the system caption buttons.
     private void DrawSettingsButton(CanvasDrawingSession ds, ICanvasResourceCreator rc)
     {
         var r = _settingsBtnRect;
         if (r.Width <= 1 || r.Height <= 1) return;
         bool hot = _settingsHoverBtn || _settingsOpen;
         if (hot) ds.FillRoundedRectangle(r, 4, 4, Mix(EffBg(), _defFg, 0.18));
-        Color ink = Mix(_defFg, EffBg(), hot ? 0.0 : 0.22);   // dim when idle, but still discoverable
-        double cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
-        double R = Math.Min(r.Width, r.Height) * 0.30;
-        double hole = R * 0.46, toothLen = R * 0.42, toothW = R * 0.34;
-        for (int i = 0; i < 8; i++)
-        {
-            double a = i * Math.PI / 4, ca = Math.Cos(a), sa = Math.Sin(a);
-            double y0 = -R - toothLen, y1 = -R + R * 0.35, x0 = -toothW / 2, x1 = toothW / 2;
-            var pb = new CanvasPathBuilder(rc);
-            pb.BeginFigure(Rot(cx, cy, ca, sa, x0, y0));
-            pb.AddLine(Rot(cx, cy, ca, sa, x1, y0));
-            pb.AddLine(Rot(cx, cy, ca, sa, x1, y1));
-            pb.AddLine(Rot(cx, cy, ca, sa, x0, y1));
-            pb.EndFigure(CanvasFigureLoop.Closed);
-            using var tooth = CanvasGeometry.CreatePath(pb);
-            ds.FillGeometry(tooth, ink);
-        }
-        using (var outer = CanvasGeometry.CreateCircle(rc, (float)cx, (float)cy, (float)R))
-        using (var inner = CanvasGeometry.CreateCircle(rc, (float)cx, (float)cy, (float)hole))
-        using (var ring = outer.CombineWith(inner, Matrix3x2.Identity, CanvasGeometryCombine.Exclude))
-            ds.FillGeometry(ring, ink);
+        // Dim while idle, full theme foreground when hovered or open.
+        ds.DrawText(GearGlyph, r, Mix(_defFg, EffBg(), hot ? 0.0 : 0.22), GearTf());
     }
 
     private void FillArrow(CanvasDrawingSession ds, ICanvasResourceCreator rc, Rect r, int dir, Color c)
@@ -299,14 +353,21 @@ public partial class MainWindow
         double canvasW = GlyphCanvas.Width > 0 ? GlyphCanvas.Width : Math.Max(1, _cols * _cellW);
         double canvasH = GlyphCanvas.Height > 0 ? GlyphCanvas.Height : Math.Max(1, _rows * _cellH);
         var rows = SettingsDisplayRows();
-        const double rowH = 26, hdrH = 22, titleH = 32, footerH = 54;
+        // Metrics follow the panel font, not just the text: at guifont h16 (~21 DIP) rows have to grow
+        // or the labels would clip inside their own row.
+        double lhm = PanelLineH();
+        double rowH = Math.Ceiling(lhm) + 8, hdrH = Math.Ceiling(lhm) + 5;
+        double titleH = Math.Ceiling(lhm) + 12, footerH = Math.Ceiling(lhm) * 2 + 18;
         double contentH = titleH + footerH;
         foreach (var r in rows) contentH += r.Header ? hdrH : rowH;
         // Centre on the VISIBLE part of the canvas (the canvas can overflow the container), and keep
         // the panel inside the canvas so it is never clipped by the surface edge.
         double offX = (_root.ActualWidth - canvasW) / 2;
         double visW = Math.Min(canvasW, Math.Max(1, _root.ActualWidth));
-        double pw = Math.Clamp(visW * 0.76, 340, 640);
+        // Width follows the font too: the longest label plus its value box has to fit at this size.
+        double minW = Math.Max(300.0, Math.Min(visW - 8, lhm * 20 + 110));
+        double maxW = Math.Max(minW, Math.Min(860.0, visW - 4));
+        double pw = Math.Clamp(visW * 0.9, minW, maxW);
         double ph = Math.Min(contentH, Math.Max(140, canvasH - 16));
         double px = Math.Round(Math.Clamp(offX + (visW - pw) / 2, 2, Math.Max(2, canvasW - pw - 2)));
         double py = Math.Round(Math.Max(8, (canvasH - ph) / 2));
@@ -318,14 +379,14 @@ public partial class MainWindow
         Color dim = Mix(_defFg, EffBg(), 0.45);
         Color hi = Mix(EffBg(), _defFg, 0.16);
         var tf = PanelTf();
-        double lh = PanelLineH();
+        double lh = lhm;
 
         ds.FillRoundedRectangle(_settingsPanelRect, 6, 6, bg);
         ds.DrawRoundedRectangle(_settingsPanelRect, 6, 6, border, 1);
         ds.DrawLine((float)px, (float)(py + titleH - 1), (float)(px + pw), (float)(py + titleH - 1), border, 1);
         ds.DrawText("Settings", (float)(px + 14), (float)(py + (titleH - lh) / 2), fg, tf);
-        ds.DrawText("settings.json  stored: " + Settings.FileValueCount,
-                    (float)(px + 14 + 90), (float)(py + (titleH - lh) / 2), dim, tf);
+        ds.DrawText(Fit("settings.json   stored: " + Settings.FileValueCount, pw - 28 - PanelTextW("Settings") - 18),
+                    (float)(px + 14 + PanelTextW("Settings") + 18), (float)(py + (titleH - lh) / 2), dim, tf);
 
         double y = py + titleH;
         double contentBottom = py + ph - footerH;
@@ -375,22 +436,24 @@ public partial class MainWindow
             if (Settings.IsEnvOverride(key))
                 ds.FillRoundedRectangle(new Rect(px + 8, y + h / 2 - 3, 6, 6), 3, 3, Mix(_defFg, EffBg(), 0.15));
             double ty = y + (h - lh) / 2;
-            string label = def.Label + (def.Restart ? "   (restart)" : "");
-            ds.DrawText(label, (float)(px + 22), (float)ty, sel ? fg : Mix(_defFg, EffBg(), 0.12), tf);
-
             bool steppable = def.Kind != SettingKind.Text;
-            double boxW = Math.Min(180, pw * 0.32);
+            // The value box and the arrows scale with the font as well.
+            double triW = Math.Max(7.0, lh * 0.36), triH = Math.Max(9.0, lh * 0.42);
+            double boxW = Math.Min(Math.Max(140.0, lhm * 7.5), pw * 0.40);
             double boxX = px + pw - 16 - boxW;
+            string label = def.Label + (def.Restart ? "   (restart)" : "");
+            ds.DrawText(Fit(label, boxX - (px + 22) - 14), (float)(px + 22), (float)ty, sel ? fg : Mix(_defFg, EffBg(), 0.12), tf);
+
             string value = _settingsEditing && sel ? _settingsEditBuf + "_" : Settings.Display(key);
             Color vc = sel ? fg : Mix(_defFg, EffBg(), 0.20);
             if (_settingsEditing && sel) vc = Mix(_defFg, EffBg(), 0.0);
-            ds.DrawText(value, (float)boxX, (float)ty, vc, tf);
+            ds.DrawText(Fit(value, boxW + 30), (float)boxX, (float)ty, vc, tf);
             if (steppable)
             {
-                FillArrow(ds, rc, new Rect(boxX - 24, y + h / 2 - 5, 9, 10), -1, sel ? fg : dim);
-                FillArrow(ds, rc, new Rect(boxX + boxW + 6, y + h / 2 - 5, 9, 10), +1, sel ? fg : dim);
-                _settingsHit.Add((new Rect(boxX - 30, y, 26, h), key, -1));
-                _settingsHit.Add((new Rect(boxX + boxW + 2, y, 24, h), key, +1));
+                FillArrow(ds, rc, new Rect(boxX - triW - 12, y + h / 2 - triH / 2, triW, triH), -1, sel ? fg : dim);
+                FillArrow(ds, rc, new Rect(boxX + boxW + 12, y + h / 2 - triH / 2, triW, triH), +1, sel ? fg : dim);
+                _settingsHit.Add((new Rect(boxX - triW - 18, y, triW + 12, h), key, -1));
+                _settingsHit.Add((new Rect(boxX + boxW, y, triW + 12, h), key, +1));
             }
             _settingsHit.Add((new Rect(px + 1, y, pw - 2, h), key, 0));
             y += h;
@@ -404,9 +467,9 @@ public partial class MainWindow
         string hint = _settingsEditing
             ? "editing: type, Backspace, Enter = save, Esc = cancel"
             : (Settings.Def(selKey) is { } sd && sd.Hint.Length > 0 ? sd.Hint : "Up/Down select   Left/Right or Enter change");
-        ds.DrawText(hint, (float)(px + 14), (float)fy, dim, tf);
-        ds.DrawText("Esc close   Ctrl+R reset all   \u2022 = env var overrides the file",
-                    (float)(px + 14), (float)(fy + lh + 2), dim, tf);
+        ds.DrawText(Fit(hint, pw - 28), (float)(px + 14), (float)fy, dim, tf);
+        ds.DrawText(Fit("Esc close   Ctrl+R reset all   \u2022 = env var wins", pw - 28),
+                    (float)(px + 14), (float)(fy + lh + 3), dim, tf);
     }
 
     // ---- Input ----------------------------------------------------------------------------------
@@ -595,6 +658,23 @@ public partial class MainWindow
     // setting, which would be visible in a normal session. It restores whatever the file held before
     // stepping, and it writes one PNG of the panel (the app's own DIAG shot only fires on a render
     // counter, so it cannot be relied on to catch the panel).
+    // Await a call but never let a blocked nvim wedge the self-test: a hit-enter or swap-file prompt
+    // makes nvim stop answering requests (measured here — the request is sent, the reader keeps
+    // receiving redraws, and the response simply never arrives). Returns null on timeout/error.
+    private static async System.Threading.Tasks.Task<object?> CallOrNull(NvimClient? client, int timeoutMs,
+                                                                        string method, params object?[] args)
+    {
+        if (client == null) return null;
+        try
+        {
+            var call = client.CallAsync(method, args);
+            if (await System.Threading.Tasks.Task.WhenAny(call, System.Threading.Tasks.Task.Delay(timeoutMs)) != call)
+                return null;
+            return await call;
+        }
+        catch { return null; }
+    }
+
     private void SettingsSelfTest()
     {
         if (!Settings.Bool("NVIM_WINUI_SETTINGS_TEST")) return;
@@ -614,6 +694,9 @@ public partial class MainWindow
                          $"root={_root.ActualWidth:F0}x{_root.ActualHeight:F0} canvas={GlyphCanvas.Width:F0}x{GlyphCanvas.Height:F0} " +
                          $"dpi={_dpiScale:F2}");
 
+            LogImportant($"SETTINGS-TEST font glyph=U+{(int)GearGlyph[0]:X4} gearSize={GearFontSize:F2} " +
+                         $"panelFamily='{BaseFamily(PanelFamily)}' panelSize={PanelFontSize:F2} natH={PanelLineH():F1} " +
+                         $"grid={_narrowFont.Split(',')[0]}@{_narrowSize:F2} wide={_wideFont.Split(',')[0]}@{_wideSize:F2}");
             var c = new Point(_settingsBtnRect.X + _settingsBtnRect.Width / 2,
                               _settingsBtnRect.Y + _settingsBtnRect.Height / 2);
             // Gear-only frame first: the panel would cover the button, and the button's position
@@ -678,6 +761,45 @@ public partial class MainWindow
             SettingsConsumeNvimKey("<Up>");
             LogImportant($"SETTINGS-TEST key-path sel-back={_settingsSel}");
 
+            // (7) The panel font follows guifont — verified LIVE: change it through nvim (exactly what a
+            //     user's `:set guifont=` does), let the app re-measure, and capture the panel again. The
+            //     two captures then differ only by the font. Every call is bounded: a blocking prompt in
+            //     nvim (hit-enter / swap-file dialog) makes it stop answering requests, which must not
+            //     wedge the self-test.
+            string? guifontBefore = null;
+            {
+                var cl = _client;
+                // Same call shape the guifont refresh itself uses (nvim_get_option_value + empty opts).
+                object? got = await CallOrNull(cl, 4000, "nvim_get_option_value", "guifont", new Dictionary<string, object?>());
+                guifontBefore = got as string;
+                LogImportant($"SETTINGS-TEST font-read raw='{guifontBefore}'");
+                if (string.IsNullOrEmpty(guifontBefore))
+                {
+                    LogImportant("SETTINGS-TEST font-change SKIPPED (nvim did not answer — blocking prompt?)");
+                }
+                else
+                {
+                    // A font that IS installed and IS a Nerd Font, so the U+F423 gear can actually be
+                    // drawn — the test environment has no OperatorMono Nerd Font.
+                    await CallOrNull(cl, 4000, "nvim_set_option_value", "guifont", "JetBrainsMono NFM:h12", new Dictionary<string, object?>());
+                    await System.Threading.Tasks.Task.Delay(1200);   // option_set -> RefreshGuifontAsync
+                    LogImportant($"SETTINGS-TEST font-change guifont='{guifontBefore}' -> now " +
+                                 $"panelFamily='{BaseFamily(PanelFamily)}' panelSize={PanelFontSize:F2} " +
+                                 $"natH={PanelLineH():F1} gearSize={GearFontSize:F2}");
+                    // The panel covers the button, so capture a clean gear-only frame in the new font
+                    // first (close/reopen), then the panel itself.
+                    CloseSettings();
+                    SettingsTestCapture("settings-gear-nerd");
+                    SettingsTestCapture("settings-glyph", glyphProbe: true);
+                    ToggleSettings();
+                    SettingsTestCapture("settings-shot-small");
+                    await CallOrNull(cl, 4000, "nvim_set_option_value", "guifont", guifontBefore, new Dictionary<string, object?>());
+                    await System.Threading.Tasks.Task.Delay(900);
+                    LogImportant($"SETTINGS-TEST font-restored panelSize={PanelFontSize:F2} " +
+                                 $"natH={PanelLineH():F1} gearSize={GearFontSize:F2}");
+                }
+            }
+
             // (5) Leave settings.json exactly as found (byte-identical, including "did not exist").
             try
             {
@@ -694,7 +816,7 @@ public partial class MainWindow
 
     // Render the current frame + the panel into an offscreen target and save it, the same way the DIAG
     // full-shot does. Proves what the panel actually looks like without a screen capture.
-    private void SettingsTestCapture(string name, bool withOverlay = true)
+    private void SettingsTestCapture(string name, bool withOverlay = true, bool glyphProbe = false)
     {
         try
         {
@@ -708,6 +830,20 @@ public partial class MainWindow
                 // withOverlay:false gives the same frame WITHOUT the gear (and without the panel), so a
                 // pixel diff of the pair proves exactly which pixels the overlay added and where.
                 if (withOverlay) DrawSettingsOverlay(ds, GlyphCanvas);
+            if (glyphProbe)
+            {
+                // Diagnostic: the icon glyph at 3x, centred, so its SHAPE is legible in the capture —
+                // the real button draws it at ~16 DIP, which is too small to judge by eye or by model.
+                using var fmt = new CanvasTextFormat
+                {
+                    FontFamily = PanelFamily,
+                    FontSize = (float)(GearFontSize * 3),
+                    WordWrapping = CanvasWordWrapping.NoWrap,
+                    HorizontalAlignment = CanvasHorizontalAlignment.Center,
+                    VerticalAlignment = CanvasVerticalAlignment.Center,
+                };
+                ds.DrawText(GearGlyph, new Rect(0, 0, w, h), Mix(_defFg, EffBg(), 0.0), fmt);
+            }
             }
             string path = System.IO.Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
