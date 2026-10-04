@@ -6,6 +6,16 @@ A WinUI 3 shell around `nvim --embed` (msgpack-RPC). The app spawns a headless
 Neovim, attaches the UI over RPC (`ext_linegrid` + `ext_multigrid`), and renders
 the grid with a Win2D/Direct2D GPU canvas — no terminal emulator in between.
 
+## Screenshots
+
+All three at a 1024×768 display area (`NVIM_WINUI_SIZE=1024x768`); the first two run
+`nvim -u NONE`, so there is no `guifont` to supply the Nerd Font gear and the button falls back to
+the word **Settings**.
+
+| Startup, no nvim config (`-u NONE`) | After `:checkhealth` | The settings panel |
+|---|---|---|
+| ![startup, no nvim config](docs/startup.png) | ![after :checkhealth](docs/checkhealth.png) | ![the settings panel](docs/settings.png) |
+
 ## Requirements
 
 - .NET 8 SDK
@@ -113,6 +123,7 @@ Every variable below is also editable from the settings panel above.
 | `NVIM_WINUI_NVIM` | — | Explicit path to `nvim.exe`. If unset, nvim is resolved from `PATH`, then the default install dir. |
 | `NVIM_WINUI_ARGS` | — | Extra arguments appended to the nvim command line (e.g. `+checkhealth blink.cmp`). |
 | `NVIM_WINUI_LINESPACE` | 0 | Pixels trimmed from each row's vertical pitch (tighter line spacing). `0` keeps the natural box height. |
+| `NVIM_WINUI_SIZE` | 744x421 | The **display area** (what the grid is drawn into) as `WxH` in DIP; the window adds its frame on top. Read once at startup. `1024x768` gives a 1024×768 canvas, so it is also what the README screenshots were taken at. Snapping (`NVIM_WINUI_SNAP`) overrides it: the window then tracks the grid. |
 | `NVIM_WINUI_SNAP` | off | Set `1` to force the window to a whole number of cells. By default the window stays at whatever size you drag it to and the grid reflows to fit, so up to one cell of background shows at the right/bottom edge. |
 | `NVIM_WINUI_STATUSBAR` | off | Show the app status bar row (hidden by default; set to `1`). |
 | `NVIM_WINUI_OPACITY` | 1.0 | Opacity of the whole parent window, 0..1 (`1` = fully opaque, `0` = invisible). Applied at the Win32 level, so the desktop shows through. Accepts a bare percentage too (`90` = `0.9`). The default `1.0` leaves the window unlayered, costing nothing. |

@@ -195,7 +195,12 @@ public partial class MainWindow : Window
         // ExtendsContentIntoTitleBar makes the content area fill the full window (title bar region
         // becomes part of content), so Resize(width, height) directly sets the display size.
         ExtendsContentIntoTitleBar = true;
-        try { AppWindow.Resize(new SizeInt32(760, 430)); } catch { }
+        // NVIM_WINUI_SIZE is the DISPLAY AREA — what the grid is drawn into, in DIP — not the outer
+        // window: the frame (the resize border the app draws its own caption inside) is added once it has
+        // been measured, in ApplyClientSize, so 800x600 gives an 800x600 canvas. This first resize is
+        // provisional; Snapping (NVIM_WINUI_SNAP) overrides the whole thing and tracks the grid instead.
+        ParseClientSize(Settings.Str("NVIM_WINUI_SIZE", "744x421"), out _reqClientW, out _reqClientH);
+        try { AppWindow.Resize(new SizeInt32(_reqClientW, _reqClientH)); } catch { }
 
         // Pure-C# unpackaged: Window.Dispatcher is not reliably populated here; capture the queue directly.
         _uiDq = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
@@ -270,7 +275,7 @@ public partial class MainWindow : Window
         _root.Loaded += OnLoadedAsync;
         // Verification hook (OFF by default): drives the gear-click path in-process, because synthetic
         // mouse input cannot be delivered from an agent session on this box.
-        _root.Loaded += (s, e) => SettingsSelfTest();
+        _root.Loaded += (s, e) => { SettingsSelfTest(); ArmDocShot(); };   // doc capture arms a timer
         // IME: the native EDIT target needs a realized top-level HWND, so attach it once loaded and
         // hand it keyboard focus on every activation. `_root.Focus` is deliberately NOT used: the
         // EDIT is a separate top-level window, and focus must belong to it or the IME stops composing.

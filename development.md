@@ -365,7 +365,7 @@ self-test) hold the feature; both are in the csproj's explicit `<Compile Include
   same approach as the cursor, the IME preedit and the scroll overlay.
   `DrawSettingsOverlay` runs from the Draw handler after the scroll overlay; `_settingsBtnRect`,
   `_settingsPanelRect` and `_settingsHit` are the only state shared between painting and input, and
-  both run on the UI thread. The list scrolls (a default-sized window cannot show all 15 rows), with
+  both run on the UI thread. The list scrolls (a default-sized window cannot show all 16 rows), with
   the selection kept visible and up/down markers when rows are hidden; `Draw*` vs `Fill*`, snapped
   device pixels and the brush-cache rules are the same ones the grid renderer follows.
 - **Gear placement.** Content extends into the title bar, so the caption buttons sit in the client
@@ -481,6 +481,23 @@ the grid, so the cells past the end of the grid are simply unpainted. With it on
 forced to the nearest cell boundary, which means a drag to 1060x430 lands on 1053x414 — 81 columns
 plus the 16px frame. That is the snap working, not a shrink.
 
+### Initial size, and landing the canvas on it
+
+`NVIM_WINUI_SIZE` (`WxH`, default `744x421`) is the DISPLAY AREA, not the outer window — that is the
+number the user thinks in, and the number a capture contains. Two corrections turn it into a window
+size, because neither the frame nor the XAML layout is a whole number of DIPs:
+
+- `ParseClientSize` reads it once at startup (a `(restart)` row) and `ApplyClientSize` runs from
+  `MeasureChromeAndSnap`, i.e. as soon as the frame is known: `window = requested + _chromeW/_chromeH`.
+- Then `CorrectCanvasSize` — because the OS client rect and the canvas that actually gets rendered can
+  still differ. Measured: `Resize` to a 1024x768 *client* produced a 1024x767 *canvas* (the frame is
+  fractional). It adds the difference back to the window and re-checks up to twice, since each resize
+  re-lays-out the canvas. Verification is a log line, not an assumption:
+  `SIZE-DBG canvas exact 1024.0x768.0`.
+
+Snapping wins over all of it: with `NVIM_WINUI_SNAP=1` the window tracks the grid and is never
+forced to a requested size.
+
 ## Opacity
 
 Two independent multipliers, both read once at startup:
@@ -551,6 +568,32 @@ reference `rpc-test`, so building the solution builds it too. Their `bin/`, `obj
 - `CheckExeTimestamp.ps1` — one-off check that the built exe is newer than the sources it
   was compiled from (stale-exe diagnosis).
 
+## Taking the README screenshots
+
+`NVIM_WINUI_SHOT_FILE=1` (env only; `NVIM_WINUI_SHOT_MS` sets the delay, default 4000) arms a TIMER
+that saves ONE composed frame — grid + caption strip + overlays — to `docs-shot.png`. A timer and not
+a render-loop check: the app renders on demand, so a settled screen stops rendering and the first
+version of this captured nothing at all while the window sat still. The DIAG `fullshot.png` cannot be
+used for documentation — it renders `RenderCore` only, with no caption strip and no gear button.
+
+```bash
+BIN=src/App/bin/x64/Debug/net8.0-windows10.0.22621.0/win-x64
+# 1. startup, no config -> %LOCALAPPDATA%\NvimWinUIGui\docs-shot.png
+env NVIM_WINUI_SIZE=1024x768 NVIM_WINUI_SHOT_FILE=1 NVIM_WINUI_ARGS="-u NONE" \
+    timeout 10 "$BIN/NvimWinUIGui.exe"
+# 2. once :checkhealth (≈5 s) has settled
+env NVIM_WINUI_SIZE=1024x768 NVIM_WINUI_SHOT_FILE=1 NVIM_WINUI_SHOT_MS=13000 \
+    NVIM_WINUI_ARGS="-u NONE -c checkhealth" timeout 20 "$BIN/NvimWinUIGui.exe"
+# 3. the settings panel (the self-test's panel-open frame)
+env NVIM_WINUI_SIZE=1024x768 NVIM_WINUI_SETTINGS_TEST=1 NVIM_WINUI_ARGS="-u NONE" \
+    timeout 22 "$BIN/NvimWinUIGui.exe"      # -> settings-title.png
+```
+
+With `NVIM_WINUI_SIZE=1024x768` the captures are exactly 1024×768, because the canvas is what gets
+rendered (`SIZE-DBG canvas exact 1024.0x768.0` confirms it). Verified: `file` reports 1024 x 768 for
+all three; the startup frame differs from the checkhealth frame by 83,656 px (the report's `=`
+heading rules show up as full-width ink bands) and from the panel frame by 576,476 px.
+
 ## Verification status
 
 - Decoder covers the full msgpack spec used by nvim: fixints, ints/uints all widths,
@@ -598,6 +641,11 @@ reference `rpc-test`, so building the solution builds it too. Their `bin/`, `obj
   renders the word "Settings" (80×17 of ink, read back as ASCII art) inside it; after the live
   `:set guifont=JetBrainsMono NFM:h12` the same probe logged `U+F423 present -> glyph` and the button
   returned to the 46×32 caption footprint.
+- Initial size verified on 2026-10-04: `NVIM_WINUI_SIZE=1024x768` logged `client 1024x768 + frame
+  16.0x8.0 -> window 1040x776 client=1024x768`, the canvas first measured `1024x767` (fractional
+  frame) and the correction pass converged to `SIZE-DBG canvas exact 1024.0x768.0`; the three README
+  captures are 1024×768 PNGs (`file`), pairwise 83,656 px (startup vs checkhealth) and 576,476 px
+  (startup vs settings panel) apart.
 - IME verified in the app on 2026-10-03 on the TSF path: `nihongo` composes with the preedit drawn
   inline at the cursor and commits to nvim as `にほんご`; the IME is attached only in
   insert/replace/cmdline modes and detached — live composition terminated — everywhere else; typing

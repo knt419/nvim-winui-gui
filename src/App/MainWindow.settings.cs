@@ -819,14 +819,14 @@ public partial class MainWindow
             // Gear-only frame first: the panel would cover the button, and the button's position
             // relative to the (system-drawn) caption buttons is exactly what needs checking. The pair
             // (no-overlay / overlay) is what a pixel diff consumes.
-            SettingsTestCapture("settings-nogear", withOverlay: false);
-            SettingsTestCapture("settings-gear");
+            CaptureComposedFrame("settings-nogear", withOverlay: false);
+            CaptureComposedFrame("settings-gear");
             bool consumed = SettingsPointerPressed(c);
             LogImportant($"SETTINGS-TEST gear-click consumed={consumed} open={_settingsOpen} hitRects={_settingsHit.Count}");
 
             // The caption is two runs placed by a measured width, so capture the open panel and log the
             // numbers the draw pass used — a wrong estimate shows up as the hint overlapping the title.
-            SettingsTestCapture("settings-title");
+            CaptureComposedFrame("settings-title");
             LogImportant($"SETTINGS-TEST caption title='{PanelTitle}' titleW={_capTitleW:F1} hintX={_capHintX:F1}");
 
             // Snapshot settings.json first: this test WRITES (that is the point), so it must put the file
@@ -867,7 +867,7 @@ public partial class MainWindow
             LogImportant($"SETTINGS-TEST opacity-reset value={_parentOpacity:F2} layered={_parentLayered} " +
                          $"readback={layeredRead2} alpha={alpha2}");
 
-            SettingsTestCapture("settings-shot");
+            CaptureComposedFrame("settings-shot");
             // Hit rects are published by a DRAW pass, so they exist only after the capture above. This is
             // the check that the panel's row hitboxes (and its arrow zones) are real geometry.
             LogImportant($"SETTINGS-TEST hitRects={_settingsHit.Count} " +
@@ -921,10 +921,10 @@ public partial class MainWindow
                     LogImportant($"SETTINGS-TEST gear-mode {(GearGlyphAvailable() ? "glyph" : "text")} " +
                                  $"btn=({_settingsBtnRect.X:F0},{_settingsBtnRect.Y:F0},{_settingsBtnRect.Width:F0}x{_settingsBtnRect.Height:F0}) " +
                                  $"family='{PanelFamily}'");
-                    SettingsTestCapture("settings-gear-nerd");
-                    SettingsTestCapture("settings-glyph", glyphProbe: true);
+                    CaptureComposedFrame("settings-gear-nerd");
+                    CaptureComposedFrame("settings-glyph", glyphProbe: true);
                     ToggleSettings();
-                    SettingsTestCapture("settings-shot-small");
+                    CaptureComposedFrame("settings-shot-small");
                     await CallOrNull(cl, 4000, "nvim_set_option_value", "guifont", guifontBefore, new Dictionary<string, object?>());
                     await System.Threading.Tasks.Task.Delay(900);
                     LogImportant($"SETTINGS-TEST font-restored panelSize={PanelFontSize:F2} " +
@@ -952,7 +952,7 @@ public partial class MainWindow
 
     // Render the current frame + the panel into an offscreen target and save it, the same way the DIAG
     // full-shot does. Proves what the panel actually looks like without a screen capture.
-    private void SettingsTestCapture(string name, bool withOverlay = true, bool glyphProbe = false)
+    private void CaptureComposedFrame(string name, bool withOverlay = true, bool glyphProbe = false)
     {
         try
         {
@@ -985,7 +985,7 @@ public partial class MainWindow
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "NvimWinUIGui", name + ".png");
             _ = SaveRtAsync(rt, path);
-            LogImportant($"SETTINGS-TEST shot queued -> {path} ({w:F0}x{h:F0})");
+            LogImportant($"SHOT queued -> {path} ({w:F0}x{h:F0})");
         }
         catch (Exception ex) { LogCritical("SETTINGS-TEST shot failed: " + ex.Message); }
     }

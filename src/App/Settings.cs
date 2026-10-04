@@ -38,6 +38,8 @@ public static class SettingDefs
                 Restart = true, Hint = "appended to the nvim command line" },
         new() { Key = "NVIM_WINUI_LINESPACE", Label = "Line spacing trim", Kind = SettingKind.Int,
                 Default = "0", Min = 0, Max = 12, Step = 1, Hint = "px trimmed from each row's pitch" },
+        new() { Key = "NVIM_WINUI_SIZE", Label = "Window size (WxH)", Kind = SettingKind.Text,
+                Default = "744x421", Restart = true, Hint = "display area in DIP; the frame is added" },
         new() { Key = "NVIM_WINUI_SNAP", Label = "Snap window to cells", Kind = SettingKind.Bool,
                 Default = "0", Hint = "on = window tracks the grid exactly" },
         new() { Key = "NVIM_WINUI_STATUSBAR", Label = "Show app status bar", Kind = SettingKind.Bool,

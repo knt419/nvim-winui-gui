@@ -311,7 +311,96 @@ private void MeasureChromeAndSnap(int rows, int cols)
     _chromeMeasured = true;
     LogStartup($"RESIZE-DBG chrome={_chromeW:F3}x{_chromeH:F3} (dpi scale {scale:F3})");
     UpdateWindowSize(cols, rows); // snap to exact fit now that the frame size is known
+    ApplyClientSize();            // NVIM_WINUI_SIZE asked for a display area, not a window size
 }
+
+// Requested display-area size (NVIM_WINUI_SIZE, "WxH" in DIP). Read once at startup — the row is a
+// (restart) one — and applied for real here, once the frame is measured, because the frame has to be
+// added to land on the requested CANVAS size. Snapping wins when it is on: the window then tracks the
+// grid and must not be forced.
+private int _reqClientW = 744, _reqClientH = 421;
+// Documentation capture (NVIM_WINUI_SHOT_FILE / NVIM_WINUI_SHOT_MS, both env only).
+private System.Threading.Timer? _docShotTimer;
+private static int ParseDocShotDelay()
+{
+    string raw = Settings.Str("NVIM_WINUI_SHOT_MS", "4000");
+    return int.TryParse(raw, out int ms) && ms >= 0 && ms <= 600000 ? ms : 4000;
+}
+// Documentation capture (NVIM_WINUI_SHOT_FILE=1, env only). ONE composed frame — grid + caption strip +
+// overlays — to docs-shot.png, so a doc screenshot can be taken at any moment (once :checkhealth has
+// settled) without driving the UI. Armed as a TIMER, not checked in the render loop: the app renders on
+// demand, so a settled screen simply stops rendering and a render-time check never fires (verified — the
+// first version of this captured nothing at all while the window sat still). The DIAG fullshot renders
+// RenderCore only, so it has no caption strip and no gear; this reuses the settings overlay pass.
+private void ArmDocShot()
+{
+    if (!Settings.Bool("NVIM_WINUI_SHOT_FILE")) return;
+    int ms = ParseDocShotDelay();
+    LogStartup($"DOC-SHOT armed: docs-shot.png in {ms} ms");
+    _docShotTimer = new System.Threading.Timer(
+        _ => UiPostAsync(() =>
+        {
+            try { CaptureComposedFrame("docs-shot"); }
+            catch (Exception ex) { LogStartup("DOC-SHOT failed: " + ex.Message); }
+        }), null, ms, System.Threading.Timeout.Infinite);
+}
+private static void ParseClientSize(string s, out int w, out int h)
+{
+    w = 744; h = 421;                                   // the historical default window (760x430 outer)
+    string[] parts = (s ?? "").ToLowerInvariant().Split('x');
+    if (parts.Length == 2 && int.TryParse(parts[0].Trim(), out int pw) &&
+        int.TryParse(parts[1].Trim(), out int ph) && pw >= 200 && ph >= 120 && pw <= 20000 && ph <= 20000)
+    { w = pw; h = ph; }
+    else LogStartup($"SIZE-DBG bad NVIM_WINUI_SIZE='{s}' -> {w}x{h}");
+}
+private void ApplyClientSize()
+{
+    if (SnapToCells || !_chromeMeasured) return;
+    try
+    {
+        int w = (int)Math.Round(_reqClientW + _chromeW), h = (int)Math.Round(_reqClientH + _chromeH);
+        AppWindow.Resize(new SizeInt32(w, h));
+        // The frame is not always a whole number of DIPs, so the canvas can come back a pixel shy
+        // (measured: an 800x600 request gave an 800x599 canvas). Correct ONCE against the real client
+        // size, converted through the window's DPI: AppWindow.ClientSize is physical px, Resize takes DIPs.
+        double scale = 1.0;
+        IntPtr hw = FindWindow(null, Title);
+        if (hw != IntPtr.Zero) { uint dpi = GetDpiForWindow(hw); if (dpi > 0) scale = dpi / 96.0; }
+        SizeInt32 cs = AppWindow.ClientSize;
+        double dx = _reqClientW - cs.Width / scale, dy = _reqClientH - cs.Height / scale;
+        if (Math.Abs(dx) >= 0.5 || Math.Abs(dy) >= 0.5)
+        {
+            w = (int)Math.Round(w + dx); h = (int)Math.Round(h + dy);
+            AppWindow.Resize(new SizeInt32(w, h));
+            LogStartup($"SIZE-DBG correction dx={dx:F2} dy={dy:F2} -> window {w}x{h}");
+        }
+        LogStartup($"SIZE-DBG client {_reqClientW}x{_reqClientH} + frame {_chromeW:F1}x{_chromeH:F1} " +
+                   $"-> window {AppWindow.Size.Width}x{AppWindow.Size.Height} " +
+                   $"client={AppWindow.ClientSize.Width}x{AppWindow.ClientSize.Height}");
+        CorrectCanvasSize(0);      // the canvas is what gets rendered: land IT on the requested size
+    }
+    catch (Exception ex) { LogStartup("SIZE-DBG resize failed: " + ex.Message); }
+}
+
+// The OS's client rect and the XAML canvas that actually gets rendered are not always the same size —
+// measured: a 1024x768 client produced a 1024x767 canvas, because the frame is not a whole number of
+// DIPs. Add the difference back to the window once layout has run, so the DISPLAY AREA (what
+// NVIM_WINUI_SIZE promises, and what a capture contains) is exactly what was asked for. Retried at most
+// twice, since a resize re-lays-out the canvas.
+private void CorrectCanvasSize(int attempt)
+{
+    if (SnapToCells || attempt > 2) return;
+    double cw = GlyphCanvas.Width, ch = GlyphCanvas.Height;
+    if (cw <= 1 || ch <= 1) { RetryCanvasSize(attempt); return; }
+    int dx = _reqClientW - (int)Math.Round(cw), dy = _reqClientH - (int)Math.Round(ch);
+    if (dx == 0 && dy == 0) { LogStartup($"SIZE-DBG canvas exact {cw:F1}x{ch:F1}"); return; }
+    LogStartup($"SIZE-DBG canvas {cw:F1}x{ch:F1} -> window {dx:+0;-0}x{dy:+0;-0}");
+    try { AppWindow.Resize(new SizeInt32(AppWindow.Size.Width + dx, AppWindow.Size.Height + dy)); } catch { }
+    RetryCanvasSize(attempt + 1);
+}
+private void RetryCanvasSize(int attempt) =>
+    _ = System.Threading.Tasks.Task.Delay(400)
+        .ContinueWith(_ => UiPostAsync(() => CorrectCanvasSize(attempt)), System.Threading.Tasks.TaskScheduler.Default);
 
 // ---- Window -> nvim grid resize sync -------------------------------------------------------
 // The user drags the window edge; we debounce and ask nvim to reflow its grid to fit.
@@ -1254,6 +1343,7 @@ private void ResetParentOpacity()
         }
         catch (Exception ex) { LogStartup("FULL-SHOT failed: " + ex.Message); }
     }
+
 
     if (_diagEnabled && (rcc % 25 == 0 || ms > 8)) LogStartup($"RENDER #{rcc} {ms:F1}ms avg={_renderMsTotal/rcc:F1}ms cells={rows*cols}");
     }
