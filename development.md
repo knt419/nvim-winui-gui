@@ -400,6 +400,18 @@ self-test) hold the feature; both are in the csproj's explicit `<Compile Include
   render — the button is the glyph **U+F423** (`oct-gear` in Nerd Fonts; verified as `oct-gear` in
   the installed JetBrainsMono NF and in the user's OperatorMono Nerd Font), drawn centred in the
   caption strip with `GearTf()` (size tracks guifont but is capped by the strip height).
+- **Floating-surface behaviour.** While the panel is open, `RenderCore` takes the FLOAT branch
+  (`_settingsOpen` OR a float is present), so the parent is rasterized offscreen, blurred by
+  `_floatBlurAmount` and used as the backdrop; the panel's fills (background, border, selected-row
+  highlight) are `ScaleAlpha(…, _floatOpacity)` while its text, arrows and env dot stay opaque — the
+  same rule a float follows: backgrounds fade, glyphs stay readable. Verified by capture: the same
+  frame with `FLOAT_BLUR=0` vs `24` differs in 31,963 pixels (max 194) with the panel open, and at
+  `FLOAT_OPACITY=0.35` a panel fill over a base pixel of 23 measured 29 where the composite predicts
+  28 (at 0.9: 37 vs 36.5).
+- **Row layout is built from the panel's RIGHT edge inwards** — `rightEdge = px + pw - 14`, then
+  ◀ / value box / ▶ laid out leftward — because the previous formula put the ▶ 4 px from the edge and
+  its glyph 3 px OUTSIDE the panel. Verified: the rightmost ink inside the rows is now ≥10 px from
+  the border.
 - **Verification switch** `NVIM_WINUI_SETTINGS_TEST=1` (env var or settings.json): 1.5 s after load
   the app drives the gear-click path in-process, steps rows, writes/parses `settings.json`, reads the
   layered alpha back with `GetLayeredWindowAttributes`, clicks a row's arrow zone, walks the keyboard

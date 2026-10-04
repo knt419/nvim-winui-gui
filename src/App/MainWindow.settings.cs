@@ -373,11 +373,15 @@ public partial class MainWindow
         double py = Math.Round(Math.Max(8, (canvasH - ph) / 2));
         _settingsPanelRect = new Rect(px, py, pw, ph);
 
-        Color bg = Mix(EffBg(), _defFg, 0.08);
-        Color border = Mix(EffBg(), _defFg, 0.30);
+        // The panel is a floating surface, so its FILLS carry the float opacity and the parent behind
+        // it is blurred by the render path (RenderCore blurs while the panel is open, exactly as it
+        // does for a floating window). Text, arrows and the env dot stay opaque — the same rule a
+        // float follows: backgrounds fade, glyphs stay readable.
+        Color bg = ScaleAlpha(Mix(EffBg(), _defFg, 0.08), _floatOpacity);
+        Color border = ScaleAlpha(Mix(EffBg(), _defFg, 0.30), _floatOpacity);
         Color fg = Mix(_defFg, EffBg(), 0.0);
         Color dim = Mix(_defFg, EffBg(), 0.45);
-        Color hi = Mix(EffBg(), _defFg, 0.16);
+        Color hi = ScaleAlpha(Mix(EffBg(), _defFg, 0.16), _floatOpacity);
         var tf = PanelTf();
         double lh = lhm;
 
@@ -437,23 +441,29 @@ public partial class MainWindow
                 ds.FillRoundedRectangle(new Rect(px + 8, y + h / 2 - 3, 6, 6), 3, 3, Mix(_defFg, EffBg(), 0.15));
             double ty = y + (h - lh) / 2;
             bool steppable = def.Kind != SettingKind.Text;
-            // The value box and the arrows scale with the font as well.
+            // The row is laid out from the RIGHT edge inwards, so the step arrows can never spill past
+            // the panel: [ label … ] [ ◀ ] [ value box ] [ ▶ ] and a 14 DIP margin after the last one.
             double triW = Math.Max(7.0, lh * 0.36), triH = Math.Max(9.0, lh * 0.42);
+            double rightEdge = px + pw - 14;
+            double arrowR = steppable ? rightEdge - triW : rightEdge;
             double boxW = Math.Min(Math.Max(140.0, lhm * 7.5), pw * 0.40);
-            double boxX = px + pw - 16 - boxW;
+            double boxRight = steppable ? arrowR - 10 : rightEdge;
+            double boxX = boxRight - boxW;
+            double arrowL = boxX - 10 - triW;
             string label = def.Label + (def.Restart ? "   (restart)" : "");
-            ds.DrawText(Fit(label, boxX - (px + 22) - 14), (float)(px + 22), (float)ty, sel ? fg : Mix(_defFg, EffBg(), 0.12), tf);
+            ds.DrawText(Fit(label, (steppable ? arrowL : boxX) - (px + 22) - 14), (float)(px + 22), (float)ty,
+                        sel ? fg : Mix(_defFg, EffBg(), 0.12), tf);
 
             string value = _settingsEditing && sel ? _settingsEditBuf + "_" : Settings.Display(key);
             Color vc = sel ? fg : Mix(_defFg, EffBg(), 0.20);
             if (_settingsEditing && sel) vc = Mix(_defFg, EffBg(), 0.0);
-            ds.DrawText(Fit(value, boxW + 30), (float)boxX, (float)ty, vc, tf);
+            ds.DrawText(Fit(value, boxW + 6), (float)boxX, (float)ty, vc, tf);
             if (steppable)
             {
-                FillArrow(ds, rc, new Rect(boxX - triW - 12, y + h / 2 - triH / 2, triW, triH), -1, sel ? fg : dim);
-                FillArrow(ds, rc, new Rect(boxX + boxW + 12, y + h / 2 - triH / 2, triW, triH), +1, sel ? fg : dim);
-                _settingsHit.Add((new Rect(boxX - triW - 18, y, triW + 12, h), key, -1));
-                _settingsHit.Add((new Rect(boxX + boxW, y, triW + 12, h), key, +1));
+                FillArrow(ds, rc, new Rect(arrowL, y + h / 2 - triH / 2, triW, triH), -1, sel ? fg : dim);
+                FillArrow(ds, rc, new Rect(arrowR, y + h / 2 - triH / 2, triW, triH), +1, sel ? fg : dim);
+                _settingsHit.Add((new Rect(arrowL - 6, y, triW + 6, h), key, -1));
+                _settingsHit.Add((new Rect(arrowR - 4, y, triW + 8, h), key, +1));
             }
             _settingsHit.Add((new Rect(px + 1, y, pw - 2, h), key, 0));
             y += h;

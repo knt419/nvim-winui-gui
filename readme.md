@@ -98,6 +98,10 @@ same font the grid uses — so `:set guifont=…` changes the panel live (and th
 value boxes and arrows scale with it). The gear button is the Nerd Font glyph `U+F423`,
 drawn from that same family: any Nerd Font has it, a family without it shows a box instead.
 
+Like a floating window, the panel sits on a **blurred** copy of the editor behind it (the
+same `NVIM_WINUI_FLOAT_BLUR` radius) and its background carries `NVIM_WINUI_FLOAT_OPACITY`,
+so the code stays visible through it while the text on the panel stays fully opaque.
+
 ## Environment variables
 
 Every variable below is also editable from the settings panel above.

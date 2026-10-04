@@ -753,7 +753,11 @@ private void ResetParentOpacity()
     // Floating window on top of the grid stack → blur the parent layer behind it, then redraw the
     // float(s) sharp. Any other state (message grid, normal splits, no overlay at all) renders as
     // one flat composite (previous behavior): the blur only ever appears WITH a visible float.
-    if (outer && _multigridActive && _mgrid.Values.Any(g => MGridIsOverlay(g) && MGridHasContent(g) && g.Cols < _screenCols))
+    // The settings panel is a floating surface as well — it wants the same blurred parent behind it
+    // (and the same NVIM_WINUI_FLOAT_BLUR radius), so it joins this branch.
+    bool floatingSurfaceUp = _multigridActive
+        && _mgrid.Values.Any(g => MGridIsOverlay(g) && MGridHasContent(g) && g.Cols < _screenCols);
+    if (outer && (floatingSurfaceUp || _settingsOpen))
     {
         RenderBlurredBase(ds, rc);
         return;
