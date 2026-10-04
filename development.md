@@ -26,6 +26,13 @@ variables, see the README.
   - `MainWindow.mouse.cs` — pointer events → `nvim_input_mouse` (press/release/drag,
     wheel), same scheme as neovide's mouse manager; fire-and-forget requests ordered by
     the client write semaphore.
+  - `Settings.cs` — the settings store: `SettingDef`/`SettingDefs` (the panel's rows) and
+    `Settings` (`settings.json` under `%LOCALAPPDATA%\NvimWinUIGui`; the effective value is
+    env var → file → default, cached, with the source exposed to the UI).
+  - `MainWindow.settings.cs` — the settings UI: the caption-strip button (Nerd Font gear
+    glyph `U+F423`, or the word "Settings" when the family has no such glyph), the
+    hand-painted panel (paint + the hit rects it publishes), modal key routing, live
+    application of changes, and the `NVIM_WINUI_SETTINGS_TEST` self-test.
   - `MainWindow.notify.cs` — RPC notification handling, nvim spawn (`--headless
     --listen`), guifont load at startup + re-read after ~1 s (lazy-loaded plugins),
     self-test.
@@ -400,6 +407,13 @@ self-test) hold the feature; both are in the csproj's explicit `<Compile Include
   render — the button is the glyph **U+F423** (`oct-gear` in Nerd Fonts; verified as `oct-gear` in
   the installed JetBrainsMono NF and in the user's OperatorMono Nerd Font), drawn centred in the
   caption strip with `GearTf()` (size tracks guifont but is capped by the strip height).
+  **When the family has no such glyph the button shows the word "Settings" instead** and widens to
+  fit it: `GearGlyphAvailable()` asks GDI once per family (`GetGlyphIndicesW` with
+  `GGI_MARK_NONEXISTING_GLYPHS` returns 0xFFFF for a codepoint the font does not map, and an
+  unfindable family is substituted by GDI, which also has no PUA glyph — both answer "missing",
+  which is the safe direction). Measured in one run: family `Cascadia Code` → `U+F423 missing ->
+  "Settings" label`, button 100×32 at x 506 (right edge still flush on `RightInset`), and after the
+  live `:set guifont=JetBrainsMono NFM:h12` → `U+F423 present -> glyph`, button 46×32 at x 560.
 - **Floating-surface behaviour.** While the panel is open, `RenderCore` takes the FLOAT branch
   (`_settingsOpen` OR a float is present), so the parent is rasterized offscreen, blurred by
   `_floatBlurAmount` and used as the backdrop; the panel's fills (background, border, selected-row
@@ -470,7 +484,9 @@ Two independent multipliers, both read once at startup:
 - `NVIM_WINUI_FLOAT_OPACITY` (default `0.9`) applies per cell during float compositing,
   **multiplying** the alpha nvim already computed from `winblend` rather than replacing
   it. So `winblend=0` at `0.9` gives 10% see-through, and `winblend=100` stays fully
-  transparent whatever the opacity is.
+  transparent whatever the opacity is. The settings panel is a floating surface too: its
+  fills carry the same multiplier, and while it is open the parent is blurred by
+  `NVIM_WINUI_FLOAT_BLUR` (see "Settings panel").
 
 ## App icon
 
@@ -568,6 +584,12 @@ reference `rpc-test`, so building the solution builds it too. Their `bin/`, `obj
   comma-separated-family variant is a hollow rectangle. `U+F423` was confirmed as glyph `oct-gear` in
   the installed JetBrainsMono NF *and* in the family the app's own `guifont` names (OperatorMono Nerd
   Font). Reading the font back with `nvim_get_option_value` also proved the value round-trips.
+- Settings panel button fallback verified on 2026-10-04: with a `guifont` that is not a Nerd Font
+  (`Cascadia Code`) the probe logged `U+F423 missing -> "Settings" label`, the button widened to
+  100×32 (x 506, right edge still flush with the 138 DIP caption inset) and a capture of that frame
+  renders the word "Settings" (80×17 of ink, read back as ASCII art) inside it; after the live
+  `:set guifont=JetBrainsMono NFM:h12` the same probe logged `U+F423 present -> glyph` and the button
+  returned to the 46×32 caption footprint.
 - IME verified in the app on 2026-10-03 on the TSF path: `nihongo` composes with the preedit drawn
   inline at the cursor and commits to nvim as `にほんご`; the IME is attached only in
   insert/replace/cmdline modes and detached — live composition terminated — everywhere else; typing

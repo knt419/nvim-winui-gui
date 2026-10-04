@@ -117,6 +117,8 @@ public partial class MainWindow
     // fallbacks still apply if the primary family lacks it. Size tracks guifont but is capped by the
     // caption strip, which is a fixed OS metric rather than a font metric.
     private const string GearGlyph = "\uF423";
+    // Fallback when the family has no U+F423 (see GearGlyphAvailable).
+    private const string SettingsLabel = "Settings";
     private double GearFontSize => Math.Clamp(Math.Min(CaptionStripHeight() * 0.55, PanelFontSize), 9.0, 26.0);
 
     // Centre-aligned: DrawText with a Rect honours both alignments, which is what centres the glyph.
@@ -137,6 +139,54 @@ public partial class MainWindow
         }
         return _tfGear;
     }
+
+    // Does the active family actually map U+F423? A non-Nerd-Font guifont has no such glyph and
+    // DirectWrite then draws a .notdef box, so the button falls back to the word "Settings" (and grows
+    // to fit it). Asked once per family through GDI: GetGlyphIndicesW with GGI_MARK_NONEXISTING_GLYPHS
+    // returns 0xFFFF for a codepoint the font does not map, and an unfindable family is substituted by
+    // GDI, which also has no PUA glyph — either way the answer is "not available", which is the safe
+    // direction (the label always reads).
+    private const uint GGI_MARK_NONEXISTING_GLYPHS = 0x0001;
+    private string _gearProbeFamily = "";
+    private bool _gearProbeOk;
+    private bool GearGlyphAvailable()
+    {
+        string fam = PanelFamily;
+        if (_gearProbeFamily == fam) return _gearProbeOk;
+        _gearProbeFamily = fam;
+        _gearProbeOk = false;
+        IntPtr hdc = IntPtr.Zero, font = IntPtr.Zero, old = IntPtr.Zero;
+        try
+        {
+            hdc = GetDC(IntPtr.Zero);
+            if (hdc == IntPtr.Zero) return _gearProbeOk;
+            font = CreateFontW(0, 0, 0, 0, 400, 0, 0, 0, 1 /*DEFAULT_CHARSET*/, 0, 0, 0, 0, fam);
+            if (font == IntPtr.Zero) return _gearProbeOk;
+            old = SelectObject(hdc, font);
+            var idx = new ushort[1];
+            if (GetGlyphIndicesW(hdc, GearGlyph, 1, idx, GGI_MARK_NONEXISTING_GLYPHS) != 0xFFFFFFFFu)
+                _gearProbeOk = idx[0] != 0xFFFF && idx[0] != 0;
+        }
+        catch { }
+        finally
+        {
+            if (old != IntPtr.Zero) SelectObject(hdc, old);
+            if (font != IntPtr.Zero) DeleteObject(font);
+            if (hdc != IntPtr.Zero) ReleaseDC(IntPtr.Zero, hdc);
+        }
+        LogImportant($"SETTINGS-GEAR family='{fam}' U+F423 {( _gearProbeOk ? "present -> glyph" : "missing -> \"Settings\" label")}");
+        return _gearProbeOk;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hWnd);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr CreateFontW(int h, int w, int esc, int orient, int weight, uint italic,
+        uint underline, uint strike, uint charset, uint outPrec, uint clipPrec, uint quality, uint pitch, string face);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr obj);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern uint GetGlyphIndicesW(IntPtr hdc, string text, int count, ushort[] indices, uint flags);
 
     // Caption strip height: a fixed OS metric (32 DIP by default), NOT a font metric.
     private double CaptionStripHeight()
@@ -227,7 +277,11 @@ public partial class MainWindow
         double offX = (_root.ActualWidth - canvasW) / 2;
         double offY = (_root.ActualHeight - StatusTextHeight - canvasH) / 2;
 
-        double bw = Math.Min(46, Math.Max(28, stripH + 14));
+        // Glyph mode keeps a caption-button footprint; label mode widens to fit the word in the panel
+        // font, so "Settings" is never clipped.
+        double bw = GearGlyphAvailable()
+            ? Math.Min(46, Math.Max(28, stripH + 14))
+            : Math.Clamp(PanelTextW("Settings") + 18, 60, 260);
         double x = _root.ActualWidth - rightInset - bw - offX;
         double y = Math.Max(0, -offY);
         _settingsBtnRect = new Rect(x, y, bw, stripH);
@@ -281,7 +335,7 @@ public partial class MainWindow
         // Always-logged (not DIAG-gated): this is the one line that proves the gear click reached the
         // app, and it is rare by construction (one per user action).
         LogImportant($"SETTINGS-PANEL {(_settingsOpen ? "open" : "close")} sel={_settingsSel} " +
-                     $"file={Settings.FilePath} values={Settings.FileValueCount} btn=({_settingsBtnRect.X:F0},{_settingsBtnRect.Y:F0},{_settingsBtnRect.Width:F0}x{_settingsBtnRect.Height:F0})");
+                     $"gear={(GearGlyphAvailable() ? "glyph" : "text")} file={Settings.FilePath} values={Settings.FileValueCount} btn=({_settingsBtnRect.X:F0},{_settingsBtnRect.Y:F0},{_settingsBtnRect.Width:F0}x{_settingsBtnRect.Height:F0})");
         ScheduleRender();
         FlushRender();
     }
@@ -315,8 +369,10 @@ public partial class MainWindow
         if (r.Width <= 1 || r.Height <= 1) return;
         bool hot = _settingsHoverBtn || _settingsOpen;
         if (hot) ds.FillRoundedRectangle(r, 4, 4, Mix(EffBg(), _defFg, 0.18));
-        // Dim while idle, full theme foreground when hovered or open.
-        ds.DrawText(GearGlyph, r, Mix(_defFg, EffBg(), hot ? 0.0 : 0.14), GearTf());
+        // Dim while idle, full theme foreground when hovered or open. Glyph when the font has it, the
+        // word "Settings" when it does not (same font, same size, centred in the same strip).
+        var ink = Mix(_defFg, EffBg(), hot ? 0.0 : 0.14);
+        ds.DrawText(GearGlyphAvailable() ? GearGlyph : SettingsLabel, r, ink, GearTf());
     }
 
     private void FillArrow(CanvasDrawingSession ds, ICanvasResourceCreator rc, Rect r, int dir, Color c)
@@ -824,6 +880,10 @@ public partial class MainWindow
                     // The panel covers the button, so capture a clean gear-only frame in the new font
                     // first (close/reopen), then the panel itself.
                     CloseSettings();
+                    UpdateSettingsGeometry();
+                    LogImportant($"SETTINGS-TEST gear-mode {(GearGlyphAvailable() ? "glyph" : "text")} " +
+                                 $"btn=({_settingsBtnRect.X:F0},{_settingsBtnRect.Y:F0},{_settingsBtnRect.Width:F0}x{_settingsBtnRect.Height:F0}) " +
+                                 $"family='{PanelFamily}'");
                     SettingsTestCapture("settings-gear-nerd");
                     SettingsTestCapture("settings-glyph", glyphProbe: true);
                     ToggleSettings();

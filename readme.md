@@ -82,7 +82,7 @@ hand-editable).
 
 | Action | Key |
 |---|---|
-| Open / close | the gear button, `Esc` to close |
+| Open / close | the gear button, `Esc`, or a click outside the panel |
 | Move the selection | `Up` / `Down`, or the mouse wheel |
 | Change a value | `Left` / `Right`, `Enter` / `Space`, or click the arrows beside the value |
 | Edit a text row (path, args) | `Enter`, type, `Enter` to save, `Esc` to cancel |
@@ -95,8 +95,9 @@ effect until the variable is gone.
 
 The panel is drawn in the font nvim reported — `guifont`'s family at `guifont`'s size, the
 same font the grid uses — so `:set guifont=…` changes the panel live (and the row heights,
-value boxes and arrows scale with it). The gear button is the Nerd Font glyph `U+F423`,
-drawn from that same family: any Nerd Font has it, a family without it shows a box instead.
+value boxes and arrows scale with it). The button is the Nerd Font gear glyph `U+F423`,
+drawn from that same family; if the family has no such glyph (a `guifont` that is not a
+Nerd Font) the button shows the word **Settings** instead and widens to fit it.
 
 Like a floating window, the panel sits on a **blurred** copy of the editor behind it (the
 same `NVIM_WINUI_FLOAT_BLUR` radius) and its background carries `NVIM_WINUI_FLOAT_OPACITY`,
@@ -145,6 +146,11 @@ are multipliers, not overrides. Check that they are not set to something below `
 (the row shows a dot in front of its name, and the footer of the panel says so). The
 environment variable overrides `settings.json`, so unset it, or the row stays ineffective.
 Rows marked `(restart)` additionally need a relaunch.
+
+**The settings button shows the word "Settings" instead of a gear** — the `guifont` family
+has no `U+F423` glyph, which only Nerd Fonts (and similarly patched fonts) carry. The button
+widens to fit the word, so this is cosmetic; point `guifont` at a Nerd Font to get the icon
+back.
 
 For architecture, protocol coverage, and development notes, see
 [development.md](development.md).
