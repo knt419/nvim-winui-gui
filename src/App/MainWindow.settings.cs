@@ -105,6 +105,28 @@ public partial class MainWindow
     // the title's two parts apart — the font is monospace, so one width per character is enough.
     private double PanelTextW(string text) => text.Length * PanelFontSize * 0.55;
 
+    // Real advance for a run, measured with a layout object and cached per (text, font size). PanelTextW
+    // above is a 0.55 em guess — good enough to keep text inside the panel, NOT good enough to place one
+    // string right after another: it under-reports (these fonts advance ~0.6 em), so the caption hint
+    // would start before the title ended. Only used where two runs must not overlap.
+    private readonly Dictionary<string, double> _runW = new();
+    // Last caption metrics, for the self-test's log (the draw pass is where they are known).
+    private double _capTitleW, _capHintX;
+    private double MeasureRunW(ICanvasResourceCreator rc, string text)
+    {
+        string key = text + "@" + PanelFontSize.ToString("F2");
+        if (_runW.TryGetValue(key, out double cached)) return cached;
+        double w;
+        try
+        {
+            var lay = new CanvasTextLayout(rc, text, PanelTf(), float.MaxValue, float.MaxValue);
+            w = lay.LayoutBounds.Width;   // Rect in this Win2D build (no LayoutBoundsWidth)
+        }
+        catch { w = PanelTextW(text); }
+        _runW[key] = w;
+        return w;
+    }
+
     // Truncate to a pixel budget with an ellipsis (a long nvim path must not run under the value box).
     private string Fit(string text, double widthPx)
     {
@@ -119,6 +141,9 @@ public partial class MainWindow
     private const string GearGlyph = "\uF423";
     // Fallback when the family has no U+F423 (see GearGlyphAvailable).
     private const string SettingsLabel = "Settings";
+    // The panel's caption line. Kept apart from SettingsLabel: that one is the BUTTON's fallback word
+    // (a button reading "Nvim-winui-gui Settings" would be absurd), this one is the panel title.
+    private const string PanelTitle = "Nvim-winui-gui Settings";
     private double GearFontSize => Math.Clamp(Math.Min(CaptionStripHeight() * 0.55, PanelFontSize), 9.0, 26.0);
 
     // Centre-aligned: DrawText with a Rect honours both alignments, which is what centres the glyph.
@@ -459,9 +484,16 @@ public partial class MainWindow
         ds.FillRoundedRectangle(_settingsPanelRect, 6, 6, bg);
         ds.DrawRoundedRectangle(_settingsPanelRect, 6, 6, border, 1);
         ds.DrawLine((float)px, (float)(py + titleH - 1), (float)(px + pw), (float)(py + titleH - 1), border, 1);
-        ds.DrawText("Settings", (float)(px + 14), (float)(py + (titleH - lh) / 2), fg, tf);
-        ds.DrawText(Fit("settings.json   stored: " + Settings.FileValueCount, pw - 28 - PanelTextW("Settings") - 18),
-                    (float)(px + 14 + PanelTextW("Settings") + 18), (float)(py + (titleH - lh) / 2), dim, tf);
+        // Title, then the store hint right after it. The title is fitted first and the hint's offset
+        // and budget come from the width the title ACTUALLY took, so the two can never overlap — a very
+        // large guifont truncates the caption instead of running under the hint.
+        string title = Fit(PanelTitle, pw * 0.60);
+        double tw = MeasureRunW(ds, title);
+        ds.DrawText(title, (float)(px + 14), (float)(py + (titleH - lh) / 2), fg, tf);
+        _capTitleW = tw;
+        _capHintX = px + 14 + tw + 18;
+        ds.DrawText(Fit("settings.json   stored: " + Settings.FileValueCount, pw - 28 - tw - 18),
+                    (float)_capHintX, (float)(py + (titleH - lh) / 2), dim, tf);
 
         double y = py + titleH;
         double contentBottom = py + ph - footerH;
@@ -791,6 +823,11 @@ public partial class MainWindow
             SettingsTestCapture("settings-gear");
             bool consumed = SettingsPointerPressed(c);
             LogImportant($"SETTINGS-TEST gear-click consumed={consumed} open={_settingsOpen} hitRects={_settingsHit.Count}");
+
+            // The caption is two runs placed by a measured width, so capture the open panel and log the
+            // numbers the draw pass used — a wrong estimate shows up as the hint overlapping the title.
+            SettingsTestCapture("settings-title");
+            LogImportant($"SETTINGS-TEST caption title='{PanelTitle}' titleW={_capTitleW:F1} hintX={_capHintX:F1}");
 
             // Snapshot settings.json first: this test WRITES (that is the point), so it must put the file
             // back byte-identical whether or not the user had one.

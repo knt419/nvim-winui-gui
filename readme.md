@@ -75,8 +75,9 @@ own `linespace`, which is reported to the UI and reflected in the grid geometry.
 ## Settings window
 
 The gear button in the title bar — immediately left of the minimize button — opens the
-in-app settings panel. Everything in the variable table below can be changed there, with no
-environment variable needed. The panel writes
+in-app settings panel, titled **Nvim-winui-gui Settings** (with the store it writes and how
+many settings are in it on the same line). Everything in the variable table below can be
+changed there, with no environment variable needed. The panel writes
 `%LOCALAPPDATA%\NvimWinUIGui\settings.json` (readable, one `"NAME": "value"` per setting,
 hand-editable).
 

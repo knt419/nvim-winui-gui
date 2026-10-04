@@ -414,6 +414,14 @@ self-test) hold the feature; both are in the csproj's explicit `<Compile Include
   which is the safe direction). Measured in one run: family `Cascadia Code` → `U+F423 missing ->
   "Settings" label`, button 100×32 at x 506 (right edge still flush on `RightInset`), and after the
   live `:set guifont=JetBrainsMono NFM:h12` → `U+F423 present -> glyph`, button 46×32 at x 560.
+- **The caption is a measured pair, not an estimated one.** The title is `PanelTitle`
+  ("Nvim-winui-gui Settings" — deliberately not the button's fallback word `SettingsLabel`) and the
+  hint that follows it (`settings.json   stored: N`) is placed at `px + 14 + titleWidth + 18`. Use
+  `MeasureRunW()` (`CanvasTextLayout.LayoutBounds.Width`, cached per text+size) for that width:
+  `PanelTextW()`'s 0.55 em guess is fine for keeping text inside the panel but under-reports these
+  fonts (~0.68 em here), and it would have put the hint **68 px inside the title**. Verified by
+  capture: title ink 52→301 against the logged `titleW=251.6`, hint ink starting at 322 against the
+  logged `hintX=320.6` (20 px clear), the whole caption inside the panel's right edge.
 - **Floating-surface behaviour.** While the panel is open, `RenderCore` takes the FLOAT branch
   (`_settingsOpen` OR a float is present), so the parent is rasterized offscreen, blurred by
   `_floatBlurAmount` and used as the backdrop; the panel's fills (background, border, selected-row
