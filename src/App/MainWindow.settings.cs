@@ -161,6 +161,18 @@ public partial class MainWindow
             (byte)Math.Round(a.B + (b.B - a.B) * t));
     }
 
+    // Push a colour AWAY from `bg`, i.e. more contrast: toward white on a dark background, toward
+    // black on a light one. The panel needs this because the theme's Normal foreground is a mid grey
+    // in most colorschemes and reads dark once it sits on a translucent panel over a blurred parent.
+    // Deriving the direction from the background keeps a light colorscheme legible.
+    private Color Contrast(Color c, Color bg, double t)
+    {
+        int lum = (bg.R * 299 + bg.G * 587 + bg.B * 114) / 1000;
+        Color pole = lum < 128 ? Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)
+                               : Color.FromArgb(0xFF, 0x00, 0x00, 0x00);
+        return Mix(c, pole, t);
+    }
+
     // Display order: group header rows interleaved with the settings they contain.
     private static List<(bool Header, string? Key, string Text)> SettingsDisplayRows()
     {
@@ -304,7 +316,7 @@ public partial class MainWindow
         bool hot = _settingsHoverBtn || _settingsOpen;
         if (hot) ds.FillRoundedRectangle(r, 4, 4, Mix(EffBg(), _defFg, 0.18));
         // Dim while idle, full theme foreground when hovered or open.
-        ds.DrawText(GearGlyph, r, Mix(_defFg, EffBg(), hot ? 0.0 : 0.22), GearTf());
+        ds.DrawText(GearGlyph, r, Mix(_defFg, EffBg(), hot ? 0.0 : 0.14), GearTf());
     }
 
     private void FillArrow(CanvasDrawingSession ds, ICanvasResourceCreator rc, Rect r, int dir, Color c)
@@ -379,9 +391,12 @@ public partial class MainWindow
         // float follows: backgrounds fade, glyphs stay readable.
         Color bg = ScaleAlpha(Mix(EffBg(), _defFg, 0.08), _floatOpacity);
         Color border = ScaleAlpha(Mix(EffBg(), _defFg, 0.30), _floatOpacity);
-        Color fg = Mix(_defFg, EffBg(), 0.0);
-        Color dim = Mix(_defFg, EffBg(), 0.45);
-        Color hi = ScaleAlpha(Mix(EffBg(), _defFg, 0.16), _floatOpacity);
+        // Inks are lifted away from the background (see Contrast): panel text at 30% toward the
+        // contrast pole, secondary tone (group headers, hints) only a step down from it, and unselected
+        // rows barely dimmed at all — the selection already reads from the highlight bar.
+        Color fg = Contrast(_defFg, EffBg(), 0.30);
+        Color dim = Mix(fg, EffBg(), 0.30);
+        Color hi = ScaleAlpha(Mix(EffBg(), fg, 0.18), _floatOpacity);
         var tf = PanelTf();
         double lh = lhm;
 
@@ -438,7 +453,7 @@ public partial class MainWindow
             bool sel = keyIdx == _settingsSel;
             if (sel) { selKey = key; ds.FillRectangle((float)(px + 1), (float)y, (float)(pw - 2), (float)h, hi); }
             if (Settings.IsEnvOverride(key))
-                ds.FillRoundedRectangle(new Rect(px + 8, y + h / 2 - 3, 6, 6), 3, 3, Mix(_defFg, EffBg(), 0.15));
+                ds.FillRoundedRectangle(new Rect(px + 8, y + h / 2 - 3, 6, 6), 3, 3, Mix(fg, EffBg(), 0.20));
             double ty = y + (h - lh) / 2;
             bool steppable = def.Kind != SettingKind.Text;
             // The row is laid out from the RIGHT edge inwards, so the step arrows can never spill past
@@ -452,10 +467,10 @@ public partial class MainWindow
             double arrowL = boxX - 10 - triW;
             string label = def.Label + (def.Restart ? "   (restart)" : "");
             ds.DrawText(Fit(label, (steppable ? arrowL : boxX) - (px + 22) - 14), (float)(px + 22), (float)ty,
-                        sel ? fg : Mix(_defFg, EffBg(), 0.12), tf);
+                        sel ? fg : Mix(fg, EffBg(), 0.06), tf);
 
             string value = _settingsEditing && sel ? _settingsEditBuf + "_" : Settings.Display(key);
-            Color vc = sel ? fg : Mix(_defFg, EffBg(), 0.20);
+            Color vc = sel ? fg : Mix(fg, EffBg(), 0.10);
             if (_settingsEditing && sel) vc = Mix(_defFg, EffBg(), 0.0);
             ds.DrawText(Fit(value, boxW + 6), (float)boxX, (float)ty, vc, tf);
             if (steppable)
@@ -668,6 +683,10 @@ public partial class MainWindow
     // setting, which would be visible in a normal session. It restores whatever the file held before
     // stepping, and it writes one PNG of the panel (the app's own DIAG shot only fires on a render
     // counter, so it cannot be relied on to catch the panel).
+    // Collapse a JSON blob onto one log line.
+    private static string OneLine(string s) =>
+        s.Replace("\r\n", " ").Replace("\n", " ").Replace("\t", " ");
+
     // Await a call but never let a blocked nvim wedge the self-test: a hit-enter or swap-file prompt
     // makes nvim stop answering requests (measured here — the request is sent, the reader keeps
     // receiving redraws, and the response simply never arrives). Returns null on timeout/error.
@@ -723,6 +742,12 @@ public partial class MainWindow
             string original = System.IO.File.Exists(filePath) ? System.IO.File.ReadAllText(filePath) : "";
             string? opacityBefore = Settings.FileValue("NVIM_WINUI_OPACITY");
             string? blurBefore = Settings.FileValue("NVIM_WINUI_FLOAT_BLUR");
+            LogImportant($"SETTINGS-TEST snapshot exists={System.IO.File.Exists(filePath)} " +
+                         $"values={Settings.FileValueCount} text={OneLine(original)}");
+            // Everything below writes; the restore lives in `finally` so no early exit can leave the
+            // user's settings.json modified.
+            try
+            {
 
             // (1) Step a numeric row through the same code path the arrows use, then OBSERVE the Win32
             //     alpha rather than assuming it landed.
@@ -810,14 +835,18 @@ public partial class MainWindow
                 }
             }
 
-            // (5) Leave settings.json exactly as found (byte-identical, including "did not exist").
-            try
-            {
-                if (original.Length == 0) { if (System.IO.File.Exists(filePath)) System.IO.File.Delete(filePath); }
-                else System.IO.File.WriteAllText(filePath, original);
             }
-            catch (Exception ex) { LogCritical("SETTINGS-TEST restore failed: " + ex.Message); }
-            Settings.Load();
+            finally
+            {
+                // (5) Leave settings.json exactly as found (byte-identical, including "did not exist").
+                try
+                {
+                    if (original.Length == 0) { if (System.IO.File.Exists(filePath)) System.IO.File.Delete(filePath); }
+                    else System.IO.File.WriteAllText(filePath, original);
+                }
+                catch (Exception ex) { LogCritical("SETTINGS-TEST restore failed: " + ex.Message); }
+                Settings.Load();
+            }
             // Left OPEN on purpose so the panel is on screen for a screenshot run.
             LogImportant($"SETTINGS-TEST done (panel left open) file exists={System.IO.File.Exists(filePath)} values={Settings.FileValueCount}");
         }

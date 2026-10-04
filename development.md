@@ -412,6 +412,15 @@ self-test) hold the feature; both are in the csproj's explicit `<Compile Include
   ◀ / value box / ▶ laid out leftward — because the previous formula put the ▶ 4 px from the edge and
   its glyph 3 px OUTSIDE the panel. Verified: the rightmost ink inside the rows is now ≥10 px from
   the border.
+- **Inks are lifted away from the background.** The panel does not use the theme's `Normal` foreground
+  raw: `Contrast(_defFg, EffBg(), 0.30)` pushes it toward white on a dark background and toward black
+  on a light one, so a light colorscheme stays legible; the secondary tone (group headers, footer
+  hints) is only `Mix(fg, EffBg(), 0.30)` and unselected rows are barely dimmed (`0.06`) because the
+  highlight bar already marks the selection. Measured against the same panel background: a normal
+  row's ink 203 → 223 (contrast 9.45 → 11.50:1) and the headers/hints 135 → 172 (4.10 → 6.41:1).
+- **The self-test restores `settings.json` in a `finally`** — it writes by design, so an exception
+  anywhere in the run must not leave the user's file modified. Verified both ways: with a pre-seeded
+  file the md5 after the run is identical, and with no file the file is still absent.
 - **Verification switch** `NVIM_WINUI_SETTINGS_TEST=1` (env var or settings.json): 1.5 s after load
   the app drives the gear-click path in-process, steps rows, writes/parses `settings.json`, reads the
   layered alpha back with `GetLayeredWindowAttributes`, clicks a row's arrow zone, walks the keyboard
