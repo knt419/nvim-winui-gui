@@ -26,10 +26,11 @@ namespace NvimWinUIGui;
 public partial class MainWindow : Window
 {
     // Resolve nvim.exe at startup instead of a hardcoded absolute path.
-    // Order: NVIM_WINUI_NVIM env var (explicit override) -> PATH lookup -> default install dir.
+    // Order: the NVIM_WINUI_NVIM setting (its env var, else settings.json — see Settings.Resolve)
+    // -> PATH lookup -> default install dir.
     private static string ResolveNvimPath()
     {
-        var ov = Environment.GetEnvironmentVariable("NVIM_WINUI_NVIM");
+        var ov = Settings.Str("NVIM_WINUI_NVIM");
         if (!string.IsNullOrEmpty(ov) && File.Exists(ov)) return ov;
 
         var pathVar = Environment.GetEnvironmentVariable("PATH") ?? "";
@@ -78,12 +79,15 @@ public partial class MainWindow : Window
     // the normal foreground, i.e. today's look unchanged. Point it at a group that IS in the table
     // (NVIM_WINUI_IMEPREEDIT_HL=Pmenu|IncSearch|Cursor|Visual) to take the preedit's colour from the
     // colorscheme; measured here, IncSearch settled 19 -> 84 and resolved to fg 0xFFF6BBE7.
-    private static readonly string PreeditHlGroup = PreeditHlGroupFromEnv();
-
-    private static string PreeditHlGroupFromEnv()
+    // Read through the settings store on every use (cached: one dictionary lookup) so a change made
+    // in the settings panel reaches the next preedit without a restart.
+    private static string PreeditHlGroup
     {
-        string? g = Environment.GetEnvironmentVariable("NVIM_WINUI_IMEPREEDIT_HL");
-        return string.IsNullOrWhiteSpace(g) ? "Normal" : g.Trim();
+        get
+        {
+            var g = Settings.Str("NVIM_WINUI_IMEPREEDIT_HL");
+            return string.IsNullOrWhiteSpace(g) ? "Normal" : g.Trim();
+        }
     }
 
     // Effective opaque background: nvim may report a transparent default bg (A=0). Clearing the
@@ -170,6 +174,16 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         Title = "nvim-winui-gui";
+        // Settings first: %LOCALAPPDATA%\NvimWinUIGui\settings.json supplies every knob this app
+        // used to take only from an environment variable, and an env var still overrides it (see
+        // Settings.Resolve). Must load before anything reads a knob — the status-bar row height and
+        // the nvim path are both consumed further down this constructor.
+        Settings.Log = m => LogCritical("SETTINGS " + m);
+        Settings.EnsureLoaded();
+        // NvimCore reads its own flag; keep the RPC trace in step with the settings store.
+        NvimClient.DiagEnabled = Settings.Bool("NVIM_WINUI_DIAG");
+        // The settings panel is the only writer; its changes are applied here (UI thread).
+        Settings.Changed += ApplySettingChange;
         // Taskbar/Alt-Tab icon. The exe already embeds Assets\appicon.ico (<ApplicationIcon>), but set it
         // on the AppWindow as well so the running window shows it even for a fresh/uncached exe path.
         try
@@ -254,6 +268,9 @@ public partial class MainWindow : Window
         // programmatic-resize loops).
         _root.SizeChanged += (s, e) => { if (_diagEnabled) LogStartup($"ROOT-SIZECHG root={_root.ActualWidth:F0}x{_root.ActualHeight:F0}"); ScheduleRender(); FlushRender(); ScheduleNvimResize(); };
         _root.Loaded += OnLoadedAsync;
+        // Verification hook (OFF by default): drives the gear-click path in-process, because synthetic
+        // mouse input cannot be delivered from an agent session on this box.
+        _root.Loaded += (s, e) => SettingsSelfTest();
         // IME: the native EDIT target needs a realized top-level HWND, so attach it once loaded and
         // hand it keyboard focus on every activation. `_root.Focus` is deliberately NOT used: the
         // EDIT is a separate top-level window, and focus must belong to it or the IME stops composing.
@@ -276,6 +293,9 @@ public partial class MainWindow : Window
 
     private async void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        // The settings panel is modal: while it is open every key belongs to it and nothing is
+        // forwarded to nvim (not even Esc, which closes it).
+        if (SettingsKeyDown(e)) return;
         // The OTHER keyboard path. When the IME host holds focus this never fires (the host is a
         // real Win32 child that takes the focus); when the XAML island holds focus instead, this
         // is what handles every key. Tracing which one runs is the only way to tell "the IME host

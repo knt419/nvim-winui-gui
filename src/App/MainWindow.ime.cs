@@ -81,8 +81,7 @@ public partial class MainWindow
     // IME session, which a script cannot drive, so NVIM_WINUI_IMEPREEDIT_TEST=<text> draws that text as
     // the composition everywhere the preedit appears — enough to check the drawing (position, layer,
     // colours). Input handling keys off _imeComposing, never this, so typing is unaffected.
-    private static readonly string ImePreeditTestText =
-        Environment.GetEnvironmentVariable("NVIM_WINUI_IMEPREEDIT_TEST") ?? "";
+    private static string ImePreeditTestText => Settings.Str("NVIM_WINUI_IMEPREEDIT_TEST");
     private bool ImePreeditActive() => _imeComposing || ImePreeditTestText.Length > 0;
     private string ImePreeditDrawText() => ImePreeditTestText.Length > 0 ? ImePreeditTestText : _imePreedit;
     private string _imePreedit = "";            // current composition string (GCS_COMPSTR)
@@ -1135,6 +1134,11 @@ public partial class MainWindow
         if (string.IsNullOrEmpty(text)) return;
         try
         {
+            // The settings panel is modal for the keyboard too, and this is the single exit every key
+            // takes to nvim (the WM_CHAR text path AND the WM_KEYDOWN command path), so it is also the
+            // one place that can divert them. Handling the panel purely in the XAML OnKeyDown handler
+            // would leave it deaf whenever the IME target owns focus — which is the normal state here.
+            if (_settingsOpen) { SettingsConsumeNvimKey(text); return; }
             var client = _client;
             if (client == null) return;
             // Every nvim_input leaves through here, so this is the only place that can prove a key

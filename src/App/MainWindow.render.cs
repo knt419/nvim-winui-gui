@@ -46,15 +46,12 @@ public partial class MainWindow
     private double _rowPitch = 18;
 
     // Vertical pitch reduction (px) applied to the cell height so consecutive text rows pack tightly —
-    // the XAML line box (~1.25em) leaves a visible horizontal gap between glyph rows. Read from
-    // NVIM_WINUI_LINESPACE (default 0). 0 = keep the box height; a positive value trims that many px
-    // from each row's pitch for a tighter, gap-free terminal look.
-    private readonly double _linePitchReduce = ParseLinePitch();
-    private static double ParseLinePitch()
-    {
-        var v = Environment.GetEnvironmentVariable("NVIM_WINUI_LINESPACE");
-        return double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d) && d >= 0 ? d : 0.0;
-    }
+    // the XAML line box (~1.25em) leaves a visible horizontal gap between glyph rows. Read through the
+    // settings store (NVIM_WINUI_LINESPACE, default 0): 0 = keep the box height, a positive value trims
+    // that many px from each row's pitch for a tighter, gap-free terminal look. NOT readonly — the
+    // settings panel can change it, and the panel's change handler re-measures the cell from it.
+    private double _linePitchReduce = ParseLinePitch();
+    private static double ParseLinePitch() => Settings.Num("NVIM_WINUI_LINESPACE", 0.0, 0.0, 100.0);
 
     // Measure the reference cell from the narrow guifont using an offscreen TextBlock — the SAME
     // DirectWrite layout engine that renders the grid, so the numbers match what's actually drawn
@@ -130,9 +127,10 @@ public partial class MainWindow
         catch { return _cellW; }
     }
     // The application status line under the grid (see MainWindow.cs visual tree). Hidden
-    // by default; set NVIM_WINUI_STATUSBAR=1 to show it. Must match the XAML row height
-    // so window<->grid conversions are exact.
-    private static bool StatusBarVisible => Environment.GetEnvironmentVariable("NVIM_WINUI_STATUSBAR") == "1";
+    // by default; turn on "Show app status bar" in the settings panel (or NVIM_WINUI_STATUSBAR=1).
+    // Must match the XAML row height so window<->grid conversions are exact, hence RESTART-ONLY: the
+    // row is created once in the constructor and its height is baked into the size math.
+    private static bool StatusBarVisible => Settings.Bool("NVIM_WINUI_STATUSBAR");
     private static double StatusTextHeight => StatusBarVisible ? 25.0 : 0.0;
     // Sanity caps for drag-resize (a maximized ultrawide would otherwise request hundreds of cols).
     private const int MaxGridCols = 1000;
@@ -280,8 +278,9 @@ private void UpdateWindowSize(int cols, int rows)
 //
 // The two differ only by the sub-cell remainder: cols is floor((W-chrome)/cellWidth), so the
 // grid is at most one cell narrower than the window and that leftover shows as background at the
-// right and bottom edges.
-private static bool SnapToCells => Environment.GetEnvironmentVariable("NVIM_WINUI_SNAP") == "1";
+// right and bottom edges. Read through the settings store (panel row "Snap window to cells"), so a
+// change there applies to the next resize.
+private static bool SnapToCells => Settings.Bool("NVIM_WINUI_SNAP");
 
 // Measure the non-client frame once via Win32 (synchronous + timing-independent, unlike reading a
 // XAML ActualWidth that lags one layout pass). border = outer window rect - client rect, in DIP.
@@ -560,7 +559,15 @@ private void OnGlyphCanvasDraw(Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl s
 {
     // The smooth-scroll overlay is a SECOND pass over the frame just drawn (it paints the previous
     // frame, translated and clipped) — see DrawScrollAnimOverlay.
-    try { RenderCore(args.DrawingSession, sender); DrawScrollAnimOverlay(args.DrawingSession, sender); }
+    try
+    {
+        RenderCore(args.DrawingSession, sender);
+        DrawScrollAnimOverlay(args.DrawingSession, sender);
+        // Top-most layer: the settings gear in the caption strip and, when open, the settings panel.
+        // Drawn outside RenderCore because it is window chrome rather than grid content, and it must
+        // sit above the scroll overlay.
+        DrawSettingsOverlay(args.DrawingSession, sender);
+    }
     catch (Exception ex) { LogCritical("DRAW EXCEPTION: " + ex.GetType().Name + ": " + ex.Message); }
 }
 
@@ -648,14 +655,10 @@ private void DrawScrollAnimOverlay(Microsoft.Graphics.Canvas.CanvasDrawingSessio
 }
 
 // When a floating window (:help, completion, terminal-in-float...) is up, the underlying parent
-// layer gets a Gaussian blur so the float reads as focused foreground (configurable via
-// NVIM_WINUI_FLOAT_BLUR, DIP radius). 0 disables.
+// layer gets a Gaussian blur so the float reads as focused foreground (settings row "Float backdrop
+// blur", DIP radius, default 6). 0 disables. NOT readonly: the panel rewrites the field on change.
 private double _floatBlurAmount = ParseFloatBlur();
-private static double ParseFloatBlur()
-{
-    var v = Environment.GetEnvironmentVariable("NVIM_WINUI_FLOAT_BLUR");
-    return double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d) && d >= 0 ? d : 6.0;
-}
+private static double ParseFloatBlur() => Settings.Num("NVIM_WINUI_FLOAT_BLUR", 6.0, 0.0, 200.0);
 
 // --- Opacity ---------------------------------------------------------------------------------
 // Two independent multipliers, both 0..1 (1 = fully opaque, 0 = invisible):
@@ -673,23 +676,15 @@ private static double ParseFloatBlur()
 // Both MULTIPLY whatever nvim already asked for: winblend (per float, 0..100) is applied on top
 // of the float multiplier, and the parent multiplier scales the final composed window. Neither
 // setting discards nvim's intent, it only scales it.
+// Both are re-read from the settings store by ApplySettingChange (the panel writes them), so they are
+// plain fields rather than parse-once initializers.
 private double _parentOpacity = ParseOpacity("NVIM_WINUI_OPACITY", 1.0);
 private double _floatOpacity = ParseOpacity("NVIM_WINUI_FLOAT_OPACITY", 0.9);
 
-// Clamp to 0..1; fall back to `def` when unset or unparseable.
-private static double ParseOpacity(string name, double def)
-{
-    var v = Environment.GetEnvironmentVariable(name);
-    if (string.IsNullOrWhiteSpace(v)) return def;
-    // Accept a bare percentage too (e.g. "90" == 0.9) — less surprising than silently
-    // clamping it to 1.0, which would look like the setting was ignored.
-    if (double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d))
-    {
-        if (d > 1.0 && d <= 100.0) d /= 100.0;   // "90" -> 0.9
-        return Math.Clamp(d, 0.0, 1.0);
-    }
-    return def;
-}
+// Clamp to 0..1; fall back to `def` when unset or unparseable. Settings.Num already accepts a bare
+// percentage ("90" == 0.9) — less surprising than silently clamping it to 1.0, which would look
+// like the setting was ignored.
+private static double ParseOpacity(string key, double def) => Settings.Num(key, def, 0.0, 1.0);
 
 // Push the parent opacity to the compositor. Idempotent: only touches the window when the value
 // changed, because a COM round-trip on every render is pure overhead.
@@ -697,7 +692,14 @@ private void ApplyParentOpacity()
 {
     try
     {
-        if (Math.Abs(_parentOpacity - 1.0) < 1e-6) return;   // 1.0 == default: nothing to do
+        // 1.0 == fully opaque. That is the default and costs nothing — but it is also reachable from
+        // the settings panel walking the value back up, so a previously applied alpha must be undone
+        // here. _lastParentAlpha >= 0 means this window was actually layered.
+        if (Math.Abs(_parentOpacity - 1.0) < 1e-6)
+        {
+            if (_lastParentAlpha >= 0) ResetParentOpacity();
+            return;
+        }
         IntPtr hwnd = GetTopLevelHwnd();
         if (hwnd == IntPtr.Zero) return;
         if (_lastParentAlpha == _parentOpacity && _lastParentHwnd == hwnd) return;
@@ -1225,7 +1227,7 @@ private void ResetParentOpacity()
     // DIAG: full-canvas snapshot of the LIVE composite (backgrounds + text) so the actual rendered
     // pixels can be inspected without a screen capture. With NVIM_WINUI_SHOT=1 it saves every 30th
     // render (so it lands on whatever is on screen at that moment); otherwise one-shot.
-    if (outer && _diagEnabled && (!_fullShotLogged0 || (Environment.GetEnvironmentVariable("NVIM_WINUI_SHOT") == "1" && rcc % 30 == 0)))
+    if (outer && _diagEnabled && (!_fullShotLogged0 || (Settings.Bool("NVIM_WINUI_SHOT") && rcc % 30 == 0)))
     {
         if (_fullShotLogged0) { /* keep shooting while NVIM_WINUI_SHOT=1 */ } else _fullShotLogged0 = true;
         try

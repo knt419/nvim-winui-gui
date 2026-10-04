@@ -45,7 +45,7 @@ public partial class MainWindow
             // lives, prompt/echo/output render, input executes). Our RPC stays on the TCP
             // --listen socket; the embed stdio channel simply idles (stdin pipe held open,
             // never written; stdout never read because nvim only writes when spoken to).
-            string extraArgs = Environment.GetEnvironmentVariable("NVIM_WINUI_ARGS") ?? "";
+            string extraArgs = Settings.Str("NVIM_WINUI_ARGS");
             var psi = new ProcessStartInfo(nvimPath, $"--embed --listen 127.0.0.1:{port} {extraArgs}")
             {
                 UseShellExecute = false,
@@ -131,7 +131,7 @@ public partial class MainWindow
             // Self-test (DIAGNOSTICS ONLY): types text into nvim and creates/switches a test
             // buffer, so it pollutes the user's real session. OFF by default — enable with
             // NVIM_WINUI_SELFTEST=1 when verifying the RPC round-trip end to end.
-            if (Environment.GetEnvironmentVariable("NVIM_WINUI_SELFTEST") == "1")
+            if (Settings.Bool("NVIM_WINUI_SELFTEST"))
             {
                 // CRITICAL: avoid Ex-mode commands that can error (:w on an unnamed buffer = E32) —
                 // such errors make nvim block at the hit-enter prompt and STOP processing RPC, so every
@@ -375,11 +375,13 @@ public partial class MainWindow
         catch (Exception ex) { LogCritical("RefreshGuifont failed: " + ex); }
     }
 
-    // Diagnostic logging (file-based). OFF by default — set NVIM_WINUI_DIAG=1 to enable. The hot
-    // path logs every redraw event / resize, so leaving it on spams startup.log and adds file IO
-    // per frame. LogCritical() is the always-on exception: rare fatal errors are recorded even
-    // when diagnostics are off, so a crash stays diagnosable without the env var.
-    private static readonly bool _diagEnabled = Environment.GetEnvironmentVariable("NVIM_WINUI_DIAG") == "1";
+    // Diagnostic logging (file-based). OFF by default — set NVIM_WINUI_DIAG=1 or turn on the
+    // settings panel's "Diagnostic log" row. The hot path logs every redraw event / resize, so
+    // leaving it on spams startup.log and adds file IO per frame. LogCritical() is the always-on
+    // exception: rare fatal errors are recorded even when diagnostics are off, so a crash stays
+    // diagnosable without the flag. Read through Settings on every call so the panel's toggle takes
+    // effect immediately (LogStartup is guarded by this on every line it logs).
+    private static bool _diagEnabled => Settings.Bool("NVIM_WINUI_DIAG");
 
     private static void LogStartup(string s)
     {

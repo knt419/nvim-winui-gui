@@ -36,11 +36,19 @@ public sealed class NvimClient : IDisposable
     // Diagnostic trace (file-based): every frame Dispatch sees + every CallAsync send.
     // OFF by default — set NVIM_WINUI_DIAG=1 to enable the per-frame RPC trace (it writes a line
     // per socket frame, so leaving it on spams client_trace.log and adds IO on the hot path).
-    private static readonly bool _diagEnabled = Environment.GetEnvironmentVariable("NVIM_WINUI_DIAG") == "1";
+    // Seeded from the environment variable so this library still works standalone; MainWindow
+    // overrides it from settings.json once that has loaded (NvimCore has no view of the app's
+    // settings store), and the settings panel's "Diagnostic log" row flips it live.
+    public static bool DiagEnabled { get; set; } =
+        Environment.GetEnvironmentVariable("NVIM_WINUI_DIAG") == "1";
+
+    // AppendAllText is open-write-close per call; concurrent writers (IO + UI thread) interleave and
+    // lose lines without this.
     private static readonly object _tlogLock = new();
+
     private static void TLog(string s)
     {
-        if (!_diagEnabled) return; // off by default (see _diagEnabled above)
+        if (!DiagEnabled) return; // off by default (see DiagEnabled above)
         try
         {
             var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvimWinUIGui");

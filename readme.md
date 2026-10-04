@@ -72,7 +72,30 @@ NVIM_WINUI_LINESPACE=2   # trim 2px from each row
 `0` (the default) keeps the font's natural box height. This is separate from nvim's
 own `linespace`, which is reported to the UI and reflected in the grid geometry.
 
+## Settings window
+
+The gear button in the title bar — immediately left of the minimize button — opens the
+in-app settings panel. Everything in the variable table below can be changed there, with no
+environment variable needed. The panel writes
+`%LOCALAPPDATA%\NvimWinUIGui\settings.json` (readable, one `"NAME": "value"` per setting,
+hand-editable).
+
+| Action | Key |
+|---|---|
+| Open / close | the gear button, `Esc` to close |
+| Move the selection | `Up` / `Down`, or the mouse wheel |
+| Change a value | `Left` / `Right`, `Enter` / `Space`, or click the arrows beside the value |
+| Edit a text row (path, args) | `Enter`, type, `Enter` to save, `Esc` to cancel |
+| Reset every stored setting | `Ctrl+R` |
+
+Changes apply immediately, except rows marked `(restart)` — those are read once at startup.
+A dot in front of a row's name means an environment variable is set for it, and that
+variable **wins over the file**: the panel still stores your value, but it cannot take
+effect until the variable is gone.
+
 ## Environment variables
+
+Every variable below is also editable from the settings panel above.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -108,6 +131,11 @@ hand; from then on changes are live.
 
 **The window is see-through** — `NVIM_WINUI_OPACITY` / `NVIM_WINUI_FLOAT_OPACITY`
 are multipliers, not overrides. Check that they are not set to something below `1.0`.
+
+**A setting changed in the panel does nothing** — an environment variable is set for it
+(the row shows a dot in front of its name, and the footer of the panel says so). The
+environment variable overrides `settings.json`, so unset it, or the row stays ineffective.
+Rows marked `(restart)` additionally need a relaunch.
 
 For architecture, protocol coverage, and development notes, see
 [development.md](development.md).

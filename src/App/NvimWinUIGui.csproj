@@ -60,6 +60,9 @@
     <Compile Include="MainWindow.render.cs" />
     <Compile Include="MainWindow.multigrid.cs" />
     <Compile Include="MainWindow.mouse.cs" />
+    <!-- Settings store + the settings panel (gear button in the caption strip). -->
+    <Compile Include="Settings.cs" />
+    <Compile Include="MainWindow.settings.cs" />
     <!-- IME: native Win32 EDIT target that receives the OS IME's committed text. -->
     <Compile Include="MainWindow.ime.cs" />
     <!-- IME: Windows-Terminal-shaped TSF composition host. A transitory ITfContext on a PLAIN

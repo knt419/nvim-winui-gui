@@ -347,6 +347,54 @@ to drive.
   `--api-info`, and sending it as a request returns `error=null` and attaches
   identically.
 
+## Settings panel
+
+`Settings.cs` (store + row definitions) and `MainWindow.settings.cs` (gear button, panel, input,
+self-test) hold the feature; both are in the csproj's explicit `<Compile Include>` list.
+
+- **Why it is hand-drawn.** This build has no PRI/XBF resources, so a templated XAML control cannot
+  be constructed (a `TextBox` fails on template lookup, `0x80004005`). The panel is therefore painted
+  by the same Win2D pass as the grid and hit-tested against rectangles the draw pass publishes — the
+  same approach as the cursor, the IME preedit and the scroll overlay.
+  `DrawSettingsOverlay` runs from the Draw handler after the scroll overlay; `_settingsBtnRect`,
+  `_settingsPanelRect` and `_settingsHit` are the only state shared between painting and input, and
+  both run on the UI thread. The list scrolls (a default-sized window cannot show all 15 rows), with
+  the selection kept visible and up/down markers when rows are hidden; `Draw*` vs `Fill*`, snapped
+  device pixels and the brush-cache rules are the same ones the grid renderer follows.
+- **Gear placement.** Content extends into the title bar, so the caption buttons sit in the client
+  area's top-right and `AppWindow.TitleBar.RightInset` is exactly their width (measured: 138 DIP at
+  100%); the button takes the strip immediately to their left, so its right edge abuts minimize.
+  The canvas is centred in the star row and can be *wider* than the content area (the grid may exceed
+  the window before nvim's grid sync settles), so the client→canvas offset is computed **with its
+  sign** rather than clamped at zero — clamping put the button half the overflow away from the
+  caption buttons.
+- **Store and precedence.** `settings.json` is a flat string→string map. The effective value is
+  env var → file → the definition's default (`Settings.Resolve`), cached (the render path reads it),
+  with the source surfaced to the panel as a per-row dot. Values are stored even while an env var
+  shadows them, so the file is correct for the next launch; writes are atomic (temp file +
+  `File.Move`). `Settings.FileValue` exists so a caller can restore the exact prior file state
+  instead of writing the effective value.
+- **One key implementation, two key paths.** This app has two keyboard routes: XAML `OnKeyDown`
+  (when the island holds focus) and the IME host's `ForwardToNvim` (when the IME target holds focus —
+  the normal state while typing). Both funnel into `SettingsConsumeNvimKey` on the same nvim-notation
+  strings the nvim path already speaks (`"<Down>"`, `"<C-r>"`, `"a"`, `" "`), because handling the
+  panel only in `OnKeyDown` leaves it deaf in exactly the state the app is usually in. The diversion
+  lives in `ForwardToNvim` — the single exit every key takes to nvim — so one line covers both the
+  WM_CHAR text path and the WM_KEYDOWN command path. Text rows are edited inline on that same
+  channel, so an IME composition can be committed into a field.
+- **Live apply** goes through `Settings.Changed` → `ApplySettingChange`, which re-reads the knobs the
+  render path caches in fields (`_parentOpacity`, `_floatOpacity`, `_floatBlurAmount`,
+  `_linePitchReduce`) and repaints. Opacity returning to 1.0 now *undoes* the layering: the previous
+  early-return left the window translucent once the value walked back up. `NVIM_WINUI_STATUSBAR` and
+  the nvim path/args stay restart-only (the row says `(restart)`), and `NvimClient.DiagEnabled` was
+  made settable so the log toggle also reaches the RPC trace in NvimCore.
+- **Verification switch** `NVIM_WINUI_SETTINGS_TEST=1` (env var or settings.json): 1.5 s after load
+  the app drives the gear-click path in-process, steps rows, writes/parses `settings.json`, reads the
+  layered alpha back with `GetLayeredWindowAttributes`, clicks a row's arrow zone, walks the keyboard
+  path, saves `settings-nogear.png` / `settings-gear.png` / `settings-shot.png`, and restores
+  `settings.json` byte-identical. It exists because synthetic MOUSE input cannot be delivered from an
+  agent session on this box.
+
 ## Window sizing
 
 The window and the grid convert through two formulas that have to agree, or the window creeps by a
@@ -470,6 +518,14 @@ reference `rpc-test`, so building the solution builds it too. Their `bin/`, `obj
   leaves insert mode once, and IME commits arrive exactly once each — in runs, interleaved
   with plain keys, and across repeated compose-then-Esc cycles. nvim itself emits zero
   `bell`/`visual_bell` for any of them, so the sound was never Neovim's.
+- Settings panel verified on 2026-10-04 with `NVIM_WINUI_SETTINGS_TEST=1` (all of it from the app's
+  own logs plus an offscreen capture): the gear's hit test consumes the click at the computed rect
+  and opens the panel; a pixel diff of the overlay/no-overlay capture pair puts the gear's ink in a
+  28×28 box centred at (610,16) canvas — the computed button rect, whose right edge lands exactly on
+  the 138 DIP `RightInset`; `Window opacity` 1.00 → 0.85 applied and read back as alpha 217, and back
+  to no layered style at 1.00; `settings.json` was written, re-parsed and (in the test) restored
+  byte-identical; a click on a row's arrow zone and the `<Down>`/`<Right>` key notation both changed
+  the selected row. 0 errors, warning count unchanged from the pre-change baseline.
 - IME verified in the app on 2026-10-03 on the TSF path: `nihongo` composes with the preedit drawn
   inline at the cursor and commits to nvim as `にほんご`; the IME is attached only in
   insert/replace/cmdline modes and detached — live composition terminated — everywhere else; typing

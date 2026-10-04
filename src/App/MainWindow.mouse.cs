@@ -21,6 +21,7 @@ public partial class MainWindow
     // serialize on NvimClient's write semaphore, so ordering vs nvim_input is preserved.
 
     private double _mouseX = -1, _mouseY = -1; // last known pointer pos in canvas coords (wheel anchor)
+    private bool _settingsSwallowRelease;      // a press the settings chrome ate must not emit a release
 
     private async void OnGlyphCanvasPointerPressed(object sender, PointerRoutedEventArgs e)
     {
@@ -31,6 +32,9 @@ public partial class MainWindow
         // instead of the IME target.
         ImeFocusTarget("grid click");
         var pt = e.GetCurrentPoint(GlyphCanvas);
+        // The settings gear (and, while it is open, the whole panel) take the click first: the panel is
+        // modal, so nothing may be forwarded to nvim while it is up.
+        if (SettingsPointerPressed(pt.Position)) { _settingsSwallowRelease = true; return; }
         string? button = MapMouseButton(pt.Properties);
         if (button == null) return;
         _mouseX = pt.Position.X; _mouseY = pt.Position.Y;
@@ -41,6 +45,9 @@ public partial class MainWindow
 
     private async void OnGlyphCanvasPointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        // A press the settings chrome consumed must not be answered with a release nvim never saw.
+        if (_settingsSwallowRelease) { _settingsSwallowRelease = false; return; }
+        if (_settingsOpen) return;
         var pt = e.GetCurrentPoint(GlyphCanvas);
         string? button = MapMouseButton(pt.Properties);
         if (button == null) return;
@@ -53,6 +60,10 @@ public partial class MainWindow
     {
         var pt = e.GetCurrentPoint(GlyphCanvas);
         _mouseX = pt.Position.X; _mouseY = pt.Position.Y;
+        // Hover highlighting for the gear button (and the panel rows while it is open). The panel is
+        // modal: while it is up no pointer movement is forwarded, so a drag cannot scroll nvim behind it.
+        SettingsPointerMoved(pt.Position);
+        if (_settingsOpen) return;
         // Only forward movement while a button is held (drag). Plain hover has no nvim equivalent.
         if (!pt.Properties.IsLeftButtonPressed && !pt.Properties.IsRightButtonPressed
             && !pt.Properties.IsMiddleButtonPressed) return;
@@ -64,6 +75,7 @@ public partial class MainWindow
     private async void OnGlyphCanvasPointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
         // WinUI 3 has no WheelChanged/WheelEventArgs — wheel input arrives as a pointer event.
+        if (_settingsOpen) { SettingsWheel(e.GetCurrentPoint(GlyphCanvas).Properties.MouseWheelDelta); return; }   // the panel is modal
         var pt = e.GetCurrentPoint(GlyphCanvas);
         _mouseX = pt.Position.X; _mouseY = pt.Position.Y;
         string dir = pt.Properties.MouseWheelDelta > 0 ? "up" : (pt.Properties.MouseWheelDelta < 0 ? "down" : null);

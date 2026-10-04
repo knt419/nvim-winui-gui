@@ -425,9 +425,8 @@ public partial class MainWindow
     private bool _scrollAnimLogged;        // DIAG: one overlay line per animation, not per frame
 
     // NVIM_WINUI_SCROLL_MS: animation length; 0 turns smooth scrolling off (every scroll instant).
-    private static readonly double ScrollAnimMs =
-        double.TryParse(Environment.GetEnvironmentVariable("NVIM_WINUI_SCROLL_MS"), out var scrollMs) && scrollMs >= 0
-            ? scrollMs : 120;
+    // Read through Settings on each use so the panel's change applies to the next animation.
+    private static double ScrollAnimMs => Settings.Num("NVIM_WINUI_SCROLL_MS", 120.0, 0.0, 60000.0);
     // nvim calls the delta approximate for scrolls longer than a screen, and animating 30 rows reads as
     // a slide rather than as motion. Animate the small ones (j/k/Ctrl-E = 1, wheel = 3); jump instantly
     // beyond that.
@@ -437,9 +436,16 @@ public partial class MainWindow
     // reproducible — the app's own shot only fires on a render counter, so an unfrozen animation is
     // caught at whatever phase the counter happened to land on (and the PNG write is asynchronous, which
     // made the frames hard to trust). -1 (the default) leaves the animation alone.
-    private static readonly double ScrollAnimFreeze =
-        double.TryParse(Environment.GetEnvironmentVariable("NVIM_WINUI_SCROLL_FREEZE"), out var freeze)
-            && freeze >= 0 ? freeze : -1;
+    // Empty (the default) leaves the animation alone — an unparseable or negative value reads as -1.
+    private static double ScrollAnimFreeze
+    {
+        get
+        {
+            var v = Settings.Str("NVIM_WINUI_SCROLL_FREEZE");
+            return double.TryParse(v, System.Globalization.NumberStyles.Float,
+                                   System.Globalization.CultureInfo.InvariantCulture, out var f) && f >= 0 ? f : -1;
+        }
+    }
 
     // The rows/cols the smooth-scroll overlay may paint: the window grid's rect minus the margins nvim
     // reported as NOT part of the viewport ('winbar' rows, floating-window borders). Shared by the
